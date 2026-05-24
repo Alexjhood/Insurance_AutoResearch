@@ -1,0 +1,135 @@
+"""Configuration loading for local runs."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+import tomllib
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "default.toml"
+
+
+@dataclass(frozen=True)
+class ProjectConfig:
+    """Resolved project configuration with paths rooted at the repository."""
+
+    root: Path
+    raw_data_dir: Path
+    processed_dir: Path
+    metadata_dir: Path
+    splits_dir: Path
+    artifacts_dir: Path
+    registry_path: Path
+    random_seed: int
+    id_column: str
+    agent_dataset_name: str
+    claim_capping_enabled: bool
+    claim_cap_threshold: float
+    split_ratios: dict[str, float]
+    ordinary_train_split: str
+    ordinary_eval_splits: tuple[str, ...]
+    repeated_resamples: int
+    bootstrap_iterations: int
+    resample_fraction: float
+    resampling_seed: int
+    minimum_mean_lift: float
+    minimum_win_rate: float
+    bootstrap_lower_bound: float
+    confidence_level: float
+    llm_provider: str
+    llm_model: str
+    llm_temperature: float
+    llm_proposal_file: Path
+    handoff_base_dir: Path
+    handoff_context_dir: Path
+    handoff_proposal_inbox_dir: Path
+    handoff_proposal_processed_dir: Path
+    handoff_results_dir: Path
+    handoff_handoffs_dir: Path
+    deduplication_policy: str
+    deduplication_lookback: int
+    search_space: dict[str, object]
+
+
+def _resolve(root: Path, value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else root / path
+
+
+def load_config(config_path: str | Path | None = None) -> ProjectConfig:
+    """Load TOML config and resolve all project paths."""
+
+    path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
+    with path.open("rb") as f:
+        raw = tomllib.load(f)
+
+    paths = raw["paths"]
+    data = raw["data"]
+    preprocessing = raw["preprocessing"]
+    splits = raw["splits"]
+    evaluation = raw["evaluation"]
+    resampling = raw["resampling"]
+    promotion = raw["promotion"]
+    llm = raw["llm"]
+    handoff = raw["handoff"]
+    deduplication = raw["deduplication"]
+    search_space = raw["search_space"]
+
+    return ProjectConfig(
+        root=PROJECT_ROOT,
+        raw_data_dir=_resolve(PROJECT_ROOT, paths["raw_data_dir"]),
+        processed_dir=_resolve(PROJECT_ROOT, paths["processed_dir"]),
+        metadata_dir=_resolve(PROJECT_ROOT, paths["metadata_dir"]),
+        splits_dir=_resolve(PROJECT_ROOT, paths["splits_dir"]),
+        artifacts_dir=_resolve(PROJECT_ROOT, paths["artifacts_dir"]),
+        registry_path=_resolve(PROJECT_ROOT, paths["registry_path"]),
+        random_seed=int(data["random_seed"]),
+        id_column=str(data["id_column"]),
+        agent_dataset_name=str(data["agent_dataset_name"]),
+        claim_capping_enabled=bool(preprocessing["claim_capping_enabled"]),
+        claim_cap_threshold=float(preprocessing["claim_cap_threshold"]),
+        split_ratios={key: float(value) for key, value in splits.items()},
+        ordinary_train_split=str(evaluation["ordinary_train_split"]),
+        ordinary_eval_splits=tuple(str(value) for value in evaluation["ordinary_eval_splits"]),
+        repeated_resamples=int(resampling["repeated_resamples"]),
+        bootstrap_iterations=int(resampling["bootstrap_iterations"]),
+        resample_fraction=float(resampling["resample_fraction"]),
+        resampling_seed=int(resampling["random_seed"]),
+        minimum_mean_lift=float(promotion["minimum_mean_lift"]),
+        minimum_win_rate=float(promotion["minimum_win_rate"]),
+        bootstrap_lower_bound=float(promotion["bootstrap_lower_bound"]),
+        confidence_level=float(promotion["confidence_level"]),
+        llm_provider=str(llm["provider"]),
+        llm_model=str(llm["model"]),
+        llm_temperature=float(llm["temperature"]),
+        llm_proposal_file=_resolve(PROJECT_ROOT, llm["proposal_file"]),
+        handoff_base_dir=_resolve(PROJECT_ROOT, handoff["base_dir"]),
+        handoff_context_dir=_resolve(PROJECT_ROOT, handoff["context_dir"]),
+        handoff_proposal_inbox_dir=_resolve(PROJECT_ROOT, handoff["proposal_inbox_dir"]),
+        handoff_proposal_processed_dir=_resolve(PROJECT_ROOT, handoff["proposal_processed_dir"]),
+        handoff_results_dir=_resolve(PROJECT_ROOT, handoff["results_dir"]),
+        handoff_handoffs_dir=_resolve(PROJECT_ROOT, handoff["handoffs_dir"]),
+        deduplication_policy=str(deduplication["policy"]),
+        deduplication_lookback=int(deduplication["lookback"]),
+        search_space=dict(search_space),
+    )
+
+
+def ensure_project_dirs(config: ProjectConfig) -> None:
+    """Create configured output directories if they are missing."""
+
+    for path in (
+        config.processed_dir,
+        config.metadata_dir,
+        config.splits_dir,
+        config.artifacts_dir,
+        config.handoff_base_dir,
+        config.handoff_context_dir,
+        config.handoff_proposal_inbox_dir,
+        config.handoff_proposal_processed_dir,
+        config.handoff_results_dir,
+        config.handoff_handoffs_dir,
+    ):
+        path.mkdir(parents=True, exist_ok=True)

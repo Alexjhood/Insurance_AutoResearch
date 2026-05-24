@@ -1,0 +1,11 @@
+experiment_name = "frequency_severity_baseline"
+model_family = "regularized_linear"
+target_strategy = "frequency_severity"
+parent_experiment_id = ""
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]
+alpha = 1.0

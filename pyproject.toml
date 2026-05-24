@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "insurance-autoresearch"
+version = "0.1.0"
+description = "Local auto-research backbone for insurance burning-cost modelling."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "duckdb>=1.0",
+  "matplotlib>=3.8",
+  "pandas>=2.2",
+  "pyarrow>=15.0",
+  "scikit-learn>=1.4",
+  "streamlit>=1.35",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+autoresearch = "autoresearch.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/autoresearch"]

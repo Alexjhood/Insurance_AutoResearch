@@ -1,0 +1,11 @@
+experiment_name = "direct_pure_premium_baseline"
+model_family = "regularized_linear"
+target_strategy = "direct_pure_premium"
+parent_experiment_id = ""
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]
+alpha = 1.0

@@ -1,0 +1,63 @@
+[paths]
+raw_data_dir = "data/raw"
+processed_dir = "data/processed"
+metadata_dir = "data/metadata"
+splits_dir = "data/splits"
+artifacts_dir = "artifacts"
+registry_path = "artifacts/experiment_registry.sqlite"
+
+[data]
+random_seed = 20260524
+id_column = "IDpol"
+agent_dataset_name = "agent_dataset"
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[splits]
+train = 0.64
+search_validation = 0.16
+milestone_holdout = 0.20
+
+[evaluation]
+ordinary_train_split = "train"
+ordinary_eval_splits = ["search_validation"]
+
+[resampling]
+repeated_resamples = 30
+bootstrap_iterations = 1000
+resample_fraction = 1.0
+random_seed = 20260524
+
+[promotion]
+minimum_mean_lift = 0.0
+minimum_win_rate = 0.55
+bootstrap_lower_bound = 0.0
+confidence_level = 0.90
+
+[llm]
+provider = "file_handoff"
+model = "external-codex-or-claude-code"
+temperature = 0.2
+proposal_file = "artifacts/auto_research/proposals/inbox/manual_proposals.jsonl"
+
+[handoff]
+base_dir = "artifacts/auto_research"
+context_dir = "artifacts/auto_research/context"
+proposal_inbox_dir = "artifacts/auto_research/proposals/inbox"
+proposal_processed_dir = "artifacts/auto_research/proposals/processed"
+results_dir = "artifacts/auto_research/results"
+handoffs_dir = "artifacts/auto_research/handoffs"
+
+[deduplication]
+policy = "reject"
+lookback = 25
+
+[search_space]
+model_families = ["regularized_linear"]
+target_strategies = ["direct_pure_premium", "frequency_severity"]
+min_alpha = 0.01
+max_alpha = 100.0
+claim_cap_thresholds = [50000, 75000, 100000, 150000, 200000]
+allow_disable_claim_capping = false
