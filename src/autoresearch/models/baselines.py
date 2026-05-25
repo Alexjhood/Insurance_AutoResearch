@@ -19,6 +19,7 @@ CLAIM_COUNT = "claim_count_signal_q"
 CLAIM_EVENTS = "claim_event_count_l"
 CLAIM_COST = "claim_cost_capped_active"
 RAW_CLAIM_COST = "claim_cost_observed_k"
+SPLIT = "split"
 
 
 @dataclass(frozen=True)
@@ -173,7 +174,7 @@ def _feature_columns(
     feature_inclusions: list[str] | None = None,
     feature_exclusions: list[str] | None = None,
 ) -> list[str]:
-    excluded = {RECORD_ID, CLAIM_COUNT, CLAIM_EVENTS, CLAIM_COST, RAW_CLAIM_COST}
+    excluded = {RECORD_ID, CLAIM_COUNT, CLAIM_EVENTS, CLAIM_COST, RAW_CLAIM_COST, SPLIT}
     base = [column for column in frame.columns if column not in excluded]
     if feature_inclusions:
         unknown = sorted(set(feature_inclusions).difference(base))

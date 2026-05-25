@@ -226,8 +226,8 @@ Raw mapping is private; use anonymised names only in model code.
 ## Useful commands reference
 
 ```bash
-autoresearch list-experiments              # all registered experiments
-autoresearch list-champion-history         # champion evolution
+autoresearch list-experiments              # all registered experiments (current track)
+autoresearch list-champion-history         # champion evolution (current track)
 autoresearch list-promotions               # all comparison decisions
 autoresearch session-status               # current session state
 autoresearch export-context               # refresh context bundle
@@ -235,6 +235,69 @@ autoresearch evaluate-milestone <id>      # manual holdout eval (needs token)
 autoresearch update-integrity-manifest    # accept intentional protected-file changes
 pytest --tb=short -q                      # run test suite
 ```
+
+---
+
+## Research tracks — isolation between agents
+
+Each agent (Claude, Codex, or any future platform) **must** run under its own
+named track.  Tracks are fully isolated: separate registry, separate artifacts
+directory, separate research log.  An agent in one track cannot see the
+experiments, champion history, or metrics of any other track.
+
+### Starting a track session
+
+```bash
+# One-command setup for a new or existing isolated track
+autoresearch --track claude bootstrap-track
+
+# Replace 'claude' with the agent identifier for your session
+autoresearch --track claude init-registry
+autoresearch --track claude run-all-baselines
+autoresearch --track claude init-official-champion
+autoresearch --track claude export-context   # read this at session start
+autoresearch --track claude run-cycles 10
+```
+
+`bootstrap-track` is idempotent. It prepares shared data if needed, creates or
+migrates the track registry, runs baselines only when the track has no
+experiments, initializes the official champion if missing, writes proposal
+templates, and exports the latest context bundle. Use it at the start of a new
+ClaudeCode/Codex conversation when you want the agent to configure its own run.
+
+All standard commands accept `--track <name>`.  Without `--track`, commands
+operate on the legacy default paths (backward-compatible).
+
+### What is isolated per track
+
+| Isolated (per track) | Shared (all tracks) |
+|----------------------|---------------------|
+| SQLite registry | Raw & processed data |
+| Artifacts (experiments, comparisons) | Fixed split pack |
+| Champion state & history | Protected eval code (metrics.py etc.) |
+| Research log | Holdout vault |
+| Proposal inbox & context bundle | Model/feature source files |
+
+### Comparing tracks (human-only operation)
+
+After each agent has run independently, a human can compare them:
+
+```bash
+autoresearch compare-tracks claude codex
+# Writes a full report to artifacts/cross_track/<timestamp>/comparison_report.md
+# No promotion is performed.
+
+autoresearch list-tracks   # see all tracks and their current champion
+```
+
+### Safety rules for tracked sessions
+
+6. **Always pass `--track <your-agent-name>` to every command.**  Running
+   without `--track` writes to the shared default registry and is reserved
+   for human/admin operations.
+
+7. **Never read another track's context bundle.**  The files under
+   `artifacts/tracks/<other-agent>/` are off-limits during your session.
 
 ---
 

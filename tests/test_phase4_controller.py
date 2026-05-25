@@ -3,6 +3,7 @@ from dataclasses import replace
 
 from autoresearch.config import ProjectConfig
 from autoresearch.controller.champion import initialise_official_champion
+from autoresearch.controller.context import build_llm_context
 from autoresearch.controller.proposal_schema import allowed_search_space, validate_proposal
 from autoresearch.controller.workflow import generate_and_enqueue_proposal
 from autoresearch.experiment_registry.registry import (
@@ -25,6 +26,8 @@ def _config(tmp_path: Path) -> ProjectConfig:
         splits_dir=tmp_path / "splits",
         artifacts_dir=tmp_path / "artifacts",
         registry_path=tmp_path / "artifacts" / "registry.sqlite",
+        research_log_path=tmp_path / "RESEARCH_LOG.md",
+        track_id="test",
         random_seed=1,
         id_column="IDpol",
         agent_dataset_name="agent_dataset",
@@ -170,6 +173,54 @@ def test_invalid_file_proposer_output_is_recorded_as_failed(tmp_path: Path) -> N
     assert result["status"] == "failed"
     assert proposals[0]["status"] == "failed"
     assert proposals[0]["validation_errors"]
+
+
+def test_file_handoff_falls_back_to_mock_when_inbox_file_missing(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config = replace(
+        config,
+        llm_provider="file_handoff",
+        llm_proposal_file=tmp_path / "missing.jsonl",
+    )
+    _record_direct(config)
+    initialise_official_champion(config)
+    config.metadata_dir.mkdir(parents=True)
+    (config.metadata_dir / "agent_schema.json").write_text(
+        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]}',
+        encoding="utf-8",
+    )
+
+    result = generate_and_enqueue_proposal(config)
+
+    assert result["status"] == "validated"
+    assert result["proposal_id"].startswith("mock_")
+
+
+def test_failed_provider_attempts_get_unique_proposal_ids(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    proposal_file = tmp_path / "bad.jsonl"
+    proposal_file.write_text("{not-json}", encoding="utf-8")
+    config = replace(config, llm_provider="file", llm_proposal_file=proposal_file)
+    _record_direct(config)
+    initialise_official_champion(config)
+
+    first = generate_and_enqueue_proposal(config)
+    second = generate_and_enqueue_proposal(config)
+
+    assert first["status"] == "failed"
+    assert second["status"] == "failed"
+    assert first["proposal_id"] != second["proposal_id"]
+
+
+def test_context_reports_configured_primary_metric(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _record_direct(config)
+    initialise_official_champion(config)
+
+    context = build_llm_context(config)
+
+    assert context["evaluation_rules"]["primary_metric"] == "tweedie_deviance_p15"
+    assert context["proposal_count"] == 0
 
 
 def test_promoted_champion_replacement_is_persisted(tmp_path: Path) -> None:

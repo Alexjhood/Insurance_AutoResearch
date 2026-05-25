@@ -21,8 +21,9 @@ CLAIM_COUNT = "claim_count_signal_q"
 CLAIM_EVENTS = "claim_event_count_l"
 CLAIM_COST = "claim_cost_capped_active"
 RAW_CLAIM_COST = "claim_cost_observed_k"
+SPLIT = "split"
 
-_NON_FEATURE = {RECORD_ID, CLAIM_COUNT, CLAIM_EVENTS, CLAIM_COST, RAW_CLAIM_COST}
+_NON_FEATURE = {RECORD_ID, CLAIM_COUNT, CLAIM_EVENTS, CLAIM_COST, RAW_CLAIM_COST, SPLIT}
 
 
 def run_tweedie_gbm(

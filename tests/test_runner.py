@@ -24,6 +24,8 @@ def _make_config(tmp_path: Path) -> ProjectConfig:
         splits_dir=splits,
         artifacts_dir=artifacts,
         registry_path=artifacts / "registry.sqlite",
+        research_log_path=tmp_path / "RESEARCH_LOG.md",
+        track_id="test",
         random_seed=1,
         id_column="IDpol",
         agent_dataset_name="agent_dataset",
@@ -180,3 +182,63 @@ power = 1.5
     panel = {m["split"]: m for m in metrics["split_metrics"]}
     assert "tweedie_deviance_p15" in panel.get("search_validation", panel.get("train", {}))
     assert "predicted_to_actual_ratio" in panel.get("search_validation", panel.get("train", {}))
+
+
+def test_model_notes_do_not_include_split_as_feature(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    _write_fixtures(config)
+
+    exp_config = tmp_path / "experiment_glm.toml"
+    exp_config.write_text(
+        """
+experiment_name = "test_no_split_feature"
+model_family = "tweedie_glm"
+target_strategy = "direct_pure_premium"
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]
+alpha = 1.0
+power = 1.5
+""".strip(),
+        encoding="utf-8",
+    )
+
+    import json
+    outputs = run_experiment(config, exp_config)
+    metrics = json.loads(outputs["metrics"].read_text())
+
+    assert "split" not in metrics["model_notes"]["feature_columns"]
+
+
+def test_frequency_severity_glm_allows_zero_cost_claim_rows(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    _write_fixtures(config)
+    frame = pd.read_parquet(config.processed_dir / "agent_dataset.parquet")
+    frame.loc[frame["record_id"] == 2, "claim_cost_observed_k"] = 0.0
+    frame.to_parquet(config.processed_dir / "agent_dataset.parquet", index=False)
+    frame.to_parquet(config.processed_dir / "agent_dataset_search.parquet", index=False)
+
+    exp_config = tmp_path / "experiment_freq_sev.toml"
+    exp_config.write_text(
+        """
+experiment_name = "test_frequency_severity"
+model_family = "frequency_severity_glm"
+target_strategy = "frequency_severity"
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]
+freq_alpha = 0.1
+sev_alpha = 0.1
+""".strip(),
+        encoding="utf-8",
+    )
+
+    outputs = run_experiment(config, exp_config)
+
+    assert outputs["metrics"].exists()

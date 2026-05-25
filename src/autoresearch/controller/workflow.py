@@ -272,7 +272,7 @@ def _validate_and_normalise(
 def _proposal_id(parsed: dict[str, Any] | None) -> str:
     if parsed and isinstance(parsed.get("proposal_id"), str):
         return parsed["proposal_id"]
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     return f"invalid_proposal_{stamp}"
 
 

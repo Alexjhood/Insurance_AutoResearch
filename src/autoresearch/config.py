@@ -23,6 +23,8 @@ class ProjectConfig:
     splits_dir: Path
     artifacts_dir: Path
     registry_path: Path
+    research_log_path: Path
+    track_id: str
     random_seed: int
     id_column: str
     agent_dataset_name: str
@@ -76,8 +78,18 @@ def _resolve(root: Path, value: str) -> Path:
     return path if path.is_absolute() else root / path
 
 
-def load_config(config_path: str | Path | None = None) -> ProjectConfig:
-    """Load TOML config and resolve all project paths."""
+def load_config(
+    config_path: str | Path | None = None,
+    track_id: str | None = None,
+) -> "ProjectConfig":
+    """Load TOML config and resolve all project paths.
+
+    When *track_id* is supplied every mutable artifact path is scoped under
+    ``artifacts/tracks/<track_id>/`` so that parallel research runs (e.g. one
+    for Claude and one for Codex) are fully isolated from each other.  Shared
+    read-only paths (raw data, processed data, split pack, holdout vault) are
+    unchanged.
+    """
 
     path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
     with path.open("rb") as f:
@@ -95,6 +107,34 @@ def load_config(config_path: str | Path | None = None) -> ProjectConfig:
     deduplication = raw["deduplication"]
     search_space = raw["search_space"]
 
+    resolved_track = track_id or "default"
+
+    base_artifacts = _resolve(PROJECT_ROOT, paths["artifacts_dir"])
+
+    if track_id:
+        track_base = base_artifacts / "tracks" / track_id
+        artifacts_dir = track_base
+        registry_path = track_base / "registry.sqlite"
+        research_log_path = track_base / "RESEARCH_LOG.md"
+        handoff_base_dir = track_base / "auto_research"
+        handoff_context_dir = handoff_base_dir / "context"
+        handoff_proposal_inbox_dir = handoff_base_dir / "proposals" / "inbox"
+        handoff_proposal_processed_dir = handoff_base_dir / "proposals" / "processed"
+        handoff_results_dir = handoff_base_dir / "results"
+        handoff_handoffs_dir = handoff_base_dir / "handoffs"
+        llm_proposal_file = handoff_proposal_inbox_dir / "manual_proposals.jsonl"
+    else:
+        artifacts_dir = base_artifacts
+        registry_path = _resolve(PROJECT_ROOT, paths["registry_path"])
+        research_log_path = PROJECT_ROOT / "docs" / "RESEARCH_LOG.md"
+        handoff_base_dir = _resolve(PROJECT_ROOT, handoff["base_dir"])
+        handoff_context_dir = _resolve(PROJECT_ROOT, handoff["context_dir"])
+        handoff_proposal_inbox_dir = _resolve(PROJECT_ROOT, handoff["proposal_inbox_dir"])
+        handoff_proposal_processed_dir = _resolve(PROJECT_ROOT, handoff["proposal_processed_dir"])
+        handoff_results_dir = _resolve(PROJECT_ROOT, handoff["results_dir"])
+        handoff_handoffs_dir = _resolve(PROJECT_ROOT, handoff["handoffs_dir"])
+        llm_proposal_file = _resolve(PROJECT_ROOT, llm["proposal_file"])
+
     return ProjectConfig(
         root=PROJECT_ROOT,
         raw_data_dir=_resolve(PROJECT_ROOT, paths["raw_data_dir"]),
@@ -102,8 +142,10 @@ def load_config(config_path: str | Path | None = None) -> ProjectConfig:
         holdout_vault_dir=_resolve(PROJECT_ROOT, paths.get("holdout_vault_dir", "data/holdout_vault")),
         metadata_dir=_resolve(PROJECT_ROOT, paths["metadata_dir"]),
         splits_dir=_resolve(PROJECT_ROOT, paths["splits_dir"]),
-        artifacts_dir=_resolve(PROJECT_ROOT, paths["artifacts_dir"]),
-        registry_path=_resolve(PROJECT_ROOT, paths["registry_path"]),
+        artifacts_dir=artifacts_dir,
+        registry_path=registry_path,
+        research_log_path=research_log_path,
+        track_id=resolved_track,
         random_seed=int(data["random_seed"]),
         id_column=str(data["id_column"]),
         agent_dataset_name=str(data["agent_dataset_name"]),
@@ -134,13 +176,13 @@ def load_config(config_path: str | Path | None = None) -> ProjectConfig:
         llm_provider=str(llm["provider"]),
         llm_model=str(llm["model"]),
         llm_temperature=float(llm["temperature"]),
-        llm_proposal_file=_resolve(PROJECT_ROOT, llm["proposal_file"]),
-        handoff_base_dir=_resolve(PROJECT_ROOT, handoff["base_dir"]),
-        handoff_context_dir=_resolve(PROJECT_ROOT, handoff["context_dir"]),
-        handoff_proposal_inbox_dir=_resolve(PROJECT_ROOT, handoff["proposal_inbox_dir"]),
-        handoff_proposal_processed_dir=_resolve(PROJECT_ROOT, handoff["proposal_processed_dir"]),
-        handoff_results_dir=_resolve(PROJECT_ROOT, handoff["results_dir"]),
-        handoff_handoffs_dir=_resolve(PROJECT_ROOT, handoff["handoffs_dir"]),
+        llm_proposal_file=llm_proposal_file,
+        handoff_base_dir=handoff_base_dir,
+        handoff_context_dir=handoff_context_dir,
+        handoff_proposal_inbox_dir=handoff_proposal_inbox_dir,
+        handoff_proposal_processed_dir=handoff_proposal_processed_dir,
+        handoff_results_dir=handoff_results_dir,
+        handoff_handoffs_dir=handoff_handoffs_dir,
         deduplication_policy=str(deduplication["policy"]),
         deduplication_lookback=int(deduplication["lookback"]),
         search_space=dict(search_space),
@@ -162,5 +204,6 @@ def ensure_project_dirs(config: ProjectConfig) -> None:
         config.handoff_proposal_processed_dir,
         config.handoff_results_dir,
         config.handoff_handoffs_dir,
+        config.research_log_path.parent,
     ):
         path.mkdir(parents=True, exist_ok=True)

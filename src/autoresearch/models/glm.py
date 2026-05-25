@@ -24,8 +24,9 @@ CLAIM_COUNT = "claim_count_signal_q"
 CLAIM_EVENTS = "claim_event_count_l"
 CLAIM_COST = "claim_cost_capped_active"
 RAW_CLAIM_COST = "claim_cost_observed_k"
+SPLIT = "split"
 
-_NON_FEATURE = {RECORD_ID, CLAIM_COUNT, CLAIM_EVENTS, CLAIM_COST, RAW_CLAIM_COST}
+_NON_FEATURE = {RECORD_ID, CLAIM_COUNT, CLAIM_EVENTS, CLAIM_COST, RAW_CLAIM_COST, SPLIT}
 
 
 def run_tweedie_glm(
@@ -73,7 +74,7 @@ def run_frequency_severity_glm(
     pred_freq = np.clip(freq_model.predict(score[features]), 0.0, None)
 
     # Severity: Gamma on cost-per-claim for policies with claims
-    claim_rows = train[train[CLAIM_COUNT] > 0].copy()
+    claim_rows = train[(train[CLAIM_COUNT] > 0) & (train[CLAIM_COST] > 0)].copy()
     if claim_rows.empty:
         pred_sev = np.full(len(score), float(train[CLAIM_COST].mean()))
     else:

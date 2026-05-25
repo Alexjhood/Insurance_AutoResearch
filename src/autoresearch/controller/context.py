@@ -19,7 +19,7 @@ from autoresearch.utils.io import read_json
 
 def _read_research_log_tail(config: ProjectConfig, n_lines: int = 60) -> str | None:
     """Return the last n_lines of RESEARCH_LOG.md, or None if absent."""
-    log_path = config.root / "docs" / "RESEARCH_LOG.md"
+    log_path = config.research_log_path
     if not log_path.exists():
         return None
     lines = log_path.read_text(encoding="utf-8").splitlines()
@@ -38,7 +38,8 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
     champion = get_official_champion(config.registry_path)
     experiments = list_experiments(config.registry_path)[:10]
     comparisons = list_comparisons(config.registry_path)[:10]
-    proposals = list_proposals(config.registry_path)[:10]
+    all_proposals = list_proposals(config.registry_path)
+    proposals = all_proposals[:10]
     history = list_champion_history(config.registry_path)[:10]
 
     return {
@@ -47,6 +48,7 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
         "recent_experiments": _compact_experiments(experiments),
         "recent_comparisons": _compact_comparisons(comparisons),
         "recent_proposals": _compact_proposals(proposals),
+        "proposal_count": len(all_proposals),
         "champion_history": history,
         "latest_session_summary": read_json(latest_session_path) if latest_session_path.exists() else None,
         "recent_sessions": list_sessions(config.registry_path)[:5],
@@ -60,7 +62,7 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
             "ordinary_train_split": config.ordinary_train_split,
             "ordinary_eval_splits": list(config.ordinary_eval_splits),
             "milestone_holdout_access": "forbidden during ordinary search",
-            "primary_metric": "rmse_pure_premium",
+            "primary_metric": config.primary_metric,
             "lower_is_better": True,
             "promotion_gate": {
                 "minimum_mean_lift": config.minimum_mean_lift,

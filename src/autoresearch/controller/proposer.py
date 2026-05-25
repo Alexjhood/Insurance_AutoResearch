@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 import urllib.error
@@ -95,13 +96,14 @@ class MockProposer:
     """Deterministic rotating mock proposer that cycles through a diverse pool."""
 
     def propose(self, context: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
-        n_recent = len(context.get("recent_proposals", []))
-        entry = _MOCK_POOL[n_recent % len(_MOCK_POOL)]
+        proposal_count = int(context.get("proposal_count", len(context.get("recent_proposals", []))))
+        entry = _MOCK_POOL[proposal_count % len(_MOCK_POOL)]
         champion = context["official_champion"]
         parent_id = champion["champion_id"]
         parent_branch = champion["branch_id"]
-        idx = n_recent % len(_MOCK_POOL)
-        name = f"mock_proposal_{idx}_{entry['model_family']}"
+        idx = proposal_count % len(_MOCK_POOL)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        name = f"mock_{stamp}_{idx}_{entry['model_family']}"
         model_cfg: dict[str, Any] = {
             "experiment_name": name,
             "model_family": entry["model_family"],
@@ -142,6 +144,24 @@ class FileProposer:
                 proposal = json.loads(line)
                 return line, proposal
         raise ValueError(f"Proposal file contains no JSON proposals: {self.path}")
+
+
+class FileHandoffProposer:
+    """Use a handoff proposal file when present, otherwise fall back locally."""
+
+    def __init__(self, path: Path) -> None:
+        self.file_proposer = FileProposer(path)
+        self.fallback = MockProposer()
+
+    def propose(self, context: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+        try:
+            return self.file_proposer.propose(context)
+        except FileNotFoundError:
+            return self.fallback.propose(context)
+        except ValueError as exc:
+            if "contains no JSON proposals" in str(exc):
+                return self.fallback.propose(context)
+            raise
 
 
 # ── OpenAI proposer ───────────────────────────────────────────────────────────
@@ -265,8 +285,10 @@ def proposer_from_config(config) -> Proposer:
     provider = config.llm_provider.lower()
     if provider == "mock":
         return MockProposer()
-    if provider in ("file", "file_handoff"):
+    if provider == "file":
         return FileProposer(config.llm_proposal_file)
+    if provider == "file_handoff":
+        return FileHandoffProposer(config.llm_proposal_file)
     if provider == "openai":
         return OpenAIProposer(config.llm_model, config.llm_temperature)
     if provider in ("anthropic", "claude"):

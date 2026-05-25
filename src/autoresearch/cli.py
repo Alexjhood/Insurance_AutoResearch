@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 from autoresearch.config import load_config
+from autoresearch.bootstrap import bootstrap_track
 from autoresearch.comparison_runner import compare_against_current_champion, compare_experiments, run_repeated_evaluation
 from autoresearch.controller.champion import initialise_official_champion
 from autoresearch.controller.handoff import (
@@ -50,9 +51,27 @@ from autoresearch.utils.integrity import write_integrity_manifest
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="autoresearch")
     parser.add_argument("--config", default=None, help="Path to TOML config file.")
+    parser.add_argument(
+        "--track",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Research track name (e.g. 'claude', 'codex'). "
+            "All artifact paths and the registry are scoped under "
+            "artifacts/tracks/<NAME>/ so multiple agents can run in "
+            "complete isolation.  Omit to use the default (untracked) paths."
+        ),
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("prepare-data", help="Build Phase 1 data artifacts.")
+    bootstrap = subparsers.add_parser(
+        "bootstrap-track",
+        help="Idempotently prepare data, registry, baselines, champion, templates, and context for a named track.",
+    )
+    bootstrap.add_argument("--skip-data", action="store_true", help="Do not run prepare-data even if shared data is missing.")
+    bootstrap.add_argument("--force-data", action="store_true", help="Rebuild shared data artifacts before bootstrapping.")
+    bootstrap.add_argument("--skip-baselines", action="store_true", help="Do not run baseline experiments if the registry is empty.")
     subparsers.add_parser("init-registry", help="Create the SQLite experiment registry.")
     run_parser = subparsers.add_parser("run-baseline", help="Run one deterministic baseline experiment.")
     run_parser.add_argument("experiment_config", help="Path to an experiment TOML config.")
@@ -112,18 +131,43 @@ def build_parser() -> argparse.ArgumentParser:
     multi_parser = subparsers.add_parser("run-session-cycles", help="Run up to N local-side session cycles.")
     multi_parser.add_argument("count", type=int)
     multi_parser.add_argument("--session-id", default=None)
+    compare_tracks_parser = subparsers.add_parser(
+        "compare-tracks",
+        help="Compare the official champions of two research tracks without promoting either.",
+    )
+    compare_tracks_parser.add_argument("track_a", help="First track name (e.g. 'claude').")
+    compare_tracks_parser.add_argument("track_b", help="Second track name (e.g. 'codex').")
+
+    subparsers.add_parser("list-tracks", help="List all tracks that have a registry under artifacts/tracks/.")
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    config = load_config(args.config)
+    config = load_config(args.config, track_id=getattr(args, "track", None))
 
     if args.command == "prepare-data":
         outputs = prepare_data(config)
         for name, path in outputs.items():
             print(f"{name}: {path}")
+        return 0
+
+    if args.command == "bootstrap-track":
+        import json
+
+        try:
+            result = bootstrap_track(
+                config,
+                prepare_shared_data=not args.skip_data,
+                force_prepare_data=args.force_data,
+                run_baselines=not args.skip_baselines,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        print(f"\nReady: read {result['context']} and continue with `autoresearch --track {config.track_id} run-cycles 10`.")
         return 0
 
     if args.command == "init-registry":
@@ -393,6 +437,45 @@ def main(argv: list[str] | None = None) -> int:
         import json
 
         print(json.dumps(run_session_cycles(config, args.count, args.session_id), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "compare-tracks":
+        import json
+        from autoresearch.tracks import compare_tracks
+
+        config_a = load_config(args.config, track_id=args.track_a)
+        config_b = load_config(args.config, track_id=args.track_b)
+        result = compare_tracks(config_a, config_b)
+        print(json.dumps(result, indent=2, sort_keys=True, default=str))
+        if result.get("report_path"):
+            print(f"\nFull report: {result['report_path']}")
+        return 0 if result.get("status") != "error" else 1
+
+    if args.command == "list-tracks":
+        from autoresearch.config import load_config as _lc
+        base_cfg = _lc(args.config)
+        tracks_dir = base_cfg.artifacts_dir / "tracks"
+        if not tracks_dir.exists():
+            print("No tracks found (artifacts/tracks/ does not exist).")
+            return 0
+        for track_dir in sorted(tracks_dir.iterdir()):
+            if not track_dir.is_dir():
+                continue
+            registry = track_dir / "registry.sqlite"
+            has_registry = "✓" if registry.exists() else "✗"
+            log = track_dir / "RESEARCH_LOG.md"
+            has_log = "✓" if log.exists() else "✗"
+            tc = load_config(args.config, track_id=track_dir.name)
+            try:
+                from autoresearch.experiment_registry.registry import registry_counts
+                champ = get_official_champion(tc.registry_path)
+                counts = registry_counts(tc.registry_path)
+                champ_id = champ["champion_id"] if champ else "none"
+                n_exp = counts["experiments"]
+            except Exception:
+                champ_id = "?"
+                n_exp = "?"
+            print(f"{track_dir.name}\tregistry={has_registry}\tlog={has_log}\tchampion={champ_id}\texperiments={n_exp}")
         return 0
 
     parser.error(f"Unknown command: {args.command}")

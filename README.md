@@ -70,6 +70,23 @@ autoresearch init-registry
 
 The default registry lives at `artifacts/experiment_registry.sqlite`.
 
+For an isolated ClaudeCode or Codex research track, prefer the idempotent
+bootstrap command:
+
+```bash
+autoresearch --track codex bootstrap-track
+```
+
+This prepares shared data if needed, creates or migrates
+`artifacts/tracks/codex/registry.sqlite`, runs the baseline experiments if the
+track is empty, initializes the official champion, writes proposal templates,
+and exports `artifacts/tracks/codex/auto_research/context/latest_context.json`.
+After that, an agent can continue with:
+
+```bash
+autoresearch --track codex run-cycles 10
+```
+
 ## Dashboard
 
 ```bash

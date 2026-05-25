@@ -196,10 +196,16 @@ def _append_research_log(
 ) -> None:
     """Append a one-line auto-summary to the research log."""
 
-    log_path = config.root / "docs" / "RESEARCH_LOG.md"
-    if not log_path.exists():
-        return
+    log_path = config.research_log_path
     try:
+        if not log_path.exists():
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(
+                "# Research Log\n\n"
+                "| Timestamp | Challenger | Decision | Lift | Win-rate | Rationale |\n"
+                "|-----------|-----------|----------|------|----------|----------|\n",
+                encoding="utf-8",
+            )
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         outcome = decision.get("decision", "?")
         mean_lift = comparison_summary.get("mean_lift", float("nan"))
