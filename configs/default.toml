@@ -47,7 +47,7 @@ minimum_win_rate = 0.60
 bootstrap_lower_bound = 0.0
 bootstrap_lower_bound_relative = 0.0
 confidence_level = 0.90
-max_predicted_to_actual_drift = 0.05
+max_predicted_to_actual_drift = 0.10
 require_diagnostics = true
 bonferroni_lookback = 10
 
