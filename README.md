@@ -118,16 +118,28 @@ streamlit run src/autoresearch/dashboard/app.py
 
 The dashboard shows project status, split metadata, capping diagnostics, baseline experiment tables, official champion state, comparison views, calibration diagnostics, proposal queue, branch lineage, and file-handoff status.
 
-## Model Families
+## Model Scripts
 
-Four model families are supported. Choose via `model_family` in an experiment config:
+Autonomous proposals use run-local model scripts. For any non-`global_mean`
+experiment, the proposal JSON must point `experiment_config.model.script_path`
+at a neighbouring Python file. That script is copied into the iteration folder,
+scanned for holdout access, executed through `fit_predict()`, and preserved as
+an experiment artifact.
 
-| `model_family`           | Description |
-|--------------------------|-------------|
-| `tweedie_glm`            | `TweedieRegressor` with log link and exposure weights. Hyperparameters: `alpha`, `power`. |
-| `frequency_severity_glm` | `PoissonRegressor` for frequency × `GammaRegressor` for severity per claim. Hyperparameters: `freq_alpha`, `sev_alpha`. |
-| `tweedie_gbm`            | `HistGradientBoostingRegressor` with Poisson loss. Hyperparameters: `max_iter`, `max_depth`, `learning_rate`, `min_samples_leaf`, `l2_regularization`. |
-| `regularized_linear`     | Ridge regression on log1p pure premium (legacy baseline). Hyperparameter: `alpha`. |
+The checked-in `src/autoresearch/models` implementations remain available for
+manual/backward-compatible baseline configs, but they are not the autonomous
+research surface. If an agent wants to try a GLM, GBM, or any other model, it
+writes that modelling logic into the proposal's script.
+
+Required script hook:
+
+```python
+def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hyperparameters):
+    return predicted_claim_cost_array, notes_dict
+```
+
+Scripts must return original-space claim-cost predictions. If a script models
+pure premium, multiply by exposure before returning.
 
 ## Primary Metric
 
@@ -170,6 +182,7 @@ Each run writes a folder under `artifacts/experiments/` containing:
 - `diagnostics.json` — calibration decile table, PSI, segment loss ratios
 - `environment_manifest.json` — git SHA, dirty flag, pip freeze, file SHA256s
 - `capping_diagnostics.json`
+- `validation_report.json` for autonomous proposal attempts
 
 ## Volatility-Aware Comparison
 

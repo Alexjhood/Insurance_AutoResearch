@@ -64,16 +64,37 @@ The milestone holdout is architecturally separated from the search partition. `e
 
 ## Model Layer
 
-Four model families share a common interface `(train_df, score_df, **hyperparameters) → (predictions_array, notes_dict)`:
+Autonomous experiments use run-local modelling scripts. A proposal points
+`experiment_config.model.script_path` at a Python file stored beside the
+proposal. The file must expose:
 
-| Family | Implementation | Primary use |
-|--------|---------------|-------------|
-| `tweedie_glm` | `TweedieRegressor(power=p, link="log")` with exposure weights | Direct pure premium, well-calibrated |
-| `frequency_severity_glm` | `PoissonRegressor` × `GammaRegressor` | Frequency and severity modelled separately |
-| `tweedie_gbm` | `HistGradientBoostingRegressor(loss="poisson")` | Non-linear challenger |
-| `regularized_linear` | Ridge on log1p pure premium | Legacy baseline (not recommended for new experiments) |
+```python
+def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hyperparameters):
+    return predicted_claim_cost_array, notes_dict
+```
 
-`dispatch_model()` in `models/dispatcher.py` handles routing, prediction DataFrame construction, and a row-count assertion to catch silent merge drops.
+The framework still owns data loading, split application, capping, evaluation,
+comparison, and registry writes. The script owns the modelling choice for that
+single run. This means GLMs, GBMs, GAMs, ensembles, or simpler hand-built rules
+are all possible research directions, but the implementation is an auditable
+per-run artifact instead of a pre-selected method imported from `src/models`.
+
+The `global_mean` no-model baseline remains checked in as the bootstrap
+starting point. Legacy built-in model modules remain available for manual
+baseline configs, but queued autonomous proposals must provide a script.
+
+`dispatch_model()` in `models/dispatcher.py` handles script loading, prediction
+DataFrame construction, and a row-count assertion to catch silent drops.
+
+## Output Validation
+
+After each queued proposal run, the controller writes `validation_report.json`
+before any promotion comparison. The report checks that predictions are finite,
+non-negative, non-empty, have sensible aggregate scale, produce a finite primary
+metric, and show positive lift against the current champion. Failed checks write
+`repair_request_2.json` or `repair_request_3.json`; the agent can revise the
+next script attempt up to three total attempts before the proposal is marked as
+failed.
 
 ## Evaluation and Promotion
 

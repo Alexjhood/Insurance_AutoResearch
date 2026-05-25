@@ -9,7 +9,7 @@ from typing import Any
 
 VALID_STATUSES = {
     "proposed", "validated", "running", "completed", "failed",
-    "compared", "promoted", "rejected", "inconclusive", "duplicate",
+    "compared", "promoted", "rejected", "inconclusive", "duplicate", "needs_repair",
 }
 
 TARGET_COLUMNS = {
@@ -43,6 +43,8 @@ def allowed_search_space(config, agent_schema: dict[str, Any] | None = None) -> 
         "feature_columns": feature_columns,
         "branch_actions": ["extend_current", "new_branch"],
         "allow_legacy_baselines": bool(ss.get("allow_legacy_baselines", False)),
+        "allow_open_model_families": bool(ss.get("allow_open_model_families", False)),
+        "requires_model_script": bool(ss.get("requires_model_script", False)),
     }
 
     # Per-family hyperparameter ranges
@@ -86,7 +88,7 @@ def validate_proposal(proposal: dict[str, Any], search_space: dict[str, Any]) ->
         return errors
 
     family = exp_config.get("model_family")
-    if family not in search_space["model_families"]:
+    if family not in search_space["model_families"] and not search_space.get("allow_open_model_families", False):
         errors.append(f"model_family {family!r} is not in allowed families: {search_space['model_families']}")
     if exp_config.get("target_strategy") not in search_space["target_strategies"]:
         errors.append("target_strategy is not allowed")
@@ -112,6 +114,10 @@ def validate_proposal(proposal: dict[str, Any], search_space: dict[str, Any]) ->
     if not isinstance(model, dict):
         errors.append("model must be an object")
     else:
+        script_path = model.get("script_path") or model.get("model_script_path")
+        if search_space.get("requires_model_script", False) and family != "global_mean":
+            if not isinstance(script_path, str) or not script_path.strip():
+                errors.append("model.script_path is required for non-global_mean autonomous experiments")
         errors.extend(_validate_model_hyperparameters(family, model, search_space))
         allowed_features = set(search_space.get("feature_columns", []))
         for key in ("feature_inclusions", "feature_exclusions"):

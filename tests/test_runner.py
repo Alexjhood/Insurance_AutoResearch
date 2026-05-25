@@ -158,6 +158,48 @@ power = 1.5
     assert any(r["model_family"] == "tweedie_glm" for r in rows)
 
 
+def test_run_experiment_uses_run_local_model_script(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    _write_fixtures(config)
+    script = tmp_path / "scripted_model.py"
+    script.write_text(
+        """
+import numpy as np
+
+EXPOSURE = "exposure_term_a"
+CLAIM_COST = "claim_cost_capped_active"
+
+
+def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hp):
+    rate = float(train[CLAIM_COST].sum() / train[EXPOSURE].sum())
+    return rate * score[EXPOSURE].to_numpy(dtype=float), {"rate": rate}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    exp_config = tmp_path / "experiment_scripted.toml"
+    exp_config.write_text(
+        f"""
+experiment_name = "test_scripted_model"
+model_family = "scripted_mean"
+target_strategy = "direct_pure_premium"
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]
+script_path = "{script.name}"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    outputs = run_experiment(config, exp_config)
+
+    assert outputs["metrics"].exists()
+    assert outputs["model_script"] == script.resolve()
+
+
 def test_metrics_include_tweedie_deviance(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     _write_fixtures(config)

@@ -26,6 +26,11 @@ def build_prompt(context: dict[str, Any]) -> str:
         "You are proposing one controlled insurance burning-cost modelling experiment.\n"
         "Return JSON only matching the proposal schema. Do not include Markdown fences.\n"
         "The deterministic framework will validate, run, evaluate, and compare the proposal.\n"
+        "For autonomous proposals, every non-global_mean experiment must be backed by a "
+        "run-local model script. In file-handoff mode, write that script beside the JSON "
+        "and set experiment_config.model.script_path to its filename. Do not rely on "
+        "pre-existing src/autoresearch/models implementations; if you choose GLM, GBM, "
+        "or another method, write the modelling logic into the run-local script.\n"
         "Do not request milestone_holdout access or metric changes.\n\n"
         "Exploration philosophy — follow this carefully:\n"
         "- Every run begins from the `global_mean` no-model baseline (a flat exposure-weighted\n"
@@ -138,6 +143,7 @@ class MockProposer:
             "expected_benefit": entry["expected_benefit"],
             "key_risk": entry["key_risk"],
             "experiment_config": model_cfg,
+            "model_script_source": _mock_model_script_source(entry["model_family"], entry["target_strategy"]),
         }
         text = json.dumps(proposal, indent=2, sort_keys=True)
         return text, proposal
@@ -332,3 +338,64 @@ def _parse_json(text: str) -> dict[str, Any] | None:
         return json.loads(stripped)
     except json.JSONDecodeError:
         return None
+
+
+def _mock_model_script_source(model_family: str, target_strategy: str) -> str:
+    """Return a small self-contained script for mock autonomous proposals."""
+
+    return '''\
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import TweedieRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+RECORD_ID = "record_id"
+EXPOSURE = "exposure_term_a"
+CLAIM_COUNT = "claim_count_signal_q"
+CLAIM_EVENTS = "claim_event_count_l"
+CLAIM_COST = "claim_cost_capped_active"
+RAW_CLAIM_COST = "claim_cost_observed_k"
+SPLIT = "split"
+NON_FEATURE = {RECORD_ID, CLAIM_COUNT, CLAIM_EVENTS, CLAIM_COST, RAW_CLAIM_COST, SPLIT}
+
+
+def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hp):
+    features = _feature_columns(train, feature_inclusions, feature_exclusions)
+    numeric = [c for c in features if pd.api.types.is_numeric_dtype(train[c])]
+    categorical = [c for c in features if c not in numeric]
+    transformers = []
+    if numeric:
+        transformers.append(("num", Pipeline([("impute", SimpleImputer(strategy="median")), ("scale", StandardScaler())]), numeric))
+    if categorical:
+        transformers.append(("cat", Pipeline([("impute", SimpleImputer(strategy="most_frequent")), ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False))]), categorical))
+    model = Pipeline([
+        ("preprocess", ColumnTransformer(transformers=transformers, remainder="drop")),
+        ("glm", TweedieRegressor(power=float(hp.get("power", 1.5)), alpha=float(hp.get("alpha", 1.0)), link="log", max_iter=500)),
+    ])
+    y = train[CLAIM_COST].astype(float) / train[EXPOSURE].astype(float).clip(lower=1e-9)
+    model.fit(train[features], y, glm__sample_weight=train[EXPOSURE].astype(float))
+    pred_pp = np.clip(model.predict(score[features]), 0.0, None)
+    return pred_pp * score[EXPOSURE].astype(float).to_numpy(), {
+        "model_family": "scripted_tweedie_glm",
+        "target_strategy": "direct_pure_premium",
+        "feature_columns": features,
+        "alpha": float(hp.get("alpha", 1.0)),
+        "power": float(hp.get("power", 1.5)),
+    }
+
+
+def _feature_columns(frame, feature_inclusions, feature_exclusions):
+    base = [c for c in frame.columns if c not in NON_FEATURE]
+    if feature_inclusions:
+        base = [c for c in base if c in set(feature_inclusions)]
+    if feature_exclusions:
+        base = [c for c in base if c not in set(feature_exclusions)]
+    if not base:
+        raise ValueError("At least one feature column is required")
+    return base
+'''

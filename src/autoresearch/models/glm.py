@@ -14,7 +14,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import GammaRegressor, PoissonRegressor, TweedieRegressor
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
 # Column name constants (shared with baselines.py)
@@ -102,7 +102,10 @@ def _glm_pipeline(features: pd.DataFrame, glm) -> Pipeline:
     if numeric:
         transformers.append((
             "numeric",
-            SimpleImputer(strategy="median"),
+            Pipeline([
+                ("impute", SimpleImputer(strategy="median")),
+                ("scale", StandardScaler()),
+            ]),
             numeric,
         ))
     if categorical:

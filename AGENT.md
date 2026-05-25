@@ -80,12 +80,18 @@ Write your hypothesis — and why it is the cheapest next step — at the top of
 
 ### Step 2 — Implement
 
-**Option A: New experiment config (hyperparameter / feature change)**
-Create or edit a TOML in `configs/experiments/`:
+**Option A: Autonomous proposal with a run-local model script**
+Create one proposal JSON and one neighbouring Python script in the proposal
+inbox. The JSON must set `experiment_config.model.script_path` to the script
+filename. Do not rely on pre-existing model implementations in
+`src/autoresearch/models`; if you want a GLM, GBM, or any other approach, write
+that modelling logic into this run's script.
+
+Proposal config shape:
 
 ```toml
 experiment_name = "my_descriptive_name"
-model_family = "tweedie_gbm"          # or any registered family
+model_family = "scripted_tweedie_glm"  # descriptive label for this script
 target_strategy = "direct_pure_premium"
 parent_experiment_id = ""              # fill in after first run
 
@@ -96,15 +102,30 @@ claim_capping_enabled = true
 claim_cap_threshold = 100000
 
 [model]
-max_iter = 500
-max_depth = 5
-learning_rate = 0.05
-min_samples_leaf = 200
-# Optional: feature builder
-# feature_builder_module = "autoresearch.features.interactions_v1"
+script_path = "model_my_descriptive_name.py"
+alpha = 1.0
+power = 1.5
 # Optional: feature subset
 # feature_inclusions = ["exposure_term_a", "driver_age_band_d", "vehicle_power_band_b"]
 ```
+
+The model script must expose:
+
+```python
+def fit_predict(
+    train: pd.DataFrame,
+    score: pd.DataFrame,
+    *,
+    feature_inclusions: list[str] | None = None,
+    feature_exclusions: list[str] | None = None,
+    **hyperparameters,
+) -> tuple[np.ndarray, dict]:
+    """Fit on train, return original-space claim-cost predictions and notes."""
+    ...
+```
+
+If the model predicts pure premium, multiply by `score["exposure_term_a"]`
+before returning.
 
 **Option B: New feature engineering module**
 Create `src/autoresearch/features/<name>.py`. Must expose:
@@ -120,22 +141,6 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
 ```
 
 Reference it in the TOML: `feature_builder_module = "autoresearch.features.<name>"`.
-
-**Option C: New model family**
-Create `src/autoresearch/models/<family_name>.py`. Must expose:
-
-```python
-def fit_predict(
-    train: pd.DataFrame,
-    score: pd.DataFrame,
-    *,
-    feature_inclusions: list[str] | None = None,
-    feature_exclusions: list[str] | None = None,
-    **hyperparameters,
-) -> tuple[np.ndarray, dict]:
-    """Fit on train, return (predicted_claim_cost_array, notes_dict)."""
-    ...
-```
 
 Column constants (import from `autoresearch.models.dispatcher`):
 - `EXPOSURE = "exposure_term_a"`
@@ -160,7 +165,7 @@ The experiment runner will also run pytest automatically and fail immediately if
 ### Step 4 — Run the experiment
 
 ```bash
-autoresearch run-experiment configs/experiments/<your_config>.toml
+autoresearch run-baseline configs/experiments/<your_config>.toml
 ```
 
 This will:
@@ -168,6 +173,10 @@ This will:
 - Run pytest
 - Fit the model and score on search_validation
 - Compute the full actuarial metric panel
+- For queued autonomous proposals, validate prediction sanity and positive lift
+  against the champion before final comparison. If validation fails, inspect
+  `repair_request_*.json`, write the next `model_attempt_N.py`, and rerun. The
+  framework allows up to three attempts.
 - Write artifacts to `artifacts/experiments/<id>/`
 
 Read the results:

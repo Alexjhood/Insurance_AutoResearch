@@ -14,7 +14,7 @@ from autoresearch.controller.handoff import (
     ingest_proposals,
     write_nonpromotion_summary,
 )
-from autoresearch.controller.workflow import run_next_queued_proposal
+from autoresearch.controller.workflow import ExperimentNeedsRepair, run_next_queued_proposal
 from autoresearch.experiment_registry.registry import (
     get_official_champion,
     list_proposals,
@@ -36,6 +36,7 @@ SESSION_STATES = {
     "promoted",
     "rejected",
     "inconclusive",
+    "waiting_for_repair",
     "paused",
     "failed",
     "completed",
@@ -154,6 +155,12 @@ def run_session_cycle(config: ProjectConfig, session_id: str | None = None) -> d
     _persist_state(config, state, event_type="evaluating", message="Running next queued proposal.")
     try:
         result = run_next_queued_proposal(config)
+    except ExperimentNeedsRepair as exc:
+        state["state"] = "waiting_for_repair"
+        state["latest_error"] = str(exc)
+        _persist_state(config, state, event_type="waiting_for_repair", message=str(exc))
+        export_context_bundle(config)
+        return state
     except Exception as exc:
         state["state"] = "failed"
         state["latest_error"] = str(exc)
@@ -208,7 +215,7 @@ def run_session_cycles(config: ProjectConfig, count: int, session_id: str | None
     for _ in range(count):
         state = run_session_cycle(config, session_id)
         states.append(state)
-        if state["state"] in {"waiting_for_proposal", "paused", "failed", "completed"}:
+        if state["state"] in {"waiting_for_proposal", "waiting_for_repair", "paused", "failed", "completed"}:
             break
     return states
 
@@ -315,7 +322,11 @@ def _require_session(config: ProjectConfig, session_id: str | None) -> dict[str,
 
 
 def _queued_count(config: ProjectConfig) -> int:
-    return sum(1 for item in list_proposals(config.registry_path) if item["status"] in {"validated", "proposed"})
+    return sum(
+        1
+        for item in list_proposals(config.registry_path)
+        if item["status"] in {"validated", "proposed", "needs_repair"}
+    )
 
 
 def _session_id(name: str) -> str:

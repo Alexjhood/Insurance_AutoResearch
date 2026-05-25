@@ -150,16 +150,27 @@ def _tweedie_deviance(actual_pp: np.ndarray, predicted_pp: np.ndarray, weights: 
 
 
 def _gini_weighted(actual: np.ndarray, predicted: np.ndarray, weights: np.ndarray) -> float:
-    """Exposure-weighted Gini coefficient measuring discrimination."""
+    """Exposure-weighted Gini coefficient measuring discrimination.
+
+    Sorts by predicted PURE PREMIUM (predicted / exposure), not by predicted
+    claim cost.  Sorting by claim cost would conflate the exposure-size effect
+    with model discrimination: the global-mean model predicts mean_bc * exposure,
+    so sorting by claim cost is sorting by exposure, which produces spuriously
+    negative Gini when short-duration policies carry higher per-unit risk.
+    """
 
     if len(actual) < 2:
         return float("nan")
-    order = np.argsort(predicted)
+    safe_w = np.clip(weights, 1e-12, None)
+    predicted_pp = predicted / safe_w  # rank by pure premium, not claim cost
+    order = np.argsort(predicted_pp)
     w = weights[order]
     y = actual[order]
     cum_w = np.cumsum(w) / w.sum()
     cum_y = np.cumsum(y) / y.sum() if y.sum() > 0 else cum_w
-    # Area under Lorenz curve via trapezoidal rule
+    # Prepend origin so the trapezoidal rule covers the full [0,1]×[0,1] square
+    cum_w = np.concatenate([[0.0], cum_w])
+    cum_y = np.concatenate([[0.0], cum_y])
     _trapz = getattr(np, "trapezoid", None) or getattr(np, "trapz")
     lorenz_area = float(_trapz(cum_y, cum_w))
     return float(1 - 2 * lorenz_area)

@@ -695,7 +695,7 @@ def next_queued_proposal(path: Path) -> dict[str, Any] | None:
             """
             SELECT *
             FROM proposals
-            WHERE status IN ('validated', 'proposed')
+            WHERE status IN ('validated', 'proposed', 'needs_repair')
             ORDER BY created_at ASC
             LIMIT 1
             """

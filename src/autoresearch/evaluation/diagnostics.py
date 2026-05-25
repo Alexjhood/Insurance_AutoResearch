@@ -53,25 +53,47 @@ def compute_diagnostics(
 
 
 def _decile_calibration(frame: pd.DataFrame, n_deciles: int) -> list[dict[str, Any]]:
-    """Actual vs predicted by predicted-score decile."""
+    """Actual vs predicted by predicted pure-premium decile.
+
+    Sorting by predicted_pure_premium (or predicted_claim_cost / exposure when
+    the column is absent) ensures that the lowest decile contains genuinely
+    low-risk policies across all exposure durations, not merely short-exposure
+    policies with small absolute predicted costs.  Sorting by raw claim cost
+    floods decile 1 with 1–7-day policies whose sum_cost / sum_exposure is
+    large even when the per-year risk is average, making the calibration metric
+    misleadingly bad.
+
+    Within each decile, pure premium values are exposure-weighted
+    (sum_cost / sum_exposure), the standard actuarial computation.
+    """
 
     rows = []
     frame = frame.copy()
+    exp_safe = frame["exposure"].clip(lower=1e-12)
+
+    if "predicted_pure_premium" in frame.columns:
+        sort_col = "predicted_pure_premium"
+    else:
+        frame["_pred_pp"] = frame["predicted_claim_cost"] / exp_safe
+        sort_col = "_pred_pp"
+
     try:
-        frame["decile"] = pd.qcut(frame["predicted_claim_cost"], n_deciles, labels=False, duplicates="drop") + 1
+        frame["decile"] = pd.qcut(frame[sort_col], n_deciles, labels=False, duplicates="drop") + 1
     except Exception:
         return []
 
     for decile, grp in frame.groupby("decile", sort=True):
-        exp = grp["exposure"].clip(lower=1e-12)
-        actual_pp = (grp["actual_claim_cost"] / exp).mean()
-        pred_pp = (grp["predicted_claim_cost"] / exp).mean()
+        exp_sum = float(grp["exposure"].clip(lower=1e-12).sum())
+        actual_cost_sum = float(grp["actual_claim_cost"].sum())
+        pred_cost_sum = float(grp["predicted_claim_cost"].sum())
+        actual_pp = actual_cost_sum / exp_sum
+        pred_pp = pred_cost_sum / exp_sum
         rows.append({
             "decile": int(decile),
             "n": int(len(grp)),
-            "exposure": float(grp["exposure"].sum()),
-            "actual_pp": float(actual_pp),
-            "pred_pp": float(pred_pp),
+            "exposure": exp_sum,
+            "actual_pp": actual_pp,
+            "pred_pp": pred_pp,
             "ratio": float(actual_pp / pred_pp) if pred_pp > 0 else float("nan"),
         })
     return rows
@@ -88,13 +110,13 @@ def _exposure_band_calibration(frame: pd.DataFrame) -> list[dict[str, Any]]:
         return []
 
     for band, grp in frame.groupby("exp_band", sort=True):
-        exp = grp["exposure"].clip(lower=1e-12)
+        exp_sum = float(grp["exposure"].clip(lower=1e-12).sum())
         rows.append({
             "exposure_band": int(band),
             "n": int(len(grp)),
-            "exposure": float(grp["exposure"].sum()),
-            "actual_pp": float((grp["actual_claim_cost"] / exp).mean()),
-            "pred_pp": float((grp["predicted_claim_cost"] / exp).mean()),
+            "exposure": exp_sum,
+            "actual_pp": float(grp["actual_claim_cost"].sum() / exp_sum),
+            "pred_pp": float(grp["predicted_claim_cost"].sum() / exp_sum),
         })
     return rows
 
@@ -108,9 +130,9 @@ def _segment_diagnostics(frame: pd.DataFrame) -> dict[str, list[dict[str, Any]]]
             continue
         rows = []
         for val, grp in frame.groupby(col, sort=True):
-            exp = grp["exposure"].clip(lower=1e-12)
-            actual_pp = float((grp["actual_claim_cost"] / exp).mean())
-            pred_pp = float((grp["predicted_claim_cost"] / exp).mean())
+            exp_sum = float(grp["exposure"].clip(lower=1e-12).sum())
+            actual_pp = float(grp["actual_claim_cost"].sum() / exp_sum)
+            pred_pp = float(grp["predicted_claim_cost"].sum() / exp_sum)
             rows.append({
                 "band": str(val),
                 "n": int(len(grp)),

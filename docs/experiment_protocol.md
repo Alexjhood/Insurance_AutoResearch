@@ -76,8 +76,17 @@ Every experiment folder under `artifacts/experiments/<experiment_id>/` must cont
 | `diagnostics.json` | Calibration decile table, PSI, segment loss ratios |
 | `environment_manifest.json` | Git SHA, dirty flag, pip freeze, file SHA256s |
 | `capping_diagnostics.json` | Claim cap threshold and affected rows |
+| `validation_report.json` | Autonomous proposal output sanity/lift checks, when run through the proposal controller |
+| `model_attempt_N.py` | Run-local modelling script used by autonomous proposal attempt N |
 
 ## Proposal Constraints
+
+Autonomous proposals must provide a run-local script for every non-`global_mean`
+experiment via `experiment_config.model.script_path`. The script is copied into
+the proposal iteration directory, scanned for holdout markers, and executed
+through the `fit_predict()` contract. Built-in GLM/GBM ideas are allowed, but
+the implementation must live in the run-local script rather than relying on a
+pre-existing module in `src/autoresearch/models`.
 
 The proposal search space is validated before any experiment is run. Per-family bounds:
 

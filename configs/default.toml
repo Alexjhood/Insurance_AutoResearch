@@ -79,6 +79,10 @@ allow_open_model_families = true
 # LLM may add feature builders by creating src/autoresearch/features/<module>.py
 # and specifying feature_builder_module = "autoresearch.features.<module>" in [model].
 allow_feature_builder_modules = true
+# Autonomous proposals must provide a run-local modelling script. Built-in
+# model families may be used as research ideas, but their implementation must
+# be written into the experiment artifact instead of imported from src/models.
+requires_model_script = true
 
 [search_space.regularized_linear]
 min_alpha = 0.01

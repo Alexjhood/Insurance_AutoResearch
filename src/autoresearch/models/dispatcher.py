@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib.util
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -37,6 +39,7 @@ def dispatch_model(
     hyperparameters: dict[str, Any] | None = None,
     feature_inclusions: list[str] | None = None,
     feature_exclusions: list[str] | None = None,
+    model_script_path: Path | None = None,
 ) -> ModelResult:
     """Fit the requested model family and return scored predictions.
 
@@ -72,8 +75,20 @@ def dispatch_model(
         raise ValueError("No rows available for scoring")
 
     predicted_cost, notes = _call_model(
-        model_family, target_strategy, train, score, hp, feature_inclusions, feature_exclusions
+        model_family,
+        target_strategy,
+        train,
+        score,
+        hp,
+        feature_inclusions,
+        feature_exclusions,
+        model_script_path,
     )
+    predicted_cost = np.asarray(predicted_cost, dtype=float)
+    if len(predicted_cost) != len(score):
+        raise ValueError(
+            f"Model returned {len(predicted_cost)} predictions for {len(score)} scored rows"
+        )
 
     predictions = pd.DataFrame({
         RECORD_ID: score[RECORD_ID].to_numpy(),
@@ -97,8 +112,19 @@ def _call_model(
     hp: dict[str, Any],
     feature_inclusions: list[str] | None,
     feature_exclusions: list[str] | None,
+    model_script_path: Path | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Dispatch to the correct model implementation, returning (predicted_cost, notes)."""
+
+    if model_script_path is not None:
+        return _call_script_model(
+            model_script_path,
+            train,
+            score,
+            feature_inclusions=feature_inclusions,
+            feature_exclusions=feature_exclusions,
+            hyperparameters=hp,
+        )
 
     if model_family == "tweedie_glm":
         from autoresearch.models.glm import run_tweedie_glm
@@ -172,3 +198,41 @@ def _call_model(
         feature_exclusions=feature_exclusions,
         **hp,
     )
+
+
+def _call_script_model(
+    path: Path,
+    train: pd.DataFrame,
+    score: pd.DataFrame,
+    *,
+    feature_inclusions: list[str] | None,
+    feature_exclusions: list[str] | None,
+    hyperparameters: dict[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Load a run-local modelling script and execute its fit_predict hook."""
+
+    if not path.exists():
+        raise ValueError(f"Model script does not exist: {path}")
+    module_name = f"_autoresearch_experiment_model_{abs(hash(path.resolve()))}"
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"Could not load model script: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not hasattr(module, "fit_predict"):
+        raise ValueError(f"Model script must expose fit_predict(): {path}")
+    predicted, notes = module.fit_predict(
+        train,
+        score,
+        feature_inclusions=feature_inclusions,
+        feature_exclusions=feature_exclusions,
+        **hyperparameters,
+    )
+    if notes is None:
+        notes = {}
+    if not isinstance(notes, dict):
+        raise ValueError("Model script fit_predict() must return notes as a dict")
+    notes = dict(notes)
+    notes.setdefault("model_script_path", str(path))
+    notes.setdefault("uses_run_local_script", True)
+    return predicted, notes

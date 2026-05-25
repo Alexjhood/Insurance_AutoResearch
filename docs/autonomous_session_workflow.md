@@ -22,7 +22,7 @@ autoresearch resume-session
 1. Read `artifacts/auto_research/handoffs/latest_handoff.md`.
 2. Read `artifacts/auto_research/context/latest_context.json`.
 3. Read `artifacts/auto_research/handoffs/proposal_instructions.md`.
-4. Write one proposal JSON file into `artifacts/auto_research/proposals/inbox/`.
+4. Write one proposal JSON file and one neighbouring model script into `artifacts/auto_research/proposals/inbox/`.
 5. Run:
 
 ```bash
@@ -30,6 +30,19 @@ autoresearch run-session-cycle
 ```
 
 If the session returns `waiting_for_proposal`, repeat from step 1. The framework refreshes handoff artifacts after ingestion, evaluation, comparison, promotion decisions, pause/failure/completion, and session state changes.
+
+For non-`global_mean` proposals, set `experiment_config.model.script_path` in
+the JSON to the script filename. The script must expose
+`fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None,
+**hyperparameters)` and return original-space claim-cost predictions plus a
+notes dict. Do not rely on pre-existing implementations under
+`src/autoresearch/models`; if a GLM, GBM, or any other method is the chosen
+research direction, write that implementation in the run-local script.
+
+If output validation fails, the session may return `waiting_for_repair` and
+write `repair_request_2.json` or `repair_request_3.json` beside the proposal.
+Revise the requested `model_attempt_N.py` and rerun `autoresearch
+run-session-cycle`. After three failed attempts, the proposal is failed.
 
 ## Pause Or Stop
 

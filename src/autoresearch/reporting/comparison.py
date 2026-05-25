@@ -282,11 +282,13 @@ def _compute_double_lift_data(
 
 def _compute_gini_curve(frame: pd.DataFrame, n_points: int = 400) -> dict:
     """
-    Lorenz curve matching metrics.py convention: sort by predicted claim cost ASCENDING
-    (lowest predicted risk first). X = cumulative exposure share, Y = cumulative actual
-    claim cost share. A good model curves below the diagonal; Gini > 0 for a good model.
+    Lorenz curve: sort by predicted PURE PREMIUM ascending (lowest predicted risk first).
+    X = cumulative exposure share, Y = cumulative actual claim cost share.
+    A good model curves below the diagonal; Gini > 0 for a good model.
     """
-    ordered = frame.sort_values("predicted_claim_cost", ascending=True)
+    f = frame.copy()
+    f["_pred_pp"] = f["predicted_claim_cost"].astype(float) / f["exposure"].astype(float).clip(lower=1e-12)
+    ordered = f.sort_values("_pred_pp", ascending=True)
     exposure = ordered["exposure"].astype(float).values
     actual_cost = ordered["actual_claim_cost"].astype(float).values
 

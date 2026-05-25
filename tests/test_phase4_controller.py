@@ -129,6 +129,34 @@ def test_validate_proposal_rejects_milestone_and_bad_alpha(tmp_path: Path) -> No
     assert any("milestone_holdout" in error for error in errors)
 
 
+def test_validate_proposal_requires_script_when_configured(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.search_space["requires_model_script"] = True
+    config.search_space["allow_open_model_families"] = True
+    space = allowed_search_space(config, {"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]})
+    proposal = {
+        "proposal_id": "script_required",
+        "parent_experiment_id": "direct",
+        "experiment_name": "script_required_exp",
+        "rationale": "Need run-local script.",
+        "change_summary": "Missing script.",
+        "expected_benefit": "none",
+        "key_risk": "invalid",
+        "experiment_config": {
+            "experiment_name": "script_required_exp",
+            "model_family": "new_family",
+            "target_strategy": "direct_pure_premium",
+            "parent_experiment_id": "direct",
+            "preprocessing": {"claim_capping_enabled": True, "claim_cap_threshold": 100000},
+            "model": {},
+        },
+    }
+
+    errors = validate_proposal(proposal, space)
+
+    assert any("script_path" in error for error in errors)
+
+
 def test_initialise_champion_records_history_and_branch(tmp_path: Path) -> None:
     config = _config(tmp_path)
     _record_direct(config)

@@ -21,6 +21,7 @@ from autoresearch.utils.environment import capture_environment
 from autoresearch.utils.integrity import (
     check_integrity,
     run_pytest,
+    scan_file_for_holdout_access,
     scan_for_holdout_access,
 )
 from autoresearch.utils.io import write_json
@@ -113,6 +114,31 @@ def run_experiment(
     target_strategy = exp.get("target_strategy", "direct_pure_premium")
     hyperparameters = {k: v for k, v in model_cfg.items()
                        if k not in {"feature_inclusions", "feature_exclusions"}}
+    model_script_path = _resolve_model_script_path(experiment_config_path, model_cfg)
+    if model_script_path is not None:
+        script_violations = scan_file_for_holdout_access(model_script_path)
+        if script_violations:
+            msg = "Model-script holdout-access scan failed:\n" + "\n".join(script_violations)
+            record_experiment(
+                config.registry_path,
+                experiment_id=experiment_id,
+                experiment_name=exp.get("experiment_name", "unknown"),
+                model_family=exp.get("model_family", "unknown"),
+                target_strategy=exp.get("target_strategy", "unknown"),
+                preprocessing_summary={},
+                claim_cap_threshold=None,
+                status="failed",
+                parent_experiment_id=None,
+                config_snapshot_path=None,
+                metrics_path=None,
+                artifacts={},
+                code_version=None,
+                notes=msg,
+            )
+            raise ValueError(msg)
+        hyperparameters.pop("script_path", None)
+        hyperparameters.pop("model_script_path", None)
+        hyperparameters.pop("script_sha256", None)
 
     result = dispatch_model(
         frame=frame,
@@ -124,6 +150,7 @@ def run_experiment(
         hyperparameters=hyperparameters,
         feature_inclusions=model_cfg.get("feature_inclusions"),
         feature_exclusions=model_cfg.get("feature_exclusions") or None,
+        model_script_path=model_script_path,
     )
 
     metrics = evaluate_predictions(
@@ -141,6 +168,7 @@ def run_experiment(
         "experiment_id": experiment_id,
         "experiment_config_path": str(experiment_config_path),
         "experiment": exp,
+        "model_script_path": str(model_script_path) if model_script_path else None,
         "project_preprocessing_defaults": {
             "claim_capping_enabled": config.claim_capping_enabled,
             "claim_cap_threshold": config.claim_cap_threshold,
@@ -198,6 +226,8 @@ def run_experiment(
         "diagnostics": diagnostics_path,
         "environment_manifest": env_path,
     }
+    if model_script_path is not None:
+        artifacts["model_script"] = model_script_path
     record_experiment(
         config.registry_path,
         experiment_id=experiment_id,
@@ -228,3 +258,13 @@ def _experiment_id(name: str) -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     safe_name = "".join(c if c.isalnum() or c in {"-", "_"} else "_" for c in name)
     return f"{stamp}_{safe_name}"
+
+
+def _resolve_model_script_path(experiment_config_path: Path, model_cfg: dict[str, Any]) -> Path | None:
+    raw = model_cfg.get("script_path") or model_cfg.get("model_script_path")
+    if not raw:
+        return None
+    path = Path(str(raw))
+    if not path.is_absolute():
+        path = experiment_config_path.parent / path
+    return path.resolve()

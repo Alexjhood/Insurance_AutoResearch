@@ -12,9 +12,9 @@ The current project is a strong deterministic experimentation backbone but restr
 
 ## Bucket 1 — Open the search space (implemented)
 
-### 1.1 Demote JSON proposal schema to optional convenience
-- The primary agent workflow is now AGENT.md-driven: CC/Codex edits code on a branch, runs `autoresearch run-experiment`, and reads the result.
-- `controller/proposal_schema.py` and `controller/workflow.py` are retained for the legacy file-handoff path; they are not the primary loop.
+### 1.1 Proposal schema plus run-local scripts
+- The primary agent workflow is file-handoff driven: CC/Codex writes one proposal JSON and one neighbouring model script, then runs `autoresearch run-session-cycle`.
+- The proposal schema remains the control plane; the run-local script is the modelling implementation for that experiment.
 
 ### 1.2 Python feature-builder path in experiment TOML
 - Experiment TOMLs may specify `feature_builder_module = "autoresearch.features.my_transforms"`.
@@ -22,11 +22,11 @@ The current project is a strong deterministic experimentation backbone but restr
 - The LLM creates feature builder files under `src/autoresearch/features/`.
 - New entry point protocol: `build_features(frame: pd.DataFrame) -> pd.DataFrame`.
 
-### 1.3 Open model-family registry
-- The dispatcher tries `importlib.import_module(f"autoresearch.models.{model_family}")` for any unknown family.
-- New model files expose `fit_predict(train, score, *, feature_inclusions, feature_exclusions, **hp) -> (predictions_array, notes_dict)`.
-- No validator changes needed; the integrity scan catches holdout refs automatically.
-- LLM may `pip install lightgbm / xgboost / catboost` and update `pyproject.toml`.
+### 1.3 Run-local model scripts
+- Autonomous proposals set `experiment_config.model.script_path` to a Python file beside the proposal.
+- Scripts expose `fit_predict(train, score, *, feature_inclusions, feature_exclusions, **hp) -> (predictions_array, notes_dict)`.
+- The dispatcher loads the script by path, scans it for holdout refs, and records it as an artifact.
+- LLM may choose GLM, GBM, LightGBM, XGBoost, CatBoost, or any other model direction, but writes the implementation into the experiment script.
 
 ---
 
@@ -110,10 +110,10 @@ autoresearch export-context
 # Each research cycle (agent does this)
 # 1. Read RESEARCH_LOG.md, export-context output, recent experiment metrics
 # 2. Form a hypothesis
-# 3. Create/edit code: new model file or feature builder, plus experiment TOML
+# 3. Create proposal JSON plus run-local model_attempt_1.py
 # 4. pytest  (must pass)
-# 5. autoresearch run-experiment configs/experiments/<new>.toml
-# 6. autoresearch compare-to-champion <experiment_id>
+# 5. autoresearch run-session-cycle
+# 6. If waiting_for_repair, write requested model_attempt_N.py and rerun
 # 7. Read promotion_report.json and (if promoted) milestone_report
 # 8. Append to RESEARCH_LOG.md
 # Repeat
