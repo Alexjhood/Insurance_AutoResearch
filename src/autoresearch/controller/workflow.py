@@ -281,26 +281,16 @@ def _require_champion(config: ProjectConfig) -> dict[str, Any]:
 
 
 def _to_toml(data: dict[str, Any]) -> str:
-    lines: list[str] = []
-    scalar_keys = [key for key, value in data.items() if not isinstance(value, dict)]
-    for key in scalar_keys:
-        lines.append(f"{key} = {_toml_value(data[key])}")
-    for key, value in data.items():
-        if isinstance(value, dict):
-            lines.append("")
-            lines.append(f"[{key}]")
-            for child_key, child_value in value.items():
-                lines.append(f"{child_key} = {_toml_value(child_value)}")
-    return "\n".join(lines) + "\n"
+    import tomli_w
 
+    # tomli_w requires values to be TOML-compatible; replace None with empty string
+    def _sanitise(obj: Any) -> Any:
+        if obj is None:
+            return ""
+        if isinstance(obj, dict):
+            return {k: _sanitise(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_sanitise(i) for i in obj]
+        return obj
 
-def _toml_value(value: Any) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    if isinstance(value, list):
-        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
-    if value is None:
-        return '""'
-    return json.dumps(str(value))
+    return tomli_w.dumps(_sanitise(data))

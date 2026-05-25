@@ -395,17 +395,10 @@ def detect_duplicate_proposal(config: ProjectConfig, proposal_id: str) -> dict[s
 
 
 def proposal_fingerprint(proposal: dict[str, Any]) -> str:
-    """Return a stable fingerprint for obvious duplicate detection."""
+    """Delegate to schema module for consistent float-tolerant fingerprinting."""
 
-    cfg = dict(proposal.get("config") or {})
-    cfg.pop("experiment_name", None)
-    cfg.pop("parent_experiment_id", None)
-    model = dict(cfg.get("model") or {})
-    for key in ("feature_inclusions", "feature_exclusions"):
-        if isinstance(model.get(key), list):
-            model[key] = sorted(model[key])
-    cfg["model"] = model
-    return json.dumps(cfg, sort_keys=True, separators=(",", ":"))
+    from autoresearch.controller.proposal_schema import proposal_fingerprint as _fp
+    return _fp(proposal)
 
 
 def write_nonpromotion_summary(

@@ -1,4 +1,4 @@
-"""Stable split-pack generation."""
+"""Stable split-pack and k-fold assignment generation."""
 
 from __future__ import annotations
 
@@ -41,6 +41,27 @@ def assign_split(unit_value: float, ratios: dict[str, float]) -> str:
         if unit_value < cumulative:
             return name
     return SPLIT_ORDER[-1]
+
+
+def generate_fold_assignments(
+    frame: pd.DataFrame,
+    id_column: str,
+    n_folds: int,
+    seed: int,
+) -> pd.DataFrame:
+    """Assign deterministic k-fold labels (1..n_folds) to each row."""
+
+    if id_column not in frame.columns:
+        raise ValueError(f"Fold id column {id_column!r} is not present")
+    if n_folds < 2:
+        raise ValueError("n_folds must be at least 2")
+
+    fold_frame = pd.DataFrame({"record_id": frame[id_column]})
+    fold_frame["fold_unit"] = fold_frame["record_id"].map(lambda v: stable_unit(v, seed + 1))
+    fold_frame = fold_frame.sort_values("fold_unit").reset_index(drop=True)
+    n = len(fold_frame)
+    fold_frame["fold"] = [i % n_folds + 1 for i in range(n)]
+    return fold_frame[["record_id", "fold"]].sort_values("record_id").reset_index(drop=True)
 
 
 def generate_split_pack(

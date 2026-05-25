@@ -1,20 +1,22 @@
-"""Deterministic Phase 2 experiment runner."""
+"""Deterministic experiment runner supporting all model families."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-import subprocess
 import tomllib
 from typing import Any
 
 import pandas as pd
 
 from autoresearch.config import ProjectConfig, ensure_project_dirs
+from autoresearch.data.holdout_vault import load_search_dataset
 from autoresearch.data.preprocessing import apply_claim_capping
 from autoresearch.evaluation.metrics import evaluate_predictions
 from autoresearch.experiment_registry.registry import init_registry, record_experiment
-from autoresearch.models.baselines import RAW_CLAIM_COST, run_baseline_model
+from autoresearch.models.baselines import RAW_CLAIM_COST
+from autoresearch.models.dispatcher import dispatch_model
+from autoresearch.utils.environment import capture_environment
 from autoresearch.utils.io import write_json
 
 
@@ -26,7 +28,7 @@ def load_experiment_config(path: Path) -> dict[str, Any]:
 
 
 def run_experiment(config: ProjectConfig, experiment_config_path: Path) -> dict[str, Path]:
-    """Run one deterministic baseline experiment end to end."""
+    """Run one deterministic experiment end to end."""
 
     ensure_project_dirs(config)
     init_registry(config.registry_path)
@@ -36,9 +38,10 @@ def run_experiment(config: ProjectConfig, experiment_config_path: Path) -> dict[
     run_dir = config.artifacts_dir / "experiments" / experiment_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    frame = pd.read_parquet(config.processed_dir / f"{config.agent_dataset_name}.parquet")
+    frame = load_search_dataset(config.processed_dir, config.agent_dataset_name)
     split_frame = pd.read_csv(config.splits_dir / "split_pack.csv")
 
+    # Preprocessing
     preprocessing = exp.get("preprocessing", {})
     cap_enabled = bool(preprocessing.get("claim_capping_enabled", config.claim_capping_enabled))
     cap_threshold = float(preprocessing.get("claim_cap_threshold", config.claim_cap_threshold))
@@ -49,18 +52,35 @@ def run_experiment(config: ProjectConfig, experiment_config_path: Path) -> dict[
         enabled=cap_enabled,
     )
 
-    model_config = exp.get("model", {})
-    result = run_baseline_model(
+    # Model dispatch
+    model_cfg = exp.get("model", {})
+    model_family = exp.get("model_family", "regularized_linear")
+    target_strategy = exp.get("target_strategy", "direct_pure_premium")
+    hyperparameters = {k: v for k, v in model_cfg.items()
+                       if k not in {"feature_inclusions", "feature_exclusions"}}
+
+    result = dispatch_model(
         frame=frame,
         split_frame=split_frame,
-        target_strategy=exp["target_strategy"],
+        model_family=model_family,
+        target_strategy=target_strategy,
         train_split=config.ordinary_train_split,
         score_splits=config.ordinary_eval_splits,
-        alpha=float(model_config.get("alpha", 1.0)),
-        feature_inclusions=model_config.get("feature_inclusions"),
-        feature_exclusions=model_config.get("feature_exclusions"),
+        hyperparameters=hyperparameters,
+        feature_inclusions=model_cfg.get("feature_inclusions"),
+        feature_exclusions=model_cfg.get("feature_exclusions") or None,
     )
-    metrics = evaluate_predictions(result.predictions, config.ordinary_eval_splits)
+
+    metrics = evaluate_predictions(
+        result.predictions,
+        config.ordinary_eval_splits,
+        tweedie_power=config.tweedie_power,
+        primary_metric=config.primary_metric,
+    )
+
+    # Diagnostics
+    from autoresearch.evaluation.diagnostics import compute_diagnostics
+    diagnostics = compute_diagnostics(result.predictions, eval_split=config.ordinary_eval_splits[0])
 
     config_snapshot = {
         "experiment_id": experiment_id,
@@ -83,21 +103,34 @@ def run_experiment(config: ProjectConfig, experiment_config_path: Path) -> dict[
         **metrics,
         "experiment_id": experiment_id,
         "experiment_name": exp["experiment_name"],
-        "model_family": exp["model_family"],
-        "target_strategy": exp["target_strategy"],
+        "model_family": model_family,
+        "target_strategy": target_strategy,
         "preprocessing": config_snapshot["effective_preprocessing"],
         "model_notes": result.model_notes,
     }
+
+    # Environment manifest
+    env_manifest = capture_environment(
+        config.root,
+        data_files={
+            "split_pack": config.splits_dir / "split_pack.csv",
+            "agent_dataset_search": config.processed_dir / "agent_dataset_search.parquet",
+        },
+    )
 
     config_path = run_dir / "config_snapshot.json"
     metrics_path = run_dir / "metrics.json"
     split_metrics_path = run_dir / "split_metrics.csv"
     predictions_path = run_dir / "predictions.csv"
     capping_path = run_dir / "capping_diagnostics.json"
+    diagnostics_path = run_dir / "diagnostics.json"
+    env_path = run_dir / "environment_manifest.json"
 
     write_json(config_path, config_snapshot)
     write_json(metrics_path, metrics_payload)
     write_json(capping_path, capping_diagnostics)
+    write_json(diagnostics_path, diagnostics)
+    write_json(env_path, env_manifest)
     pd.DataFrame(metrics["split_metrics"]).to_csv(split_metrics_path, index=False)
     result.predictions.to_csv(predictions_path, index=False)
 
@@ -107,13 +140,15 @@ def run_experiment(config: ProjectConfig, experiment_config_path: Path) -> dict[
         "split_metrics": split_metrics_path,
         "predictions": predictions_path,
         "capping_diagnostics": capping_path,
+        "diagnostics": diagnostics_path,
+        "environment_manifest": env_path,
     }
     record_experiment(
         config.registry_path,
         experiment_id=experiment_id,
         experiment_name=exp["experiment_name"],
-        model_family=exp["model_family"],
-        target_strategy=exp["target_strategy"],
+        model_family=model_family,
+        target_strategy=target_strategy,
         preprocessing_summary=config_snapshot["effective_preprocessing"],
         claim_cap_threshold=cap_threshold if cap_enabled else None,
         status="completed",
@@ -121,8 +156,8 @@ def run_experiment(config: ProjectConfig, experiment_config_path: Path) -> dict[
         config_snapshot_path=config_path,
         metrics_path=metrics_path,
         artifacts=artifacts,
-        code_version=_git_hash(config.root),
-        notes="Deterministic Phase 2 baseline; milestone holdout not accessed.",
+        code_version=env_manifest.get("git_sha"),
+        notes=f"Experiment with {model_family}/{target_strategy}; milestone holdout not accessed.",
     )
     return artifacts
 
@@ -136,17 +171,5 @@ def run_all_baselines(config: ProjectConfig) -> list[dict[str, Path]]:
 
 def _experiment_id(name: str) -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    safe_name = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in name)
+    safe_name = "".join(c if c.isalnum() or c in {"-", "_"} else "_" for c in name)
     return f"{stamp}_{safe_name}"
-
-
-def _git_hash(root: Path) -> str | None:
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=root,
-            text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip()
-    except Exception:
-        return None

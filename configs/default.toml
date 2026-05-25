@@ -1,6 +1,7 @@
 [paths]
 raw_data_dir = "data/raw"
 processed_dir = "data/processed"
+holdout_vault_dir = "data/holdout_vault"
 metadata_dir = "data/metadata"
 splits_dir = "data/splits"
 artifacts_dir = "artifacts"
@@ -23,6 +24,11 @@ milestone_holdout = 0.20
 [evaluation]
 ordinary_train_split = "train"
 ordinary_eval_splits = ["search_validation"]
+primary_metric = "tweedie_deviance_p15"
+tweedie_power = 1.5
+use_cv = false
+cv_folds = 5
+cv_n_repeats = 1
 
 [resampling]
 repeated_resamples = 30
@@ -32,13 +38,19 @@ random_seed = 20260524
 
 [promotion]
 minimum_mean_lift = 0.0
-minimum_win_rate = 0.55
+min_relative_lift = 0.005
+min_absolute_lift = 0.0
+minimum_win_rate = 0.60
 bootstrap_lower_bound = 0.0
+bootstrap_lower_bound_relative = 0.0
 confidence_level = 0.90
+max_predicted_to_actual_drift = 0.05
+require_diagnostics = true
+bonferroni_lookback = 10
 
 [llm]
 provider = "file_handoff"
-model = "external-codex-or-claude-code"
+model = "claude-opus-4-7"
 temperature = 0.2
 proposal_file = "artifacts/auto_research/proposals/inbox/manual_proposals.jsonl"
 
@@ -55,9 +67,34 @@ policy = "reject"
 lookback = 25
 
 [search_space]
-model_families = ["regularized_linear"]
+model_families = ["tweedie_glm", "frequency_severity_glm", "tweedie_gbm", "regularized_linear"]
 target_strategies = ["direct_pure_premium", "frequency_severity"]
+allow_legacy_baselines = false
+
+[search_space.regularized_linear]
 min_alpha = 0.01
 max_alpha = 100.0
-claim_cap_thresholds = [50000, 75000, 100000, 150000, 200000]
+
+[search_space.tweedie_glm]
+min_alpha = 0.001
+max_alpha = 10.0
+power_choices = [1.1, 1.3, 1.5, 1.7, 1.9]
+
+[search_space.frequency_severity_glm]
+min_freq_alpha = 0.001
+max_freq_alpha = 10.0
+min_sev_alpha = 0.001
+max_sev_alpha = 10.0
+
+[search_space.tweedie_gbm]
+min_max_iter = 100
+max_max_iter = 2000
+max_depth_choices = [3, 5, 7, 9]
+min_learning_rate = 0.01
+max_learning_rate = 0.2
+min_samples_leaf_choices = [50, 200, 500, 1000]
+
+[search_space.preprocessing]
+claim_cap_thresholds = [50000, 75000, 100000, 150000, 200000, 500000]
 allow_disable_claim_capping = false
+allow_log1p_features = ["density_index_i"]

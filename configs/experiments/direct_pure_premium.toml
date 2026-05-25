@@ -1,5 +1,5 @@
-experiment_name = "direct_pure_premium_baseline"
-model_family = "regularized_linear"
+experiment_name = "direct_pure_premium_tweedie_glm"
+model_family = "tweedie_glm"
 target_strategy = "direct_pure_premium"
 parent_experiment_id = ""
 
@@ -8,4 +8,5 @@ claim_capping_enabled = true
 claim_cap_threshold = 100000
 
 [model]
-alpha = 1.0
+alpha = 0.1
+power = 1.5

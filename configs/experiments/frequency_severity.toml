@@ -1,5 +1,5 @@
-experiment_name = "frequency_severity_baseline"
-model_family = "regularized_linear"
+experiment_name = "frequency_severity_glm_baseline"
+model_family = "frequency_severity_glm"
 target_strategy = "frequency_severity"
 parent_experiment_id = ""
 
@@ -8,4 +8,5 @@ claim_capping_enabled = true
 claim_cap_threshold = 100000
 
 [model]
-alpha = 1.0
+freq_alpha = 0.1
+sev_alpha = 0.1

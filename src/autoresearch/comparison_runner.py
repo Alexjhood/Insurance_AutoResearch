@@ -1,4 +1,4 @@
-"""Phase 3 volatility-aware repeated evaluation and comparison workflows."""
+"""Volatility-aware repeated evaluation and comparison workflows."""
 
 from __future__ import annotations
 
@@ -20,11 +20,12 @@ from autoresearch.experiment_registry.registry import (
     get_official_champion,
     get_experiment,
     init_registry,
+    list_comparisons,
     list_experiments,
     record_comparison,
     record_experiment_artifacts,
 )
-from autoresearch.utils.io import write_json
+from autoresearch.utils.io import read_json, write_json
 
 
 def run_repeated_evaluation(config: ProjectConfig, experiment_id: str) -> dict[str, Path]:
@@ -43,12 +44,14 @@ def run_repeated_evaluation(config: ProjectConfig, experiment_id: str) -> dict[s
         n_resamples=config.repeated_resamples,
         seed=config.resampling_seed,
         resample_fraction=config.resample_fraction,
+        tweedie_power=config.tweedie_power,
+        primary_metric=config.primary_metric,
     )
     summary = {
         "experiment_id": experiment_id,
         "experiment_name": experiment.get("experiment_name"),
         "eval_split": eval_split,
-        "primary_metric": "rmse_pure_premium",
+        "primary_metric": config.primary_metric,
         "lower_is_better": True,
         "n_resamples": config.repeated_resamples,
         "resample_fraction": config.resample_fraction,
@@ -89,32 +92,47 @@ def compare_experiments(config: ProjectConfig, champion_id: str, challenger_id: 
         n_resamples=config.repeated_resamples,
         seed=config.resampling_seed,
         resample_fraction=config.resample_fraction,
+        tweedie_power=config.tweedie_power,
+        primary_metric=config.primary_metric,
     )
+
+    # Load challenger diagnostics for calibration gate check
+    challenger_diagnostics = _load_diagnostics(config, challenger_id)
+
+    # Count prior comparisons against this champion for Bonferroni adjustment
+    all_comparisons = list_comparisons(config.registry_path)
+    n_prior = sum(1 for c in all_comparisons if c.get("champion_id") == champion_id)
+    bonferroni_count = min(n_prior, config.bonferroni_lookback)
+
     bootstrap = bootstrap_lift_summary(
         per_resample["lift"],
         iterations=config.bootstrap_iterations,
         seed=config.resampling_seed + 1,
         confidence_level=config.confidence_level,
+        n_comparisons=max(1, bonferroni_count),
     )
     decision = promotion_decision(
         comparison_summary,
         bootstrap,
         PromotionRules(
             minimum_mean_lift=config.minimum_mean_lift,
+            min_relative_lift=config.min_relative_lift,
+            min_absolute_lift=config.min_absolute_lift,
             minimum_win_rate=config.minimum_win_rate,
             bootstrap_lower_bound=config.bootstrap_lower_bound,
+            bootstrap_lower_bound_relative=config.bootstrap_lower_bound_relative,
             confidence_level=config.confidence_level,
+            max_predicted_to_actual_drift=config.max_predicted_to_actual_drift,
+            require_diagnostics=config.require_diagnostics,
+            bonferroni_lookback=config.bonferroni_lookback,
         ),
+        challenger_diagnostics=challenger_diagnostics,
+        n_prior_comparisons=bonferroni_count,
     )
 
     comparison_id = _comparison_id(champion_id, challenger_id)
     out_dir = config.artifacts_dir / "comparisons" / comparison_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    per_resample_path = out_dir / "paired_resample_scores.csv"
-    comparison_path = out_dir / "comparison_summary.json"
-    bootstrap_path = out_dir / "bootstrap_summary.json"
-    decision_path = out_dir / "promotion_decision.json"
-    report_path = out_dir / "promotion_report.json"
 
     payload = {
         "comparison_id": comparison_id,
@@ -122,6 +140,12 @@ def compare_experiments(config: ProjectConfig, champion_id: str, challenger_id: 
         "bootstrap_summary": bootstrap,
         "promotion_decision": decision,
     }
+    per_resample_path = out_dir / "paired_resample_scores.csv"
+    comparison_path = out_dir / "comparison_summary.json"
+    bootstrap_path = out_dir / "bootstrap_summary.json"
+    decision_path = out_dir / "promotion_decision.json"
+    report_path = out_dir / "promotion_report.json"
+
     per_resample.to_csv(per_resample_path, index=False)
     write_json(comparison_path, comparison_summary)
     write_json(bootstrap_path, bootstrap)
@@ -150,7 +174,7 @@ def compare_experiments(config: ProjectConfig, champion_id: str, challenger_id: 
 
 
 def compare_against_current_champion(config: ProjectConfig, challenger_id: str) -> dict[str, Path]:
-    """Compare challenger against official champion, falling back to point-estimate champion."""
+    """Compare challenger against official champion."""
 
     official = get_official_champion(config.registry_path)
     champion = official["champion_id"] if official else current_champion_id(config)
@@ -176,6 +200,20 @@ def _artifact_path(config: ProjectConfig, experiment_id: str, artifact_type: str
         if artifact["artifact_type"] == artifact_type:
             return Path(artifact["path"])
     raise ValueError(f"Experiment {experiment_id} has no {artifact_type!r} artifact")
+
+
+def _load_diagnostics(config: ProjectConfig, experiment_id: str) -> dict[str, Any] | None:
+    """Load diagnostics.json for an experiment if it exists."""
+
+    try:
+        diag_path = _artifact_path(config, experiment_id, "diagnostics")
+        return read_json(diag_path)
+    except Exception:
+        # Fall back to filesystem path
+        diag_path = config.artifacts_dir / "experiments" / experiment_id / "diagnostics.json"
+        if diag_path.exists():
+            return read_json(diag_path)
+        return None
 
 
 def _comparison_id(champion_id: str, challenger_id: str) -> str:

@@ -18,6 +18,7 @@ class ProjectConfig:
     root: Path
     raw_data_dir: Path
     processed_dir: Path
+    holdout_vault_dir: Path
     metadata_dir: Path
     splits_dir: Path
     artifacts_dir: Path
@@ -30,26 +31,43 @@ class ProjectConfig:
     split_ratios: dict[str, float]
     ordinary_train_split: str
     ordinary_eval_splits: tuple[str, ...]
+    # new evaluation settings
+    primary_metric: str
+    tweedie_power: float
+    use_cv: bool
+    cv_folds: int
+    cv_n_repeats: int
     repeated_resamples: int
     bootstrap_iterations: int
     resample_fraction: float
     resampling_seed: int
+    # promotion
     minimum_mean_lift: float
+    min_relative_lift: float
+    min_absolute_lift: float
     minimum_win_rate: float
     bootstrap_lower_bound: float
+    bootstrap_lower_bound_relative: float
     confidence_level: float
+    max_predicted_to_actual_drift: float
+    require_diagnostics: bool
+    bonferroni_lookback: int
+    # llm
     llm_provider: str
     llm_model: str
     llm_temperature: float
     llm_proposal_file: Path
+    # handoff dirs
     handoff_base_dir: Path
     handoff_context_dir: Path
     handoff_proposal_inbox_dir: Path
     handoff_proposal_processed_dir: Path
     handoff_results_dir: Path
     handoff_handoffs_dir: Path
+    # dedup
     deduplication_policy: str
     deduplication_lookback: int
+    # search space (raw dict for flexibility)
     search_space: dict[str, object]
 
 
@@ -81,6 +99,7 @@ def load_config(config_path: str | Path | None = None) -> ProjectConfig:
         root=PROJECT_ROOT,
         raw_data_dir=_resolve(PROJECT_ROOT, paths["raw_data_dir"]),
         processed_dir=_resolve(PROJECT_ROOT, paths["processed_dir"]),
+        holdout_vault_dir=_resolve(PROJECT_ROOT, paths.get("holdout_vault_dir", "data/holdout_vault")),
         metadata_dir=_resolve(PROJECT_ROOT, paths["metadata_dir"]),
         splits_dir=_resolve(PROJECT_ROOT, paths["splits_dir"]),
         artifacts_dir=_resolve(PROJECT_ROOT, paths["artifacts_dir"]),
@@ -93,14 +112,25 @@ def load_config(config_path: str | Path | None = None) -> ProjectConfig:
         split_ratios={key: float(value) for key, value in splits.items()},
         ordinary_train_split=str(evaluation["ordinary_train_split"]),
         ordinary_eval_splits=tuple(str(value) for value in evaluation["ordinary_eval_splits"]),
+        primary_metric=str(evaluation.get("primary_metric", "tweedie_deviance_p15")),
+        tweedie_power=float(evaluation.get("tweedie_power", 1.5)),
+        use_cv=bool(evaluation.get("use_cv", False)),
+        cv_folds=int(evaluation.get("cv_folds", 5)),
+        cv_n_repeats=int(evaluation.get("cv_n_repeats", 1)),
         repeated_resamples=int(resampling["repeated_resamples"]),
         bootstrap_iterations=int(resampling["bootstrap_iterations"]),
         resample_fraction=float(resampling["resample_fraction"]),
         resampling_seed=int(resampling["random_seed"]),
         minimum_mean_lift=float(promotion["minimum_mean_lift"]),
+        min_relative_lift=float(promotion.get("min_relative_lift", 0.005)),
+        min_absolute_lift=float(promotion.get("min_absolute_lift", 0.0)),
         minimum_win_rate=float(promotion["minimum_win_rate"]),
         bootstrap_lower_bound=float(promotion["bootstrap_lower_bound"]),
+        bootstrap_lower_bound_relative=float(promotion.get("bootstrap_lower_bound_relative", 0.0)),
         confidence_level=float(promotion["confidence_level"]),
+        max_predicted_to_actual_drift=float(promotion.get("max_predicted_to_actual_drift", 0.05)),
+        require_diagnostics=bool(promotion.get("require_diagnostics", True)),
+        bonferroni_lookback=int(promotion.get("bonferroni_lookback", 10)),
         llm_provider=str(llm["provider"]),
         llm_model=str(llm["model"]),
         llm_temperature=float(llm["temperature"]),
@@ -122,6 +152,7 @@ def ensure_project_dirs(config: ProjectConfig) -> None:
 
     for path in (
         config.processed_dir,
+        config.holdout_vault_dir,
         config.metadata_dir,
         config.splits_dir,
         config.artifacts_dir,

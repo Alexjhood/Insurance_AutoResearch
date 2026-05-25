@@ -2,32 +2,27 @@
 
 Local Python backbone for reproducible insurance burning-cost experimentation on freMTPL2-style local data.
 
-This repository currently implements Phases 0-4 plus the file-based handoff proposal workflow:
+This repository implements a full autonomous experimentation loop: data preparation → model training → actuarially-rigorous evaluation → promotion-gated champion management → LLM-guided proposal generation.
 
-- clean `src/` Python package layout
-- config loading
-- SQLite experiment registry skeleton
-- Streamlit dashboard skeleton
-- raw data loading from `data/raw/`
-- deterministic anonymised dataset creation
-- dataset profile and metadata outputs
-- reproducible split-pack generation with a protected milestone holdout
-- configurable claim capping with visible diagnostics
-- deterministic direct and frequency-severity baseline experiments
-- registry-backed experiment comparison
-- repeated search-time resampling
-- paired champion/challenger comparison
-- bootstrap uncertainty summaries
-- explicit promotion decisions
-- official champion state and champion history
-- controlled LLM-guided proposal queue
-- branch lineage for proposed experiments
-- bounded propose -> run -> compare -> promote workflows
-- file-based Codex / Claude Code handoff artifacts
-- proposal inbox and processed proposal flow
-- focused tests for the Phase 1 data layer
+## Features
 
-Codex or Claude Code should normally act as the external experiment-design agent by reading handoff files and writing structured proposal JSON into the inbox. The Python framework remains responsible for validation, queueing, deterministic execution, comparison, promotion, registry persistence, and dashboard/reporting.
+- Clean `src/` Python package layout with a frozen `ProjectConfig` dataclass
+- SQLite experiment registry with session, proposal, branch, and champion state tables
+- Streamlit dashboard: experiment tables, promotion decisions, calibration diagnostics, proposal queue, branch lineage
+- Raw data loading from `data/raw/` with deterministic anonymisation and column renaming
+- Configurable claim capping with visible per-decile diagnostics
+- **Architecturally-separated milestone holdout vault** — `agent_dataset_search.parquet` (never contains holdout rows) stored separately from `data/holdout_vault/agent_dataset_holdout.parquet` (token-gated)
+- 5-fold deterministic CV with variance decomposition (between-fold vs. within-fold)
+- **Actuarially-correct model layer**: Tweedie GLM, frequency×severity Poisson/Gamma GLM, Tweedie GBM (HistGradientBoosting), regularized linear baseline
+- **Full actuarial metric panel**: Tweedie deviance (power=1.5) as primary metric, exposure-weighted Gini, double-lift slope, predicted-to-actual ratio, Poisson deviance
+- Calibration diagnostics by predicted decile and exposure band, PSI, segment loss ratios
+- **Hardened promotion gate**: relative lift floor (0.5%), MDE estimation, Bonferroni adjustment for multiple comparisons, calibration check
+- Reproducibility environment manifest (git SHA, pip freeze, file SHA256s) written per experiment
+- Controlled LLM-guided proposal queue with per-family hyperparameter validation
+- MockProposer with a 5-entry rotating pool (prevents autonomous loop deadlock)
+- Retry logic with exponential backoff for OpenAI/Anthropic proposers
+- Branch lineage for proposed experiments; deduplication by proposal fingerprint
+- 52 tests covering statistical claims (false-positive rate, true-positive rate, variance decomposition, holdout separation)
 
 ## Local Setup
 
@@ -39,7 +34,7 @@ python -m pip install -e ".[dev]"
 
 ## Prepare Data
 
-Raw files are expected under `data/raw/`. The current loader discovers the freMTPL2 frequency and severity files recursively by filename.
+Raw files are expected under `data/raw/`. The loader discovers freMTPL2 frequency and severity files recursively by filename.
 
 ```bash
 autoresearch prepare-data
@@ -47,16 +42,17 @@ autoresearch prepare-data
 
 This writes:
 
-- `data/processed/agent_dataset.parquet`
+- `data/processed/agent_dataset_search.parquet` — train + search_validation rows only (no holdout)
+- `data/holdout_vault/agent_dataset_holdout.parquet` — milestone holdout (token-gated)
 - `data/metadata/private_column_mapping.json`
 - `data/metadata/agent_schema.json`
 - `data/metadata/dataset_profile.json`
 - `data/metadata/capping_diagnostics.json`
 - `data/splits/split_pack.csv`
 - `data/splits/split_pack_manifest.json`
+- `data/splits/split_pack_folds.parquet` — 5-fold CV assignments
 
-The default split protocol reserves 20% of the full dataset as `milestone_holdout`.
-Ordinary baseline evaluation fits on `train` and scores on `search_validation` only.
+The default split reserves 20% of the full dataset as `milestone_holdout`. Ordinary baseline evaluation fits on `train` and scores on `search_validation` only. The holdout rows are never visible to experiment runners; access requires the `AUTORESEARCH_MILESTONE_TOKEN` environment variable.
 
 The default claim cap is configured in `configs/default.toml`:
 
@@ -80,7 +76,29 @@ The default registry lives at `artifacts/experiment_registry.sqlite`.
 streamlit run src/autoresearch/dashboard/app.py
 ```
 
-The dashboard shows project status, split metadata, capping diagnostics, baseline experiment tables, official champion state, comparison views, proposal queue, branch lineage, and file-handoff status.
+The dashboard shows project status, split metadata, capping diagnostics, baseline experiment tables, official champion state, comparison views, calibration diagnostics, proposal queue, branch lineage, and file-handoff status.
+
+## Model Families
+
+Four model families are supported. Choose via `model_family` in an experiment config:
+
+| `model_family`           | Description |
+|--------------------------|-------------|
+| `tweedie_glm`            | `TweedieRegressor` with log link and exposure weights. Hyperparameters: `alpha`, `power`. |
+| `frequency_severity_glm` | `PoissonRegressor` for frequency × `GammaRegressor` for severity per claim. Hyperparameters: `freq_alpha`, `sev_alpha`. |
+| `tweedie_gbm`            | `HistGradientBoostingRegressor` with Poisson loss. Hyperparameters: `max_iter`, `max_depth`, `learning_rate`, `min_samples_leaf`, `l2_regularization`. |
+| `regularized_linear`     | Ridge regression on log1p pure premium (legacy baseline). Hyperparameter: `alpha`. |
+
+## Primary Metric
+
+The primary metric is **Tweedie deviance at power=1.5** (`tweedie_deviance_p15`). Lower is better. This is the industry-standard proper scoring rule for insurance burning-cost under a compound Poisson-Gamma loss model.
+
+Additional panel metrics (not used for promotion decisions):
+- `gini_weighted` — exposure-weighted Gini coefficient (rank discrimination)
+- `double_lift_slope` — OLS slope of actual on predicted pure premium by decile (calibration linearity)
+- `predicted_to_actual_ratio` — aggregate calibration (should be ≈ 1.0)
+- `poisson_deviance` — frequency model calibration
+- `weighted_mae_claim_cost`, `weighted_rmse_claim_cost` — scale-dependent error metrics
 
 ## Baseline Experiments
 
@@ -102,6 +120,16 @@ Inspect registered runs:
 ```bash
 autoresearch list-experiments
 ```
+
+Each run writes a folder under `artifacts/experiments/` containing:
+
+- `config_snapshot.json`
+- `metrics.json`
+- `split_metrics.csv`
+- `predictions.csv`
+- `diagnostics.json` — calibration decile table, PSI, segment loss ratios
+- `environment_manifest.json` — git SHA, dirty flag, pip freeze, file SHA256s
+- `capping_diagnostics.json`
 
 ## Volatility-Aware Comparison
 
@@ -129,23 +157,40 @@ List promotion decisions:
 autoresearch list-promotions
 ```
 
-Default Phase 3 settings live in `configs/default.toml`:
+Promotion requires all of the following checks to pass:
+
+- Mean lift positive (challenger has lower Tweedie deviance than champion)
+- Relative lift ≥ 0.5% of champion score (prevents noise promotions)
+- Challenger win rate ≥ 60% across paired resamples
+- Bootstrap 90% lower bound ≥ 0 (Bonferroni-adjusted for multiple comparisons)
+- Calibration check: all predicted decile ratios in [0.3, 3.0]
+
+Default promotion settings in `configs/default.toml`:
 
 ```toml
-[resampling]
-repeated_resamples = 30
-bootstrap_iterations = 1000
-resample_fraction = 1.0
-random_seed = 20260524
-
 [promotion]
 minimum_mean_lift = 0.0
-minimum_win_rate = 0.55
+min_relative_lift = 0.005
+min_absolute_lift = 0.0
+minimum_win_rate = 0.60
 bootstrap_lower_bound = 0.0
+bootstrap_lower_bound_relative = 0.0
 confidence_level = 0.90
+max_predicted_to_actual_drift = 0.05
+require_diagnostics = true
+bonferroni_lookback = 10
 ```
 
-Positive lift means the challenger lowered the primary score (`rmse_pure_premium`) versus the champion. Promotion requires positive mean lift, at least 55% challenger wins across paired resamples, and a positive lower bootstrap interval bound. Otherwise the result is recorded as inconclusive.
+## K-Fold Cross-Validation
+
+When `use_cv = true` in `[evaluation]`, experiments use 5-fold CV instead of the single search_validation split. CV results include variance decomposition: `between_fold_variance`, `within_fold_variance`, `total_variance`, and a warning flag when between-fold variance dominates (indicating data leakage risk or unstable feature engineering).
+
+```toml
+[evaluation]
+use_cv = false
+cv_folds = 5
+cv_n_repeats = 1
+```
 
 ## File-Based Codex / Claude Code Workflow
 
@@ -155,7 +200,7 @@ Initialise the official champion as the direct pure premium baseline:
 autoresearch init-official-champion
 ```
 
-The official champion is intentionally distinct from the best point-estimate experiment. It starts as the direct pure premium baseline by product decision and changes only through the promotion gate.
+The official champion is intentionally distinct from the best point-estimate experiment. It starts as the Tweedie GLM baseline by product decision and changes only through the promotion gate.
 
 Export context and handoff instructions for Codex or Claude Code:
 
@@ -257,21 +302,21 @@ See `docs/autonomous_session_workflow.md` for the full operating model.
 
 ## Optional Runtime Proposers
 
-The primary workflow above does not require API keys. Runtime API-backed proposers are still available for experiments, but they are secondary.
-
-Default handoff settings are configured in `configs/default.toml`:
+The primary workflow does not require API keys. Runtime API-backed proposers are available as an alternative to the file-handoff workflow.
 
 ```toml
 [llm]
 provider = "file_handoff"
-model = "external-codex-or-claude-code"
+model = "claude-opus-4-7"
 temperature = 0.2
 proposal_file = "artifacts/auto_research/proposals/inbox/manual_proposals.jsonl"
 ```
 
-Supported provider values are `file_handoff`, `mock`, `file`, `openai`, and `anthropic`. `openai` uses `OPENAI_API_KEY`; `anthropic` uses `ANTHROPIC_API_KEY`. All providers must return the same structured proposal schema, which is validated before anything is run.
+Supported `provider` values: `file_handoff`, `mock`, `file`, `openai`, `anthropic`. `openai` uses `OPENAI_API_KEY`; `anthropic` uses `ANTHROPIC_API_KEY`. The `mock` provider cycles through a pool of 5 diverse pre-defined proposals (Tweedie GLM ×2, freq×sev GLM, Tweedie GBM ×2) to prevent autonomous loop deadlock.
 
-Legacy direct proposer commands remain available:
+All providers return the same structured proposal schema, which is validated before anything is run. Per-family hyperparameter bounds are enforced (e.g. GBM proposals cannot set `power`; alpha values are checked against the configured search space ranges).
+
+Legacy direct proposer commands:
 
 ```bash
 autoresearch generate-proposal
@@ -280,20 +325,10 @@ autoresearch run-cycle
 autoresearch run-cycles 3
 ```
 
-Each run writes a folder under `artifacts/experiments/` containing:
-
-- `config_snapshot.json`
-- `metrics.json`
-- `split_metrics.csv`
-- `predictions.csv`
-- `capping_diagnostics.json`
-
 ## Tests
 
 ```bash
 pytest
 ```
 
-## Phase Boundaries
-
-Next steps should make the file-handoff loop smoother over multiple cycles: proposal deduplication, richer branch analytics, automatic handoff refresh after every run, and better segment-level diagnostics. The milestone holdout split is for checkpoint evaluation only and is not used by ordinary baseline, proposal, or promotion workflows.
+52 tests cover data pipeline, model dispatch, metric panel statistical properties, CV variance decomposition, holdout separation, calibration diagnostics, promotion gate false-positive rate (≤ 20% under H0), and promotion gate true-positive rate (≥ 70% for a 10% improvement).
