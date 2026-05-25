@@ -1,0 +1,266 @@
+# AGENT.md — Auto-Research Operating Manual
+
+You are the research agent for an autonomous insurance burning-cost modelling loop on the French Motor dataset (freMTPL2, ~678K policies). Your goal is to progressively improve predictions measured by **Tweedie deviance at p=1.5** on the search-validation split, ultimately assessed on a protected holdout on every promotion.
+
+Read this file at the start of every session. Keep it open as reference.
+
+---
+
+## What you are optimising
+
+**Primary metric**: `tweedie_deviance_p15` — lower is better. This is the exposure-weighted Tweedie deviance on pure premium (claim cost / exposure), the industry-standard proper scoring rule for compound Poisson-Gamma motor claims.
+
+**Secondary panel** (for interpretation, not gate):
+- `gini_weighted` — discrimination/lift (higher = better)
+- `double_lift_slope` — calibration linearity (want ≈ 1.0)
+- `predicted_to_actual_ratio` — aggregate calibration (want ≈ 1.0)
+- `poisson_deviance` — frequency model quality
+
+---
+
+## Session start — always do these first
+
+```bash
+# 1. Remind yourself of current state
+autoresearch export-context          # refreshes artifacts/auto_research/context/
+cat artifacts/auto_research/context/latest_context.json | python3 -m json.tool | head -120
+
+# 2. Read research history
+cat docs/RESEARCH_LOG.md
+
+# 3. Check recent milestone reports if any promotions have happened
+ls artifacts/milestone_reports/ 2>/dev/null
+
+# 4. Check current champion
+autoresearch list-champion-history
+autoresearch list-experiments
+```
+
+---
+
+## The research cycle
+
+### Step 1 — Form a hypothesis
+Read the research log and recent experiment metrics. Ask:
+- What's the biggest gap in the current champion's calibration (by region, age, vehicle type)?
+- What interactions or non-linearities does a GLM miss that a GBM might capture?
+- Is the frequency or severity model the weak link?
+- Could better feature engineering help (binning, interactions, log transforms)?
+- Is there a model family not yet tried (LightGBM, XGBoost, CatBoost, GAM)?
+
+Write your hypothesis at the top of your next research log entry before coding.
+
+### Step 2 — Implement
+
+**Option A: New experiment config (hyperparameter / feature change)**
+Create or edit a TOML in `configs/experiments/`:
+
+```toml
+experiment_name = "my_descriptive_name"
+model_family = "tweedie_gbm"          # or any registered family
+target_strategy = "direct_pure_premium"
+parent_experiment_id = ""              # fill in after first run
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]
+max_iter = 500
+max_depth = 5
+learning_rate = 0.05
+min_samples_leaf = 200
+# Optional: feature builder
+# feature_builder_module = "autoresearch.features.interactions_v1"
+# Optional: feature subset
+# feature_inclusions = ["exposure_term_a", "driver_age_band_d", "vehicle_power_band_b"]
+```
+
+**Option B: New feature engineering module**
+Create `src/autoresearch/features/<name>.py`. Must expose:
+
+```python
+def build_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """Add derived columns to the frame. Must not drop existing columns.
+    Must not access holdout data. Must be deterministic."""
+    frame = frame.copy()
+    # e.g. interaction term:
+    frame["age_x_power"] = frame["driver_age_band_d"] * frame["vehicle_power_band_b"]
+    return frame
+```
+
+Reference it in the TOML: `feature_builder_module = "autoresearch.features.<name>"`.
+
+**Option C: New model family**
+Create `src/autoresearch/models/<family_name>.py`. Must expose:
+
+```python
+def fit_predict(
+    train: pd.DataFrame,
+    score: pd.DataFrame,
+    *,
+    feature_inclusions: list[str] | None = None,
+    feature_exclusions: list[str] | None = None,
+    **hyperparameters,
+) -> tuple[np.ndarray, dict]:
+    """Fit on train, return (predicted_claim_cost_array, notes_dict)."""
+    ...
+```
+
+Column constants (import from `autoresearch.models.dispatcher`):
+- `EXPOSURE = "exposure_term_a"`
+- `CLAIM_COST = "claim_cost_capped_active"` (training target)
+- `CLAIM_COUNT = "claim_count_signal_q"`
+- `CLAIM_EVENTS = "claim_event_count_l"`
+- `RECORD_ID = "record_id"`
+
+If you need a new library (e.g. LightGBM): add it to `pyproject.toml` and run:
+```bash
+pip install -e ".[dev]"
+```
+
+### Step 3 — Validate your changes
+
+**Always run tests before running an experiment:**
+```bash
+pytest --tb=short -q
+```
+The experiment runner will also run pytest automatically and fail immediately if tests don't pass. New model families or feature builders should come with at least a smoke test in `tests/`.
+
+### Step 4 — Run the experiment
+
+```bash
+autoresearch run-experiment configs/experiments/<your_config>.toml
+```
+
+This will:
+- Scan your model/feature code for holdout references (integrity check)
+- Run pytest
+- Fit the model and score on search_validation
+- Compute the full actuarial metric panel
+- Write artifacts to `artifacts/experiments/<id>/`
+
+Read the results:
+```bash
+# Get the experiment ID from the output, then:
+cat artifacts/experiments/<id>/metrics.json | python3 -m json.tool
+cat artifacts/experiments/<id>/diagnostics.json | python3 -m json.tool
+```
+
+### Step 5 — Compare to champion
+
+```bash
+autoresearch compare-to-champion <experiment_id>
+```
+
+This runs 30 paired resamples + 1000 bootstrap iterations + Bonferroni-adjusted 90% CI. If all 8 gate checks pass, the challenger is promoted automatically.
+
+Read the decision:
+```bash
+cat artifacts/comparisons/<comparison_id>/promotion_report.json | python3 -m json.tool
+```
+
+If promoted: a holdout report is auto-written to `artifacts/milestone_reports/<comparison_id>.md`. **Read it** — it tells you the SV→holdout overfitting gap.
+
+### Step 6 — Update the research log
+
+Append to `docs/RESEARCH_LOG.md`:
+
+```markdown
+## Cycle N — YYYY-MM-DD
+**Hypothesis**: ...
+**Changes**: ...
+**Outcome**: promoted / inconclusive / failed
+**Metrics**: SV Tweedie deviance = X.XXXXX (vs champion Y.YYYYY, Δ = ...)
+**Holdout**: (if promoted) Tweedie deviance = X.XXXXX, SV→holdout gap = ±...
+**Interpretation**: ...
+**Next**: ...
+```
+
+---
+
+## Dataset schema (anonymised)
+
+| Column | Role | Notes |
+|--------|------|-------|
+| `record_id` | ID | Float; policy identifier |
+| `exposure_term_a` | Offset | Policy duration in years (use as exposure weight) |
+| `vehicle_power_band_b` | Feature | Numeric 1–12 |
+| `vehicle_age_band_c` | Feature | Numeric (years) |
+| `driver_age_band_d` | Feature | Numeric (years) |
+| `risk_score_index_e` | Feature | Numeric risk score |
+| `vehicle_make_group_f` | Feature | Categorical (11 levels) |
+| `vehicle_energy_type_g` | Feature | Categorical (2 levels: fuel type) |
+| `territory_band_h` | Feature | Categorical (6 zones) |
+| `density_index_i` | Feature | Numeric (1607 unique; urban density proxy) |
+| `region_cluster_j` | Feature | Categorical (21 regions) |
+| `claim_count_signal_q` | Target | Count of claims |
+| `claim_event_count_l` | Target | Alternative claim count |
+| `claim_cost_observed_k` | Target | Raw claim cost (£) |
+| `claim_cost_capped_active` | **Training target** | Capped claim cost (use this for training) |
+
+Raw mapping is private; use anonymised names only in model code.
+
+---
+
+## Safety rules — never break these
+
+1. **Never read the holdout vault.** Do not import from `autoresearch.data.holdout_vault` in model or feature files. Do not reference `milestone_holdout`, `holdout_vault`, or `AUTORESEARCH_MILESTONE_TOKEN` in your code. The integrity scanner will catch this and fail the experiment.
+
+2. **Never edit protected files.** These files define the evaluation and promotion logic:
+   - `src/autoresearch/evaluation/metrics.py`
+   - `src/autoresearch/evaluation/resampling.py`
+   - `src/autoresearch/data/holdout_vault.py`
+   - `src/autoresearch/experiment_registry/registry.py`
+   
+   If you edit them, comparisons will be blocked until the user runs `autoresearch update-integrity-manifest`. Only edit them to fix genuine bugs, and document why in your research log.
+
+3. **Always pass pytest.** The experiment runner won't proceed if tests fail. Fix failures before running new experiments. New code should have tests.
+
+4. **Never mutate `split_pack.csv` or `data/processed/`.** The split is fixed. Reproducibility depends on it.
+
+5. **Never change the primary metric or promotion gate thresholds** in a proposal or experiment config. These are controlled by `configs/default.toml` and the protected registry.
+
+---
+
+## Useful commands reference
+
+```bash
+autoresearch list-experiments              # all registered experiments
+autoresearch list-champion-history         # champion evolution
+autoresearch list-promotions               # all comparison decisions
+autoresearch session-status               # current session state
+autoresearch export-context               # refresh context bundle
+autoresearch evaluate-milestone <id>      # manual holdout eval (needs token)
+autoresearch update-integrity-manifest    # accept intentional protected-file changes
+pytest --tb=short -q                      # run test suite
+```
+
+---
+
+## Research ideas to explore (not exhaustive)
+
+**Feature engineering**
+- Age × power interaction (`driver_age_band_d * vehicle_power_band_b`)
+- Log density (`np.log1p(density_index_i)`)
+- Young driver indicator (`driver_age_band_d < 25`)
+- High-power indicator, region × territory interaction
+- Binning age into actuarial bands (17–24, 25–35, 36–50, 51–65, 65+)
+
+**Model forms**
+- LightGBM with native Tweedie objective and monotone constraints (age ↑ → risk ↑)
+- XGBoost Tweedie
+- CatBoost with native categorical handling (removes need for one-hot on region/vehicle_make)
+- GAM (generalized additive model) for smooth age/power effects
+- Two-stage: GBM for frequency, GLM for severity
+- Stacked ensemble: Tweedie GLM calibration overlay on top of GBM predictions
+- Isotonic regression calibration post-processing
+
+**Regularisation**
+- Monotone constraints (LightGBM) — risk must be non-decreasing with younger age
+- Exposure-stratified cross-validation
+- Group k-fold on `region_cluster_j`
+
+**Preprocessing**
+- Lower claim cap threshold (50K vs 100K) — reduces tail noise in training
+- Exposure-weighted undersampling of zero-claim policies

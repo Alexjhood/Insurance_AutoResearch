@@ -142,12 +142,18 @@ CREATE TABLE IF NOT EXISTS session_events (
 
 
 def init_registry(path: Path) -> Path:
-    """Create the registry database and required tables."""
+    """Create the registry database, required tables, and integrity manifest."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as con:
         con.executescript(SCHEMA)
         _migrate_experiments(con)
+
+    # Write integrity manifest the first time (or refresh on explicit call)
+    from autoresearch.config import PROJECT_ROOT
+    from autoresearch.utils.integrity import write_integrity_manifest
+    write_integrity_manifest(PROJECT_ROOT, path.parent)
+
     return path
 
 

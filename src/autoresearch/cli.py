@@ -43,6 +43,8 @@ from autoresearch.experiment_registry.registry import (
     list_proposals,
 )
 from autoresearch.experiment_runner import run_all_baselines, run_experiment
+from autoresearch.milestone import manual_evaluate_on_holdout
+from autoresearch.utils.integrity import write_integrity_manifest
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -81,6 +83,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("list-branches", help="Print branch lineage records.")
     inspect = subparsers.add_parser("inspect-proposal", help="Print one proposal record as JSON.")
     inspect.add_argument("proposal_id")
+    eval_ms = subparsers.add_parser("evaluate-milestone", help="Run holdout evaluation for an experiment (token required).")
+    eval_ms.add_argument("experiment_id")
+    subparsers.add_parser("update-integrity-manifest", help="Recompute integrity manifest after accepting protected-file changes.")
     subparsers.add_parser("export-context", help="Export file-based handoff context for Codex/Claude Code.")
     subparsers.add_parser("write-proposal-template", help="Write proposal template, schema, and instructions.")
     subparsers.add_parser("ingest-proposals", help="Validate proposal files from the handoff inbox and enqueue valid ones.")
@@ -297,6 +302,17 @@ def main(argv: list[str] | None = None) -> int:
         import json
 
         print(json.dumps(get_proposal(config.registry_path, args.proposal_id), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "evaluate-milestone":
+        import json
+        result = manual_evaluate_on_holdout(config, args.experiment_id)
+        print(json.dumps(result, indent=2, sort_keys=True, default=str))
+        return 0
+
+    if args.command == "update-integrity-manifest":
+        manifest_path = write_integrity_manifest(config.root, config.artifacts_dir)
+        print(f"Integrity manifest updated: {manifest_path}")
         return 0
 
     if args.command == "export-context":

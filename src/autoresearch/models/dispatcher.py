@@ -40,10 +40,24 @@ def dispatch_model(
 ) -> ModelResult:
     """Fit the requested model family and return scored predictions.
 
-    Works identically for the legacy Ridge and the new GLM/GBM families.
+    Works identically for the legacy Ridge, the built-in GLM/GBM families,
+    and any new family registered as ``autoresearch.models.<model_family>``.
+
+    Feature engineering: if ``hyperparameters`` contains a
+    ``feature_builder_module`` key, the named module's ``build_features``
+    function is applied to the full data frame before splitting into
+    train / score partitions.
     """
 
-    hp = hyperparameters or {}
+    hp = dict(hyperparameters or {})
+
+    # Apply optional feature builder before splitting
+    feature_builder_module = hp.pop("feature_builder_module", None)
+    if feature_builder_module:
+        import importlib
+        builder = importlib.import_module(feature_builder_module)
+        frame = builder.build_features(frame)
+
     data = frame.merge(split_frame[["record_id", "split"]], on="record_id", how="inner")
     if len(data) < len(frame):
         raise ValueError(f"{len(frame) - len(data)} rows dropped during split merge — split pack may be stale")
@@ -136,4 +150,25 @@ def _call_model(
         }
         return predicted, notes
 
-    raise ValueError(f"Unknown model_family: {model_family!r}")
+    # Open registry: try to import autoresearch.models.<model_family>
+    # The module must expose fit_predict(train, score, *, feature_inclusions,
+    # feature_exclusions, **hyperparameters) -> (np.ndarray, dict).
+    import importlib
+    try:
+        mod = importlib.import_module(f"autoresearch.models.{model_family}")
+    except ModuleNotFoundError:
+        raise ValueError(
+            f"Unknown model_family: {model_family!r}. "
+            f"Either use a built-in family or create src/autoresearch/models/{model_family}.py "
+            "exposing fit_predict(train, score, *, feature_inclusions, feature_exclusions, **hp)."
+        )
+    if not hasattr(mod, "fit_predict"):
+        raise ValueError(
+            f"Module autoresearch.models.{model_family} must expose a fit_predict() function."
+        )
+    return mod.fit_predict(
+        train, score,
+        feature_inclusions=feature_inclusions,
+        feature_exclusions=feature_exclusions,
+        **hp,
+    )

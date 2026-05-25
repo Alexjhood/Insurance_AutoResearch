@@ -17,6 +17,15 @@ from autoresearch.experiment_registry.registry import (
 from autoresearch.utils.io import read_json
 
 
+def _read_research_log_tail(config: ProjectConfig, n_lines: int = 60) -> str | None:
+    """Return the last n_lines of RESEARCH_LOG.md, or None if absent."""
+    log_path = config.root / "docs" / "RESEARCH_LOG.md"
+    if not log_path.exists():
+        return None
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    return "\n".join(lines[-n_lines:])
+
+
 def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
     """Build the bounded context that is safe to provide to the proposer."""
 
@@ -46,6 +55,7 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
         "agent_schema": agent_schema,
         "default_capping_diagnostics": read_json(capping_path) if capping_path.exists() else None,
         "allowed_search_space": allowed_search_space(config, agent_schema),
+        "research_log_tail": _read_research_log_tail(config),
         "evaluation_rules": {
             "ordinary_train_split": config.ordinary_train_split,
             "ordinary_eval_splits": list(config.ordinary_eval_splits),

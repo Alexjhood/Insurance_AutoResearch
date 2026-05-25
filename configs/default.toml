@@ -26,7 +26,7 @@ ordinary_train_split = "train"
 ordinary_eval_splits = ["search_validation"]
 primary_metric = "tweedie_deviance_p15"
 tweedie_power = 1.5
-use_cv = false
+use_cv = true
 cv_folds = 5
 cv_n_repeats = 1
 
@@ -70,6 +70,12 @@ lookback = 25
 model_families = ["tweedie_glm", "frequency_severity_glm", "tweedie_gbm", "regularized_linear"]
 target_strategies = ["direct_pure_premium", "frequency_severity"]
 allow_legacy_baselines = false
+# LLM may add new model families by creating src/autoresearch/models/<family>.py
+# and specifying any string for model_family in the experiment TOML.
+allow_open_model_families = true
+# LLM may add feature builders by creating src/autoresearch/features/<module>.py
+# and specifying feature_builder_module = "autoresearch.features.<module>" in [model].
+allow_feature_builder_modules = true
 
 [search_space.regularized_linear]
 min_alpha = 0.01

@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 from autoresearch.config import ProjectConfig, ensure_project_dirs
+from autoresearch.utils.integrity import check_integrity
 from autoresearch.evaluation.resampling import (
     PromotionRules,
     bootstrap_lift_summary,
@@ -79,6 +80,17 @@ def compare_experiments(config: ProjectConfig, champion_id: str, challenger_id: 
 
     ensure_project_dirs(config)
     init_registry(config.registry_path)
+
+    # ── Protected-file integrity check ────────────────────────────────────────
+    integrity_violations = check_integrity(config.root, config.artifacts_dir)
+    if integrity_violations:
+        msg = (
+            "Protected-file integrity violation — comparison blocked:\n"
+            + "\n".join(integrity_violations)
+            + "\nRun `autoresearch update-integrity-manifest` to accept the change."
+        )
+        raise ValueError(msg)
+
     champion_predictions = pd.read_csv(_artifact_path(config, champion_id, "predictions"))
     challenger_predictions = pd.read_csv(_artifact_path(config, challenger_id, "predictions"))
     eval_split = config.ordinary_eval_splits[0]
@@ -170,17 +182,73 @@ def compare_experiments(config: ProjectConfig, champion_id: str, challenger_id: 
         promotion_rationale=decision["rationale"],
         artifacts=artifacts,
     )
+    _append_research_log(config, comparison_id, champion_id, challenger_id, comparison_summary, decision)
     return artifacts
 
 
+def _append_research_log(
+    config: ProjectConfig,
+    comparison_id: str,
+    champion_id: str,
+    challenger_id: str,
+    comparison_summary: dict,
+    decision: dict,
+) -> None:
+    """Append a one-line auto-summary to the research log."""
+
+    log_path = config.root / "docs" / "RESEARCH_LOG.md"
+    if not log_path.exists():
+        return
+    try:
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        outcome = decision.get("decision", "?")
+        mean_lift = comparison_summary.get("mean_lift", float("nan"))
+        win_rate = comparison_summary.get("challenger_win_rate", float("nan"))
+        rationale = decision.get("rationale", "")[:120]
+        line = (
+            f"\n| {stamp} | `{challenger_id[:48]}` | **{outcome}** | "
+            f"lift={mean_lift:+.4f} | win_rate={win_rate:.2f} | {rationale} |"
+        )
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass  # log append is best-effort
+
+
 def compare_against_current_champion(config: ProjectConfig, challenger_id: str) -> dict[str, Path]:
-    """Compare challenger against official champion."""
+    """Compare challenger against official champion.
+
+    If the challenger is promoted, the holdout evaluation fires automatically
+    and the official champion state is updated.
+    """
+    from autoresearch.experiment_registry.registry import set_official_champion
+    from autoresearch.milestone import evaluate_on_holdout
 
     official = get_official_champion(config.registry_path)
-    champion = official["champion_id"] if official else current_champion_id(config)
-    if champion == challenger_id:
+    champion_id = official["champion_id"] if official else current_champion_id(config)
+    if champion_id == challenger_id:
         raise ValueError("Challenger is already the current champion")
-    return compare_experiments(config, champion, challenger_id)
+
+    artifacts = compare_experiments(config, champion_id, challenger_id)
+
+    # Read the decision and promote if warranted
+    report = read_json(artifacts["promotion_report"])
+    decision = report.get("promotion_decision", {})
+    comparison_id = report.get("comparison_id", "")
+
+    if decision.get("decision") == "promote":
+        branch_id = official.get("branch_id", "main") if official else "main"
+        set_official_champion(
+            config.registry_path,
+            champion_id=challenger_id,
+            branch_id=branch_id,
+            reason=decision.get("rationale", "Promoted via compare-to-champion"),
+            action="promoted",
+            comparison_id=comparison_id,
+        )
+        evaluate_on_holdout(config, challenger_id, comparison_id)
+
+    return artifacts
 
 
 def current_champion_id(config: ProjectConfig) -> str:

@@ -17,6 +17,11 @@ from autoresearch.experiment_registry.registry import init_registry, record_expe
 from autoresearch.models.baselines import RAW_CLAIM_COST
 from autoresearch.models.dispatcher import dispatch_model
 from autoresearch.utils.environment import capture_environment
+from autoresearch.utils.integrity import (
+    check_integrity,
+    run_pytest,
+    scan_for_holdout_access,
+)
 from autoresearch.utils.io import write_json
 
 
@@ -35,6 +40,50 @@ def run_experiment(config: ProjectConfig, experiment_config_path: Path) -> dict[
     exp = load_experiment_config(experiment_config_path)
 
     experiment_id = _experiment_id(exp["experiment_name"])
+
+    # ── Gate 1: holdout-access scan ──────────────────────────────────────────
+    holdout_violations = scan_for_holdout_access(config.root)
+    if holdout_violations:
+        msg = "Holdout-access scan failed:\n" + "\n".join(holdout_violations)
+        record_experiment(
+            config.registry_path,
+            experiment_id=experiment_id,
+            experiment_name=exp.get("experiment_name", "unknown"),
+            model_family=exp.get("model_family", "unknown"),
+            target_strategy=exp.get("target_strategy", "unknown"),
+            preprocessing_summary={},
+            claim_cap_threshold=None,
+            status="failed",
+            parent_experiment_id=None,
+            config_snapshot_path=None,
+            metrics_path=None,
+            artifacts={},
+            code_version=None,
+            notes=msg,
+        )
+        raise ValueError(msg)
+
+    # ── Gate 2: mandatory pytest ─────────────────────────────────────────────
+    pytest_passed, pytest_output = run_pytest(config.root)
+    if not pytest_passed:
+        msg = f"Pytest gate failed — fix tests before running experiments.\n{pytest_output}"
+        record_experiment(
+            config.registry_path,
+            experiment_id=experiment_id,
+            experiment_name=exp.get("experiment_name", "unknown"),
+            model_family=exp.get("model_family", "unknown"),
+            target_strategy=exp.get("target_strategy", "unknown"),
+            preprocessing_summary={},
+            claim_cap_threshold=None,
+            status="failed",
+            parent_experiment_id=None,
+            config_snapshot_path=None,
+            metrics_path=None,
+            artifacts={},
+            code_version=None,
+            notes=msg,
+        )
+        raise ValueError(msg)
     run_dir = config.artifacts_dir / "experiments" / experiment_id
     run_dir.mkdir(parents=True, exist_ok=True)
 

@@ -9,6 +9,7 @@ from typing import Any
 
 from autoresearch.comparison_runner import compare_experiments
 from autoresearch.config import ProjectConfig, ensure_project_dirs
+from autoresearch.milestone import evaluate_on_holdout
 from autoresearch.controller.context import build_llm_context
 from autoresearch.controller.proposal_schema import allowed_search_space, normalise_proposal, validate_proposal
 from autoresearch.controller.proposer import build_prompt, proposer_from_config
@@ -195,6 +196,8 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
                 comparison_id=comparison_id,
                 notes=decision["rationale"],
             )
+            # Auto-fire holdout evaluation on every promotion
+            evaluate_on_holdout(config, experiment_id, comparison_id)
         else:
             set_official_champion(
                 config.registry_path,
