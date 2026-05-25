@@ -38,6 +38,7 @@ def test_inflating_predictions_does_not_change_gini() -> None:
     base_pred = [5.0, 40.0, 150.0, 900.0]
     panel_base = _panel(actual, base_pred)
     panel_scaled = _panel(actual, [v * 100 for v in base_pred])
+    assert panel_base["gini_weighted"] > 0
     assert abs(panel_scaled["gini_weighted"] - panel_base["gini_weighted"]) < 0.01
 
 
@@ -59,6 +60,18 @@ def test_evaluate_predictions_uses_primary_metric() -> None:
     # mean_score should match what the split returned
     sv_metrics = [m for m in result["split_metrics"] if m["split"] == "search_validation"][0]
     assert abs(result["aggregate"]["mean_score"] - sv_metrics["tweedie_deviance_p15"]) < 1e-9
+
+
+def test_evaluate_predictions_marks_gini_higher_is_better() -> None:
+    preds = pd.DataFrame({
+        "split": ["search_validation"] * 10,
+        "actual_claim_cost": np.linspace(10, 100, 10),
+        "predicted_claim_cost": np.linspace(10, 100, 10),
+        "exposure": np.ones(10),
+    })
+    result = evaluate_predictions(preds, ("search_validation",), primary_metric="gini_weighted")
+    assert result["primary_metric"] == "gini_weighted"
+    assert result["lower_is_better"] is False
 
 
 def test_evaluate_predictions_blocks_milestone_holdout() -> None:

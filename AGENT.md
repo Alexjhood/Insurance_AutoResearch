@@ -1,6 +1,6 @@
 # AGENT.md — Auto-Research Operating Manual
 
-You are the research agent for an autonomous insurance burning-cost modelling loop on the French Motor dataset (freMTPL2, ~678K policies). Your goal is to progressively improve predictions measured by **Tweedie deviance at p=1.5** on the search-validation split, ultimately assessed on a protected holdout on every promotion.
+You are the research agent for an autonomous insurance burning-cost modelling loop on the French Motor dataset (freMTPL2, ~678K policies). Your goal is to progressively improve predictions measured by **exposure-weighted Gini** on the search-validation split, ultimately assessed on a protected holdout on every promotion.
 
 Read this file at the start of every session. Keep it open as reference.
 
@@ -8,10 +8,10 @@ Read this file at the start of every session. Keep it open as reference.
 
 ## What you are optimising
 
-**Primary metric**: `tweedie_deviance_p15` — lower is better. This is the exposure-weighted Tweedie deviance on pure premium (claim cost / exposure), the industry-standard proper scoring rule for compound Poisson-Gamma motor claims.
+**Primary metric**: `gini_weighted` — higher is better. This is the exposure-weighted rank discrimination/lift metric used by the promotion gate.
 
-**Secondary panel** (for interpretation, not gate):
-- `gini_weighted` — discrimination/lift (higher = better)
+**Secondary panel** (for interpretation):
+- `tweedie_deviance_p15` — exposure-weighted Tweedie deviance on pure premium
 - `double_lift_slope` — calibration linearity (want ≈ 1.0)
 - `predicted_to_actual_ratio` — aggregate calibration (want ≈ 1.0)
 - `poisson_deviance` — frequency model quality
@@ -171,8 +171,8 @@ Append to `docs/RESEARCH_LOG.md`:
 **Hypothesis**: ...
 **Changes**: ...
 **Outcome**: promoted / inconclusive / failed
-**Metrics**: SV Tweedie deviance = X.XXXXX (vs champion Y.YYYYY, Δ = ...)
-**Holdout**: (if promoted) Tweedie deviance = X.XXXXX, SV→holdout gap = ±...
+**Metrics**: SV Gini = X.XXXXX (vs champion Y.YYYYY, Δ = ...)
+**Holdout**: (if promoted) Gini = X.XXXXX, SV→holdout gap = ±...
 **Interpretation**: ...
 **Next**: ...
 ```

@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 from autoresearch.config import ProjectConfig, ensure_project_dirs
+from autoresearch.evaluation.metrics import lower_is_better
 from autoresearch.utils.integrity import check_integrity
 from autoresearch.evaluation.resampling import (
     PromotionRules,
@@ -27,6 +28,7 @@ from autoresearch.experiment_registry.registry import (
     record_experiment_artifacts,
 )
 from autoresearch.run_artifacts import next_iteration_dir
+from autoresearch.reporting import write_comparison_html_report
 from autoresearch.utils.io import read_json, write_json
 
 
@@ -54,7 +56,7 @@ def run_repeated_evaluation(config: ProjectConfig, experiment_id: str) -> dict[s
         "experiment_name": experiment.get("experiment_name"),
         "eval_split": eval_split,
         "primary_metric": config.primary_metric,
-        "lower_is_better": True,
+        "lower_is_better": lower_is_better(config.primary_metric),
         "n_resamples": config.repeated_resamples,
         "resample_fraction": config.resample_fraction,
         "seed": config.resampling_seed,
@@ -164,12 +166,23 @@ def compare_experiments(
     bootstrap_path = out_dir / "bootstrap_summary.json"
     decision_path = out_dir / "promotion_decision.json"
     report_path = out_dir / "promotion_report.json"
+    html_report_path = out_dir / "comparison_report.html"
 
     per_resample.to_csv(per_resample_path, index=False)
     write_json(comparison_path, comparison_summary)
     write_json(bootstrap_path, bootstrap)
     write_json(decision_path, decision)
     write_json(report_path, payload)
+    write_comparison_html_report(
+        config=config,
+        comparison_id=comparison_id,
+        champion_id=champion_id,
+        challenger_id=challenger_id,
+        comparison_summary=comparison_summary,
+        bootstrap_summary=bootstrap,
+        decision=decision,
+        output_path=html_report_path,
+    )
 
     artifacts = {
         "paired_resample_scores": per_resample_path,
@@ -177,6 +190,7 @@ def compare_experiments(
         "bootstrap_summary": bootstrap_path,
         "promotion_decision": decision_path,
         "promotion_report": report_path,
+        "html_report": html_report_path,
     }
     record_comparison(
         config.registry_path,

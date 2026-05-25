@@ -1,9 +1,11 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from autoresearch.config import ProjectConfig
+from autoresearch.config import PROJECT_ROOT, ProjectConfig
+from autoresearch.comparison_runner import compare_experiments
 from autoresearch.experiment_registry.registry import list_experiments
 from autoresearch.experiment_runner import run_experiment
 
@@ -244,3 +246,61 @@ sev_alpha = 0.1
     outputs = run_experiment(config, exp_config)
 
     assert outputs["metrics"].exists()
+
+
+def test_compare_experiments_writes_html_report(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    config = replace(
+        config,
+        primary_metric="gini_weighted",
+        min_relative_lift=0.0,
+        minimum_win_rate=0.0,
+        bootstrap_iterations=5,
+        require_diagnostics=False,
+    )
+    _write_fixtures(config)
+
+    champion_config = tmp_path / "champion.toml"
+    champion_config.write_text(
+        """
+experiment_name = "champion_report"
+model_family = "regularized_linear"
+target_strategy = "direct_pure_premium"
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]
+alpha = 1.0
+""".strip(),
+        encoding="utf-8",
+    )
+    challenger_config = tmp_path / "challenger.toml"
+    challenger_config.write_text(
+        """
+experiment_name = "challenger_report"
+model_family = "regularized_linear"
+target_strategy = "direct_pure_premium"
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]
+alpha = 2.0
+""".strip(),
+        encoding="utf-8",
+    )
+
+    run_experiment(config, champion_config)
+    run_experiment(config, challenger_config)
+    rows = list_experiments(config.registry_path)
+    champion_id = next(row["experiment_id"] for row in rows if row["experiment_name"] == "champion_report")
+    challenger_id = next(row["experiment_id"] for row in rows if row["experiment_name"] == "challenger_report")
+    config = replace(config, root=PROJECT_ROOT)
+
+    outputs = compare_experiments(config, champion_id, challenger_id)
+
+    assert outputs["html_report"].exists()
+    assert "Validation Metrics" in outputs["html_report"].read_text(encoding="utf-8")

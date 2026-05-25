@@ -24,7 +24,7 @@ milestone_holdout = 0.20
 [evaluation]
 ordinary_train_split = "train"
 ordinary_eval_splits = ["search_validation"]
-primary_metric = "tweedie_deviance_p15"
+primary_metric = "gini_weighted"
 tweedie_power = 1.5
 use_cv = true
 cv_folds = 5

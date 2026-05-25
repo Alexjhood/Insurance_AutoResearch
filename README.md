@@ -14,7 +14,7 @@ This repository implements a full autonomous experimentation loop: data preparat
 - **Architecturally-separated milestone holdout vault** — `agent_dataset_search.parquet` (never contains holdout rows) stored separately from `data/holdout_vault/agent_dataset_holdout.parquet` (token-gated)
 - 5-fold deterministic CV with variance decomposition (between-fold vs. within-fold)
 - **Actuarially-correct model layer**: Tweedie GLM, frequency×severity Poisson/Gamma GLM, Tweedie GBM (HistGradientBoosting), regularized linear baseline
-- **Full actuarial metric panel**: Tweedie deviance (power=1.5) as primary metric, exposure-weighted Gini, double-lift slope, predicted-to-actual ratio, Poisson deviance
+- **Full actuarial metric panel**: exposure-weighted Gini as the promotion metric, plus Tweedie deviance (power=1.5), double-lift slope, predicted-to-actual ratio, and Poisson deviance
 - Calibration diagnostics by predicted decile and exposure band, PSI, segment loss ratios
 - **Hardened promotion gate**: relative lift floor (0.5%), MDE estimation, Bonferroni adjustment for multiple comparisons, calibration check
 - Reproducibility environment manifest (git SHA, pip freeze, file SHA256s) written per experiment
@@ -22,7 +22,7 @@ This repository implements a full autonomous experimentation loop: data preparat
 - MockProposer with a 5-entry rotating pool (prevents autonomous loop deadlock)
 - Retry logic with exponential backoff for OpenAI/Anthropic proposers
 - Branch lineage for proposed experiments; deduplication by proposal fingerprint
-- 52 tests covering statistical claims (false-positive rate, true-positive rate, variance decomposition, holdout separation)
+- 64 tests covering statistical claims (false-positive rate, true-positive rate, variance decomposition, holdout separation)
 
 ## Local Setup
 
@@ -131,10 +131,10 @@ Four model families are supported. Choose via `model_family` in an experiment co
 
 ## Primary Metric
 
-The primary metric is **Tweedie deviance at power=1.5** (`tweedie_deviance_p15`). Lower is better. This is the industry-standard proper scoring rule for insurance burning-cost under a compound Poisson-Gamma loss model.
+The primary promotion metric is **exposure-weighted Gini** (`gini_weighted`). Higher is better. It gates on rank discrimination/lift while the report still shows the full actuarial panel.
 
-Additional panel metrics (not used for promotion decisions):
-- `gini_weighted` — exposure-weighted Gini coefficient (rank discrimination)
+Additional panel metrics:
+- `tweedie_deviance_p15` — exposure-weighted Tweedie deviance at power=1.5
 - `double_lift_slope` — OLS slope of actual on predicted pure premium by decile (calibration linearity)
 - `predicted_to_actual_ratio` — aggregate calibration (should be ≈ 1.0)
 - `poisson_deviance` — frequency model calibration
@@ -197,9 +197,14 @@ List promotion decisions:
 autoresearch list-promotions
 ```
 
+Every comparison writes `comparison_report.html` in the run iteration's
+`comparison/` folder. The report includes experiment details, full validation
+metric tables, champion/challenger lift curves, double-lift curves, and the
+cumulative champion-history Gini chart.
+
 Promotion requires all of the following checks to pass:
 
-- Mean lift positive (challenger has lower Tweedie deviance than champion)
+- Mean lift positive (challenger has higher validation Gini than champion)
 - Relative lift ≥ 0.5% of champion score (prevents noise promotions)
 - Challenger win rate ≥ 60% across paired resamples
 - Bootstrap 90% lower bound ≥ 0 (Bonferroni-adjusted for multiple comparisons)

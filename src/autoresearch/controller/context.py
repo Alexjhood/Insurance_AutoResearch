@@ -63,7 +63,7 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
             "ordinary_eval_splits": list(config.ordinary_eval_splits),
             "milestone_holdout_access": "forbidden during ordinary search",
             "primary_metric": config.primary_metric,
-            "lower_is_better": True,
+            "lower_is_better": config.primary_metric != "gini_weighted",
             "promotion_gate": {
                 "minimum_mean_lift": config.minimum_mean_lift,
                 "minimum_win_rate": config.minimum_win_rate,

@@ -413,7 +413,7 @@ def record_comparison(
                 str(artifacts.get("paired_resample_scores", "")),
                 str(artifacts.get("bootstrap_summary", "")),
                 str(artifacts.get("promotion_decision", "")),
-                str(artifacts.get("promotion_report", "")),
+                str(artifacts.get("html_report") or artifacts.get("promotion_report", "")),
             ),
         )
 

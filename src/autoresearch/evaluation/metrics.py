@@ -1,8 +1,8 @@
 """Actuarially-relevant metric panel for burning-cost model evaluation.
 
-Primary metric: Tweedie deviance (power configurable, default 1.5).
-Panel also includes: calibration ratio, Gini, double-lift slope, MAE, RMSE.
-Per-row pure-premium RMSE is computed but NOT used for ranking.
+Primary metric is configurable. The default gate uses weighted Gini, where
+higher is better. Panel also includes calibration ratio, Tweedie deviance,
+double-lift slope, MAE, and RMSE.
 """
 
 from __future__ import annotations
@@ -12,6 +12,15 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_tweedie_deviance
+
+
+HIGHER_IS_BETTER_METRICS = {"gini_weighted"}
+
+
+def lower_is_better(metric_name: str) -> bool:
+    """Return whether lower values are better for a metric."""
+
+    return metric_name not in HIGHER_IS_BETTER_METRICS
 
 
 def full_metric_panel(
@@ -117,7 +126,7 @@ def evaluate_predictions(
 
     return {
         "primary_metric": primary_metric,
-        "lower_is_better": True,
+        "lower_is_better": lower_is_better(primary_metric),
         "tweedie_power": tweedie_power,
         "ordinary_eval_splits": list(eval_splits),
         "split_metrics": split_metrics,
@@ -153,7 +162,7 @@ def _gini_weighted(actual: np.ndarray, predicted: np.ndarray, weights: np.ndarra
     # Area under Lorenz curve via trapezoidal rule
     _trapz = getattr(np, "trapezoid", None) or getattr(np, "trapz")
     lorenz_area = float(_trapz(cum_y, cum_w))
-    return float(2 * lorenz_area - 1)
+    return float(1 - 2 * lorenz_area)
 
 
 def _double_lift_slope(actual_pp: np.ndarray, predicted_pp: np.ndarray, weights: np.ndarray) -> float:

@@ -65,6 +65,26 @@ def test_paired_comparison_positive_lift_when_challenger_is_better() -> None:
     assert summary["challenger_win_rate"] == 1.0
 
 
+def test_paired_comparison_positive_lift_for_higher_is_better_gini() -> None:
+    champion = _predictions([40.0, 30.0, 20.0, 10.0])
+    challenger = _predictions([10.0, 20.0, 30.0, 40.0])
+
+    per_resample, summary = paired_comparison(
+        champion,
+        challenger,
+        champion_id="champ",
+        challenger_id="challenger",
+        eval_split="search_validation",
+        n_resamples=10,
+        seed=7,
+        primary_metric="gini_weighted",
+    )
+
+    assert summary["lower_is_better"] is False
+    assert (per_resample["lift"] > 0).all()
+    assert summary["mean_lift"] > 0
+
+
 def test_bootstrap_and_promotion_decision() -> None:
     bootstrap = bootstrap_lift_summary(pd.Series([1.0, 2.0, 3.0]), iterations=100, seed=1, confidence_level=0.9)
     decision = promotion_decision(

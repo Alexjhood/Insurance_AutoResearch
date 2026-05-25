@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from autoresearch.evaluation.metrics import full_metric_panel, regression_metrics
+from autoresearch.evaluation.metrics import full_metric_panel, lower_is_better, regression_metrics
 
 
 @dataclass(frozen=True)
@@ -87,6 +87,7 @@ def paired_comparison(
         raise ValueError("Champion and challenger predictions have no overlapping evaluation rows")
 
     sample_size = _sample_size(len(paired), resample_fraction)
+    metric_lower_is_better = lower_is_better(primary_metric)
     rng = np.random.default_rng(seed)
     rows: list[dict[str, Any]] = []
     for resample_id in range(n_resamples):
@@ -102,7 +103,7 @@ def paired_comparison(
         )
         champ_score = champ_metrics[primary_metric]
         chal_score = chal_metrics[primary_metric]
-        lift = champ_score - chal_score  # positive = challenger improves (lower is better)
+        lift = champ_score - chal_score if metric_lower_is_better else chal_score - champ_score
         rows.append({
             "resample_id": resample_id,
             "split": eval_split,
@@ -121,7 +122,7 @@ def paired_comparison(
         "challenger_id": challenger_id,
         "eval_split": eval_split,
         "primary_metric": primary_metric,
-        "lower_is_better": True,
+        "lower_is_better": metric_lower_is_better,
         "n_resamples": n_resamples,
         "resample_fraction": resample_fraction,
         "seed": seed,
@@ -260,18 +261,19 @@ def promotion_decision(
     """Make an explicit promote/inconclusive decision from configured rules."""
 
     champion_score = comparison_summary.get("champion_mean_score", 0.0) or 1e-9
+    champion_scale = abs(champion_score) or 1e-9
     mean_lift = comparison_summary["mean_lift"]
     win_rate = comparison_summary["challenger_win_rate"]
     boot_lower = bootstrap_summary["interval_lower"]
     n_resamples = comparison_summary.get("n_resamples", 30)
 
     # Relative lift fractions
-    relative_lift = mean_lift / champion_score if champion_score != 0 else 0.0
-    boot_lower_relative = boot_lower / champion_score if champion_score != 0 else 0.0
+    relative_lift = mean_lift / champion_scale
+    boot_lower_relative = boot_lower / champion_scale
 
     # Minimum detectable effect estimate (rough 95% one-sided)
     std_lift = comparison_summary.get("std_lift", 0.0)
-    mde_relative = (2 * std_lift / max(n_resamples ** 0.5, 1)) / abs(champion_score) if champion_score != 0 else float("nan")
+    mde_relative = (2 * std_lift / max(n_resamples ** 0.5, 1)) / champion_scale
 
     if relative_lift > (mde_relative or 1.0):
         power_note = "effect_above_mde"
