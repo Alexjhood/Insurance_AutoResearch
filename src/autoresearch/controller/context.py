@@ -43,7 +43,12 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
     history = list_champion_history(config.registry_path)[:10]
 
     return {
-        "project_goal": "Improve burning-cost prediction while protecting reproducibility and holdout integrity.",
+        "project_goal": (
+            "Improve burning-cost prediction while protecting reproducibility and holdout integrity. "
+            "Every run starts from the global-mean no-model baseline; progress through many small, "
+            "interpretable steps and a broad search over methodology and data work before reaching "
+            "for higher-capacity models. Claim cap is fixed at 100,000."
+        ),
         "official_champion": champion,
         "recent_experiments": _compact_experiments(experiments),
         "recent_comparisons": _compact_comparisons(comparisons),

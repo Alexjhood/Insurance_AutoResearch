@@ -16,9 +16,13 @@ OFFICIAL_BRANCH_ID = "main"
 
 
 def initialise_official_champion(config: ProjectConfig, experiment_id: str | None = None) -> dict[str, object]:
-    """Initialise official champion as the direct pure-premium baseline."""
+    """Initialise official champion as the no-model global-mean baseline.
 
-    selected_id = experiment_id or _latest_direct_pure_premium(config)
+    Every research run starts from this flat exposure-weighted burning-cost
+    baseline; every subsequent proposal develops relative to it.
+    """
+
+    selected_id = experiment_id or _starting_baseline_experiment(config)
     experiment = get_experiment(config.registry_path, selected_id)
     if experiment.get("target_strategy") != "direct_pure_premium":
         raise ValueError("Official starting champion must be a direct pure premium experiment")
@@ -30,11 +34,12 @@ def initialise_official_champion(config: ProjectConfig, experiment_id: str | Non
         root_experiment_id=selected_id,
         current_experiment_id=selected_id,
         status="active",
-        description="Official research branch rooted at the direct pure premium baseline.",
+        description="Official research branch rooted at the global-mean no-model baseline.",
     )
     reason = (
-        "Official starting champion set by product decision: direct pure premium baseline "
-        "starts the controlled research process even if another baseline has a better point estimate."
+        "Official starting champion set by product decision: the no-model global-mean "
+        "burning cost is the first iteration of every run. All later models must demonstrate "
+        "real lift over this flat rate to enter the champion lineage."
     )
     set_official_champion(
         config.registry_path,
@@ -46,12 +51,20 @@ def initialise_official_champion(config: ProjectConfig, experiment_id: str | Non
     return get_official_champion(config.registry_path) or {}
 
 
-def _latest_direct_pure_premium(config: ProjectConfig) -> str:
-    rows = [
+def _starting_baseline_experiment(config: ProjectConfig) -> str:
+    """Pick the global-mean baseline; fall back to any completed direct-pp run."""
+
+    completed = [
         row
         for row in list_experiments(config.registry_path)
         if row.get("status") == "completed" and row.get("target_strategy") == "direct_pure_premium"
     ]
-    if not rows:
-        raise ValueError("No completed direct pure premium baseline exists. Run that baseline first.")
-    return rows[0]["experiment_id"]
+    if not completed:
+        raise ValueError(
+            "No completed baseline exists. Run `autoresearch run-all-baselines` "
+            "(which executes the global_mean starting baseline) first."
+        )
+    for row in completed:
+        if row.get("model_family") == "global_mean":
+            return row["experiment_id"]
+    return completed[0]["experiment_id"]

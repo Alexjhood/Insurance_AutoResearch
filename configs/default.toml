@@ -13,6 +13,9 @@ id_column = "IDpol"
 agent_dataset_name = "agent_dataset"
 
 [preprocessing]
+# Fixed cap of 100,000 applied identically to training, search-validation,
+# and milestone-holdout rows.  The agent may not vary this — every experiment
+# is evaluated against the same capped target.
 claim_capping_enabled = true
 claim_cap_threshold = 100000
 
@@ -67,7 +70,7 @@ policy = "reject"
 lookback = 25
 
 [search_space]
-model_families = ["tweedie_glm", "frequency_severity_glm", "tweedie_gbm", "regularized_linear"]
+model_families = ["global_mean", "tweedie_glm", "frequency_severity_glm", "tweedie_gbm", "regularized_linear"]
 target_strategies = ["direct_pure_premium", "frequency_severity"]
 allow_legacy_baselines = false
 # LLM may add new model families by creating src/autoresearch/models/<family>.py
@@ -101,6 +104,9 @@ max_learning_rate = 0.2
 min_samples_leaf_choices = [50, 200, 500, 1000]
 
 [search_space.preprocessing]
-claim_cap_thresholds = [50000, 75000, 100000, 150000, 200000, 500000]
+# Claim cap is fixed at 100,000 by product decision and applied uniformly to
+# training and testing data.  The only allowed value is the default — agents
+# must not propose alternative caps.
+claim_cap_thresholds = [100000]
 allow_disable_claim_capping = false
 allow_log1p_features = ["density_index_i"]

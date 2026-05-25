@@ -1,0 +1,14 @@
+experiment_name = "global_mean_baseline"
+model_family = "global_mean"
+target_strategy = "direct_pure_premium"
+parent_experiment_id = ""
+
+# Every research run begins here: a flat burning cost.  All subsequent
+# experiments must demonstrate real lift over this constant rate before
+# anything more complex earns a place in the champion lineage.
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]

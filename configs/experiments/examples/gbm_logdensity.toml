@@ -1,0 +1,16 @@
+experiment_name = "tweedie_gbm_logdensity"
+model_family = "tweedie_gbm"
+target_strategy = "direct_pure_premium"
+parent_experiment_id = "20260525T151439Z_direct_pure_premium_tweedie_glm"
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]
+max_iter = 500
+max_depth = 5
+learning_rate = 0.05
+min_samples_leaf = 200
+l2_regularization = 0.0
+feature_builder_module = "autoresearch.features.log_density"

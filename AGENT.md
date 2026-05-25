@@ -6,6 +6,32 @@ Read this file at the start of every session. Keep it open as reference.
 
 ---
 
+## Starting point — every run begins with no model
+
+Each run is bootstrapped with the **`global_mean` baseline**: predicted claim cost = (total training claim cost / total training exposure) × exposure. It is the flat exposure-weighted burning rate, the simplest possible "model", and it is the official champion at the start of every run.
+
+Everything you build develops relative to this. The first real model you propose only has to beat a constant rate; you do not need to start with a sophisticated method. Take the smallest interpretable step that could plausibly outperform the global mean and iterate from there.
+
+## Exploration philosophy — small steps, broad search
+
+The research loop rewards **many small, well-motivated improvements** over a few jumps to high-complexity methods. When you choose what to try next, prefer in roughly this order:
+
+1. **Feature engineering and data work** — bin a numeric column into actuarial bands, log-transform a skewed feature, add a single interaction term, mark outlier rows, examine residuals by segment. These are cheap to run and frequently move the metric.
+2. **Simple model forms with thoughtful priors** — a one-feature GLM, an exposure-weighted GLM with a small handful of features, a Poisson frequency model. These tell you which signal lives in the data before you spend compute on capacity.
+3. **Modest hyperparameter changes** to the current champion — a different regularisation strength, a different Tweedie power, a different feature subset.
+4. **Higher-capacity models** (GBM, deeper trees, ensembling, GAM, monotone constraints) — reserve these for after the simpler paths have plateaued. A GBM proposed in cycle 1 is almost always premature.
+
+Concretely:
+
+- **Bias toward breadth over depth.** Try a handful of different cheap ideas before doubling down on any one. A run that explores ten interpretable variants in a session is better than one that explores three deep GBM hyperparameter sweeps.
+- **One change at a time.** Every experiment should be readable as "X relative to the current champion". If you change the model family and the features and the cap, the next cycle has no clean signal to learn from.
+- **Spend compute last.** A 2000-tree GBM is a fine experiment, but only after you have understood what the simpler models can and cannot capture.
+- **Use the research log.** Log what each step taught you, not just whether it promoted. A non-promotion that taught you something about a segment is valuable.
+
+This applies to every cycle, including the very first proposal of a fresh run.
+
+---
+
 ## What you are optimising
 
 **Primary metric**: `gini_weighted` — higher is better. This is the exposure-weighted rank discrimination/lift metric used by the promotion gate.
@@ -41,14 +67,16 @@ autoresearch list-experiments
 ## The research cycle
 
 ### Step 1 — Form a hypothesis
-Read the research log and recent experiment metrics. Ask:
-- What's the biggest gap in the current champion's calibration (by region, age, vehicle type)?
-- What interactions or non-linearities does a GLM miss that a GBM might capture?
-- Is the frequency or severity model the weak link?
-- Could better feature engineering help (binning, interactions, log transforms)?
-- Is there a model family not yet tried (LightGBM, XGBoost, CatBoost, GAM)?
+Read the research log and recent experiment metrics. Ask, in roughly this order:
+- Is there an obvious feature transformation (log, binning, indicator) that the current champion misses?
+- Is there a single interaction (e.g. age × power, region × density) that I have not yet tried?
+- Could a single-feature or few-feature GLM clarify which signal the data actually carries?
+- Is the current champion's calibration breaking down on a specific segment (by region, age band, vehicle type)?
+- Have I exhausted the cheap interpretable ideas before reaching for higher-capacity models?
 
-Write your hypothesis at the top of your next research log entry before coding.
+Prefer the smallest change that would credibly improve on the current champion. If you have not yet seen what a thoughtful GLM with a few features does, do that before proposing a GBM. If you have not yet looked at calibration residuals, do that before adding more capacity.
+
+Write your hypothesis — and why it is the cheapest next step — at the top of your next research log entry before coding.
 
 ### Step 2 — Implement
 
@@ -62,6 +90,8 @@ target_strategy = "direct_pure_premium"
 parent_experiment_id = ""              # fill in after first run
 
 [preprocessing]
+# Fixed by product decision — do not change.  100,000 is applied identically to
+# training, search-validation, and milestone-holdout rows.
 claim_capping_enabled = true
 claim_cap_threshold = 100000
 
@@ -221,6 +251,8 @@ Raw mapping is private; use anonymised names only in model code.
 
 5. **Never change the primary metric or promotion gate thresholds** in a proposal or experiment config. These are controlled by `configs/default.toml` and the protected registry.
 
+6. **Never change the claim cap.** It is fixed at 100,000 and applied identically to training, search-validation, and milestone-holdout rows. The search space lists `claim_cap_thresholds = [100000]` and proposals that diverge from this will be rejected. Every model is evaluated against the same capped target so cycles remain comparable.
+
 ---
 
 ## Useful commands reference
@@ -327,29 +359,31 @@ autoresearch list-tracks   # see all tracks and their current champion
 
 ---
 
-## Research ideas to explore (not exhaustive)
+## Research ideas to explore (ordered cheapest → most expensive)
 
-**Feature engineering**
-- Age × power interaction (`driver_age_band_d * vehicle_power_band_b`)
-- Log density (`np.log1p(density_index_i)`)
-- Young driver indicator (`driver_age_band_d < 25`)
-- High-power indicator, region × territory interaction
-- Binning age into actuarial bands (17–24, 25–35, 36–50, 51–65, 65+)
+Work through these top-to-bottom. Most runs should spend the majority of their cycles in the first two groups.
 
-**Model forms**
-- LightGBM with native Tweedie objective and monotone constraints (age ↑ → risk ↑)
-- XGBoost Tweedie
-- CatBoost with native categorical handling (removes need for one-hot on region/vehicle_make)
-- GAM (generalized additive model) for smooth age/power effects
-- Two-stage: GBM for frequency, GLM for severity
-- Stacked ensemble: Tweedie GLM calibration overlay on top of GBM predictions
-- Isotonic regression calibration post-processing
+**Cheap data work (try first)**
+- Add a single feature transformation: `np.log1p(density_index_i)`, an actuarial age band, a high-mileage indicator.
+- Inspect residuals of the current champion by region, age band, vehicle make; let a real gap motivate the next experiment.
+- Try a single interaction term (e.g. `driver_age_band_d * vehicle_power_band_b`).
+- Drop a noisy feature and re-fit; sometimes fewer features beat more.
 
-**Regularisation**
-- Monotone constraints (LightGBM) — risk must be non-decreasing with younger age
-- Exposure-stratified cross-validation
-- Group k-fold on `region_cluster_j`
+**Simple model forms (try second)**
+- One- or few-feature Tweedie GLM to verify which signal carries the lift.
+- Poisson frequency GLM alone, no severity model, to understand the frequency-only ceiling.
+- Frequency × severity split with very low regularisation.
+- Modest hyperparameter sweep around the current champion: alpha, Tweedie power, feature subset.
 
-**Preprocessing**
-- Lower claim cap threshold (50K vs 100K) — reduces tail noise in training
-- Exposure-weighted undersampling of zero-claim policies
+**Higher-capacity models (only after the above plateau)**
+- Tweedie GBM with conservative depth and learning rate (3–5 depth, 0.03–0.05 lr).
+- LightGBM/XGBoost/CatBoost with native Tweedie or monotone constraints (age ↑ → risk ↑).
+- GAM for smooth age/power effects.
+- Stacked or calibration overlay (e.g. isotonic regression on top of a champion's predictions).
+
+**Process / methodology**
+- Exposure-stratified cross-validation.
+- Group k-fold on `region_cluster_j`.
+- Logging residual diagnostics by segment after every promotion.
+
+Note: the claim cap is fixed at 100,000; do not propose alternative thresholds or disabling capping.
