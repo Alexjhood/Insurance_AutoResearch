@@ -169,7 +169,8 @@ def test_initialise_champion_records_history_and_branch(tmp_path: Path) -> None:
     assert history[0]["action"] == "initialised"
 
 
-def test_mock_proposer_generates_validated_queue_item(tmp_path: Path) -> None:
+def test_file_proposer_with_valid_jsonl_generates_validated_queue_item(tmp_path: Path) -> None:
+    """FileProposer with a well-formed JSONL proposal validates and queues it."""
     config = _config(tmp_path)
     _record_direct(config)
     initialise_official_champion(config)
@@ -178,6 +179,32 @@ def test_mock_proposer_generates_validated_queue_item(tmp_path: Path) -> None:
         '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]}',
         encoding="utf-8",
     )
+    champion = get_official_champion(config.registry_path)
+    proposal_file = tmp_path / "proposals.jsonl"
+    import json as _json
+    proposal_file.write_text(
+        _json.dumps({
+            "proposal_id": "test_glm_v1",
+            "parent_experiment_id": champion["champion_id"],
+            "parent_branch_id": champion["branch_id"],
+            "branch_action": "new_branch",
+            "experiment_name": "test_glm_v1",
+            "rationale": "test",
+            "change_summary": "test change",
+            "expected_benefit": "test benefit",
+            "key_risk": "test risk",
+            "experiment_config": {
+                "experiment_name": "test_glm_v1",
+                "model_family": "tweedie_glm",
+                "target_strategy": "direct_pure_premium",
+                "parent_experiment_id": champion["champion_id"],
+                "preprocessing": {"claim_capping_enabled": True, "claim_cap_threshold": 100000},
+                "model": {"script_path": "model.py"},
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+    config = replace(config, llm_provider="file", llm_proposal_file=proposal_file)
 
     result = generate_and_enqueue_proposal(config)
     proposals = list_proposals(config.registry_path)
@@ -203,7 +230,8 @@ def test_invalid_file_proposer_output_is_recorded_as_failed(tmp_path: Path) -> N
     assert proposals[0]["validation_errors"]
 
 
-def test_file_handoff_falls_back_to_mock_when_inbox_file_missing(tmp_path: Path) -> None:
+def test_file_handoff_fails_when_inbox_file_missing(tmp_path: Path) -> None:
+    """FileHandoffProposer raises (no mock fallback) when the JSONL file is absent."""
     config = _config(tmp_path)
     config = replace(
         config,
@@ -212,16 +240,11 @@ def test_file_handoff_falls_back_to_mock_when_inbox_file_missing(tmp_path: Path)
     )
     _record_direct(config)
     initialise_official_champion(config)
-    config.metadata_dir.mkdir(parents=True)
-    (config.metadata_dir / "agent_schema.json").write_text(
-        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]}',
-        encoding="utf-8",
-    )
 
     result = generate_and_enqueue_proposal(config)
 
-    assert result["status"] == "validated"
-    assert result["proposal_id"].startswith("mock_")
+    # No mock fallback: the proposer raises FileNotFoundError, recorded as failed
+    assert result["status"] == "failed"
 
 
 def test_failed_provider_attempts_get_unique_proposal_ids(tmp_path: Path) -> None:

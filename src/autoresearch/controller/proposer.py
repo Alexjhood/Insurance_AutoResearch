@@ -1,11 +1,10 @@
-"""LLM proposal providers with a deterministic rotating mock fallback."""
+"""LLM proposal providers for the file-handoff and API-backed workflows."""
 
 from __future__ import annotations
 
 import json
 import os
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 import urllib.error
@@ -56,99 +55,6 @@ def build_prompt(context: dict[str, Any]) -> str:
     )
 
 
-# ── Mock proposer (rotating pool) ────────────────────────────────────────────
-
-_MOCK_POOL = [
-    {
-        "branch_action": "new_branch",
-        "model_family": "tweedie_glm",
-        "target_strategy": "direct_pure_premium",
-        "model_params": {"alpha": 0.3, "power": 1.5},
-        "rationale": "Reduce GLM regularisation to capture more local segment effects.",
-        "change_summary": "Tweedie GLM (power=1.5) with lower alpha=0.3 vs baseline alpha=1.0.",
-        "expected_benefit": "Better fit on lower-risk segments where ridge over-smooths.",
-        "key_risk": "May overfit on high-volatility segments.",
-    },
-    {
-        "branch_action": "new_branch",
-        "model_family": "tweedie_glm",
-        "target_strategy": "direct_pure_premium",
-        "model_params": {"alpha": 3.0, "power": 1.7},
-        "rationale": "Increase power parameter to upweight high-cost tails.",
-        "change_summary": "Tweedie GLM with power=1.7 (more tail-heavy than p=1.5) and alpha=3.0.",
-        "expected_benefit": "Better calibration on heavy-tailed claim distributions.",
-        "key_risk": "May worsen calibration on low-claim segments.",
-    },
-    {
-        "branch_action": "new_branch",
-        "model_family": "frequency_severity_glm",
-        "target_strategy": "frequency_severity",
-        "model_params": {"freq_alpha": 1.0, "sev_alpha": 0.5},
-        "rationale": "Separate frequency and severity modelling for better actuarial interpretability.",
-        "change_summary": "Poisson GLM for frequency × Gamma GLM for severity.",
-        "expected_benefit": "Captures frequency/severity heterogeneity missed by direct model.",
-        "key_risk": "Severity model may be noisy with few large claims.",
-    },
-    {
-        "branch_action": "new_branch",
-        "model_family": "tweedie_gbm",
-        "target_strategy": "direct_pure_premium",
-        "model_params": {"max_iter": 300, "max_depth": 5, "learning_rate": 0.05, "min_samples_leaf": 200},
-        "rationale": "Non-linear model to capture interaction effects missed by GLM.",
-        "change_summary": "Gradient-boosted Tweedie (Poisson loss) with depth=5, 300 trees.",
-        "expected_benefit": "Captures non-linear risk interactions (e.g. age × vehicle type).",
-        "key_risk": "May overfit on small segments; GBM interpretability lower than GLM.",
-    },
-    {
-        "branch_action": "new_branch",
-        "model_family": "tweedie_gbm",
-        "target_strategy": "direct_pure_premium",
-        "model_params": {"max_iter": 800, "max_depth": 7, "learning_rate": 0.03, "min_samples_leaf": 500},
-        "rationale": "Deeper GBM with more conservative learning rate and leaf size.",
-        "change_summary": "Tweedie GBM with 800 trees, depth=7, lr=0.03, min_leaf=500.",
-        "expected_benefit": "Higher-capacity model with regularised leaves for stable predictions.",
-        "key_risk": "Slower training; may not improve over shallower variant.",
-    },
-]
-
-
-class MockProposer:
-    """Deterministic rotating mock proposer that cycles through a diverse pool."""
-
-    def propose(self, context: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
-        proposal_count = int(context.get("proposal_count", len(context.get("recent_proposals", []))))
-        entry = _MOCK_POOL[proposal_count % len(_MOCK_POOL)]
-        champion = context["official_champion"]
-        parent_id = champion["champion_id"]
-        parent_branch = champion["branch_id"]
-        idx = proposal_count % len(_MOCK_POOL)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        name = f"mock_{stamp}_{idx}_{entry['model_family']}"
-        model_cfg: dict[str, Any] = {
-            "experiment_name": name,
-            "model_family": entry["model_family"],
-            "target_strategy": entry["target_strategy"],
-            "parent_experiment_id": parent_id,
-            "preprocessing": {"claim_capping_enabled": True, "claim_cap_threshold": 100000},
-            "model": dict(entry["model_params"]),
-        }
-        proposal = {
-            "proposal_id": name,
-            "parent_experiment_id": parent_id,
-            "parent_branch_id": parent_branch,
-            "branch_action": entry["branch_action"],
-            "experiment_name": name,
-            "rationale": entry["rationale"],
-            "change_summary": entry["change_summary"],
-            "expected_benefit": entry["expected_benefit"],
-            "key_risk": entry["key_risk"],
-            "experiment_config": model_cfg,
-            "model_script_source": _mock_model_script_source(entry["model_family"], entry["target_strategy"]),
-        }
-        text = json.dumps(proposal, indent=2, sort_keys=True)
-        return text, proposal
-
-
 # ── File-based proposer ────────────────────────────────────────────────────────
 
 class FileProposer:
@@ -168,21 +74,13 @@ class FileProposer:
 
 
 class FileHandoffProposer:
-    """Use a handoff proposal file when present, otherwise fall back locally."""
+    """Use a handoff proposal JSONL file; raise if absent or empty (no mock fallback)."""
 
     def __init__(self, path: Path) -> None:
         self.file_proposer = FileProposer(path)
-        self.fallback = MockProposer()
 
     def propose(self, context: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
-        try:
-            return self.file_proposer.propose(context)
-        except FileNotFoundError:
-            return self.fallback.propose(context)
-        except ValueError as exc:
-            if "contains no JSON proposals" in str(exc):
-                return self.fallback.propose(context)
-            raise
+        return self.file_proposer.propose(context)
 
 
 # ── OpenAI proposer ───────────────────────────────────────────────────────────
@@ -304,8 +202,6 @@ def proposer_from_config(config) -> Proposer:
     """Create the configured proposal provider."""
 
     provider = config.llm_provider.lower()
-    if provider == "mock":
-        return MockProposer()
     if provider == "file":
         return FileProposer(config.llm_proposal_file)
     if provider == "file_handoff":
@@ -340,62 +236,3 @@ def _parse_json(text: str) -> dict[str, Any] | None:
         return None
 
 
-def _mock_model_script_source(model_family: str, target_strategy: str) -> str:
-    """Return a small self-contained script for mock autonomous proposals."""
-
-    return '''\
-from __future__ import annotations
-
-import numpy as np
-import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
-from sklearn.linear_model import TweedieRegressor
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-
-RECORD_ID = "record_id"
-EXPOSURE = "exposure_term_a"
-CLAIM_COUNT = "claim_count_signal_q"
-CLAIM_EVENTS = "claim_event_count_l"
-CLAIM_COST = "claim_cost_capped_active"
-RAW_CLAIM_COST = "claim_cost_observed_k"
-SPLIT = "split"
-NON_FEATURE = {RECORD_ID, CLAIM_COUNT, CLAIM_EVENTS, CLAIM_COST, RAW_CLAIM_COST, SPLIT}
-
-
-def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hp):
-    features = _feature_columns(train, feature_inclusions, feature_exclusions)
-    numeric = [c for c in features if pd.api.types.is_numeric_dtype(train[c])]
-    categorical = [c for c in features if c not in numeric]
-    transformers = []
-    if numeric:
-        transformers.append(("num", Pipeline([("impute", SimpleImputer(strategy="median")), ("scale", StandardScaler())]), numeric))
-    if categorical:
-        transformers.append(("cat", Pipeline([("impute", SimpleImputer(strategy="most_frequent")), ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False))]), categorical))
-    model = Pipeline([
-        ("preprocess", ColumnTransformer(transformers=transformers, remainder="drop")),
-        ("glm", TweedieRegressor(power=float(hp.get("power", 1.5)), alpha=float(hp.get("alpha", 1.0)), link="log", max_iter=500)),
-    ])
-    y = train[CLAIM_COST].astype(float) / train[EXPOSURE].astype(float).clip(lower=1e-9)
-    model.fit(train[features], y, glm__sample_weight=train[EXPOSURE].astype(float))
-    pred_pp = np.clip(model.predict(score[features]), 0.0, None)
-    return pred_pp * score[EXPOSURE].astype(float).to_numpy(), {
-        "model_family": "scripted_tweedie_glm",
-        "target_strategy": "direct_pure_premium",
-        "feature_columns": features,
-        "alpha": float(hp.get("alpha", 1.0)),
-        "power": float(hp.get("power", 1.5)),
-    }
-
-
-def _feature_columns(frame, feature_inclusions, feature_exclusions):
-    base = [c for c in frame.columns if c not in NON_FEATURE]
-    if feature_inclusions:
-        base = [c for c in base if c in set(feature_inclusions)]
-    if feature_exclusions:
-        base = [c for c in base if c not in set(feature_exclusions)]
-    if not base:
-        raise ValueError("At least one feature column is required")
-    return base
-'''
