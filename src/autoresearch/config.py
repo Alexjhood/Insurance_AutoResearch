@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
 from pathlib import Path
 import tomllib
 
@@ -71,6 +73,8 @@ class ProjectConfig:
     deduplication_lookback: int
     # search space (raw dict for flexibility)
     search_space: dict[str, object]
+    run_id: str = "default"
+    track_base_dir: Path | None = None
 
 
 def _resolve(root: Path, value: str) -> Path:
@@ -81,6 +85,7 @@ def _resolve(root: Path, value: str) -> Path:
 def load_config(
     config_path: str | Path | None = None,
     track_id: str | None = None,
+    run_id: str | None = None,
 ) -> "ProjectConfig":
     """Load TOML config and resolve all project paths.
 
@@ -110,18 +115,22 @@ def load_config(
     resolved_track = track_id or "default"
 
     base_artifacts = _resolve(PROJECT_ROOT, paths["artifacts_dir"])
+    resolved_run = run_id or "default"
+    track_base: Path | None = None
 
     if track_id:
         track_base = base_artifacts / "tracks" / track_id
-        artifacts_dir = track_base
-        registry_path = track_base / "registry.sqlite"
-        research_log_path = track_base / "RESEARCH_LOG.md"
-        handoff_base_dir = track_base / "auto_research"
-        handoff_context_dir = handoff_base_dir / "context"
-        handoff_proposal_inbox_dir = handoff_base_dir / "proposals" / "inbox"
-        handoff_proposal_processed_dir = handoff_base_dir / "proposals" / "processed"
-        handoff_results_dir = handoff_base_dir / "results"
-        handoff_handoffs_dir = handoff_base_dir / "handoffs"
+        resolved_run = _resolve_run_id(track_base, run_id)
+        run_base = track_base / "runs" / resolved_run
+        artifacts_dir = run_base
+        registry_path = run_base / "registry.sqlite"
+        research_log_path = run_base / "RESEARCH_LOG.md"
+        handoff_base_dir = run_base
+        handoff_context_dir = run_base / "context"
+        handoff_proposal_inbox_dir = run_base / "proposal_inbox"
+        handoff_proposal_processed_dir = run_base / "proposal_processed"
+        handoff_results_dir = run_base / "results"
+        handoff_handoffs_dir = run_base / "handoffs"
         llm_proposal_file = handoff_proposal_inbox_dir / "manual_proposals.jsonl"
     else:
         artifacts_dir = base_artifacts
@@ -146,6 +155,8 @@ def load_config(
         registry_path=registry_path,
         research_log_path=research_log_path,
         track_id=resolved_track,
+        run_id=resolved_run,
+        track_base_dir=track_base,
         random_seed=int(data["random_seed"]),
         id_column=str(data["id_column"]),
         agent_dataset_name=str(data["agent_dataset_name"]),
@@ -207,3 +218,60 @@ def ensure_project_dirs(config: ProjectConfig) -> None:
         config.research_log_path.parent,
     ):
         path.mkdir(parents=True, exist_ok=True)
+
+    if config.track_id != "default" and config.track_base_dir is not None:
+        latest_path = config.track_base_dir / "latest_run.json"
+        latest_path.parent.mkdir(parents=True, exist_ok=True)
+        latest_path.write_text(
+            json.dumps(
+                {
+                    "track_id": config.track_id,
+                    "run_id": config.run_id,
+                    "run_dir": str(config.artifacts_dir),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        manifest_path = config.artifacts_dir / "run_manifest.json"
+        if not manifest_path.exists():
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "track_id": config.track_id,
+                        "run_id": config.run_id,
+                        "run_dir": str(config.artifacts_dir),
+                        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+
+def _resolve_run_id(track_base: Path, requested_run_id: str | None) -> str:
+    if requested_run_id:
+        return _safe_run_id(requested_run_id)
+
+    latest_path = track_base / "latest_run.json"
+    if latest_path.exists():
+        try:
+            payload = json.loads(latest_path.read_text(encoding="utf-8"))
+            latest = str(payload.get("run_id", "")).strip()
+            if latest:
+                return _safe_run_id(latest)
+        except Exception:
+            pass
+
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _safe_run_id(value: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value.strip())
+    if not safe:
+        raise ValueError("run_id must contain at least one letter, number, hyphen, or underscore")
+    return safe

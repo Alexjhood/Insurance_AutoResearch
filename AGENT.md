@@ -248,29 +248,55 @@ experiments, champion history, or metrics of any other track.
 ### Starting a track session
 
 ```bash
-# One-command setup for a new or existing isolated track
-autoresearch --track claude bootstrap-track
+# One-command setup for a new or existing isolated run
+autoresearch --track claude --run-id ClaudeTimeX bootstrap-track
 
 # Replace 'claude' with the agent identifier for your session
-autoresearch --track claude init-registry
-autoresearch --track claude run-all-baselines
-autoresearch --track claude init-official-champion
-autoresearch --track claude export-context   # read this at session start
-autoresearch --track claude run-cycles 10
+autoresearch --track claude --run-id ClaudeTimeX init-registry
+autoresearch --track claude --run-id ClaudeTimeX run-all-baselines
+autoresearch --track claude --run-id ClaudeTimeX init-official-champion
+autoresearch --track claude --run-id ClaudeTimeX export-context   # read this at session start
+autoresearch --track claude --run-id ClaudeTimeX run-cycles 10
 ```
 
 `bootstrap-track` is idempotent. It prepares shared data if needed, creates or
-migrates the track registry, runs baselines only when the track has no
+migrates the run registry, runs baselines only when the run has no
 experiments, initializes the official champion if missing, writes proposal
 templates, and exports the latest context bundle. Use it at the start of a new
 ClaudeCode/Codex conversation when you want the agent to configure its own run.
 
-All standard commands accept `--track <name>`.  Without `--track`, commands
-operate on the legacy default paths (backward-compatible).
+All standard commands accept `--track <name> --run-id <id>`. If `--run-id` is
+omitted, the command continues the track's latest run, or creates a timestamped
+run when no latest run exists. Without `--track`, commands operate on the legacy
+default paths (backward-compatible).
+
+Tracked run layout:
+
+```text
+artifacts/tracks/<track>/runs/<run-id>/
+  registry.sqlite
+  RESEARCH_LOG.md
+  run_manifest.json
+  context/
+  handoffs/
+  proposal_inbox/
+  proposal_processed/
+  results/
+  iterations/
+    000_bootstrap/
+    001_<proposal-id>/
+      proposal/
+      experiment/
+      comparison/
+```
+
+Anything created for a run should live under that run directory. If a run goes
+wrong, deleting `artifacts/tracks/<track>/runs/<run-id>/` clears its registry,
+context, proposals, experiments, comparisons, and logs.
 
 ### What is isolated per track
 
-| Isolated (per track) | Shared (all tracks) |
+| Isolated (per track run) | Shared (all tracks/runs) |
 |----------------------|---------------------|
 | SQLite registry | Raw & processed data |
 | Artifacts (experiments, comparisons) | Fixed split pack |
@@ -292,9 +318,9 @@ autoresearch list-tracks   # see all tracks and their current champion
 
 ### Safety rules for tracked sessions
 
-6. **Always pass `--track <your-agent-name>` to every command.**  Running
-   without `--track` writes to the shared default registry and is reserved
-   for human/admin operations.
+6. **Always pass `--track <your-agent-name>` and the intended `--run-id` to
+   every command.** Running without `--track` writes to the shared default
+   registry and is reserved for human/admin operations.
 
 7. **Never read another track's context bundle.**  The files under
    `artifacts/tracks/<other-agent>/` are off-limits during your session.

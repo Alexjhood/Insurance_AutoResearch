@@ -124,6 +124,8 @@ alpha = 1.0
     assert outputs["environment_manifest"].exists()
     assert rows[0]["experiment_name"] == "test_direct"
     assert rows[0]["claim_cap_threshold"] == 100000
+    assert "iterations" in outputs["metrics"].parts
+    assert "experiments" not in outputs["metrics"].relative_to(config.artifacts_dir).parts
 
 
 def test_run_experiment_tweedie_glm(tmp_path: Path) -> None:

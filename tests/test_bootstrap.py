@@ -53,7 +53,7 @@ def test_bootstrap_track_keeps_successful_baseline_when_another_fails(tmp_path: 
     (config.root / "configs" / "experiments" / "01_good.toml").write_text("", encoding="utf-8")
     (config.root / "configs" / "experiments" / "02_bad.toml").write_text("", encoding="utf-8")
 
-    def fake_run_experiment(cfg, path):
+    def fake_run_experiment(cfg, path, *, output_dir=None):
         if path.name == "02_bad.toml":
             raise ValueError("bad baseline")
         _record_direct(cfg, "direct")

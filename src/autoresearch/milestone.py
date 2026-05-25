@@ -31,7 +31,7 @@ from autoresearch.data.preprocessing import apply_claim_capping
 from autoresearch.evaluation.diagnostics import compute_diagnostics
 from autoresearch.evaluation.metrics import full_metric_panel
 from autoresearch.models.baselines import RAW_CLAIM_COST
-from autoresearch.models.dispatcher import dispatch_model
+from autoresearch.experiment_registry.registry import list_artifacts
 from autoresearch.utils.io import read_json, write_json
 
 
@@ -110,9 +110,7 @@ def _run_evaluation(
     from autoresearch.data.holdout_vault import load_holdout_dataset, load_search_dataset
 
     # Load the champion's experiment config
-    config_snapshot_path = config.artifacts_dir / "experiments" / champion_id / "config_snapshot.json"
-    if not config_snapshot_path.exists():
-        raise FileNotFoundError(f"Champion config snapshot not found: {config_snapshot_path}")
+    config_snapshot_path = _artifact_path(config, champion_id, "config_snapshot")
     snapshot = read_json(config_snapshot_path)
     exp = snapshot.get("experiment", {})
 
@@ -129,7 +127,7 @@ def _run_evaluation(
     holdout_frame = load_holdout_dataset(config.holdout_vault_dir)
 
     # Load SV predictions for the gap calculation (already computed)
-    sv_predictions_path = config.artifacts_dir / "experiments" / champion_id / "predictions.csv"
+    sv_predictions_path = _artifact_path(config, champion_id, "predictions")
     sv_predictions = pd.read_csv(sv_predictions_path)
     sv_only = sv_predictions[sv_predictions["split"] == "search_validation"]
 
@@ -281,6 +279,13 @@ def _dispatch_for_milestone(
     preds["actual_pure_premium"] = preds["actual_claim_cost"] / exp
     preds["predicted_pure_premium"] = preds["predicted_claim_cost"] / exp
     return preds
+
+
+def _artifact_path(config: ProjectConfig, experiment_id: str, artifact_type: str) -> Path:
+    for artifact in list_artifacts(config.registry_path, experiment_id):
+        if artifact["artifact_type"] == artifact_type:
+            return Path(artifact["path"])
+    raise FileNotFoundError(f"Experiment {experiment_id} has no {artifact_type!r} artifact")
 
 
 def manual_evaluate_on_holdout(config: ProjectConfig, experiment_id: str) -> dict[str, Any] | None:

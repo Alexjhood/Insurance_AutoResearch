@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from autoresearch.config import load_config
+from autoresearch.config import ensure_project_dirs, load_config
 from autoresearch.bootstrap import bootstrap_track
 from autoresearch.comparison_runner import compare_against_current_champion, compare_experiments, run_repeated_evaluation
 from autoresearch.controller.champion import initialise_official_champion
@@ -60,6 +60,16 @@ def build_parser() -> argparse.ArgumentParser:
             "All artifact paths and the registry are scoped under "
             "artifacts/tracks/<NAME>/ so multiple agents can run in "
             "complete isolation.  Omit to use the default (untracked) paths."
+        ),
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        metavar="ID",
+        help=(
+            "Run id within the selected track. Tracked artifacts are written to "
+            "artifacts/tracks/<track>/runs/<ID>/. Omit to continue the latest run "
+            "or create a timestamped run when none exists."
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -146,7 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    config = load_config(args.config, track_id=getattr(args, "track", None))
+    config = load_config(
+        args.config,
+        track_id=getattr(args, "track", None),
+        run_id=getattr(args, "run_id", None),
+    )
 
     if args.command == "prepare-data":
         outputs = prepare_data(config)
@@ -167,10 +181,14 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             parser.error(str(exc))
         print(json.dumps(result, indent=2, sort_keys=True))
-        print(f"\nReady: read {result['context']} and continue with `autoresearch --track {config.track_id} run-cycles 10`.")
+        print(
+            f"\nReady: read {result['context']} and continue with "
+            f"`autoresearch --track {config.track_id} --run-id {config.run_id} run-cycles 10`."
+        )
         return 0
 
     if args.command == "init-registry":
+        ensure_project_dirs(config)
         path = init_registry(config.registry_path)
         print(f"registry: {path}")
         return 0
@@ -461,11 +479,11 @@ def main(argv: list[str] | None = None) -> int:
         for track_dir in sorted(tracks_dir.iterdir()):
             if not track_dir.is_dir():
                 continue
-            registry = track_dir / "registry.sqlite"
-            has_registry = "✓" if registry.exists() else "✗"
-            log = track_dir / "RESEARCH_LOG.md"
-            has_log = "✓" if log.exists() else "✗"
             tc = load_config(args.config, track_id=track_dir.name)
+            registry = tc.registry_path
+            has_registry = "✓" if registry.exists() else "✗"
+            log = tc.research_log_path
+            has_log = "✓" if log.exists() else "✗"
             try:
                 from autoresearch.experiment_registry.registry import registry_counts
                 champ = get_official_champion(tc.registry_path)
@@ -475,7 +493,10 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 champ_id = "?"
                 n_exp = "?"
-            print(f"{track_dir.name}\tregistry={has_registry}\tlog={has_log}\tchampion={champ_id}\texperiments={n_exp}")
+            print(
+                f"{track_dir.name}\trun={tc.run_id}\tregistry={has_registry}\t"
+                f"log={has_log}\tchampion={champ_id}\texperiments={n_exp}"
+            )
         return 0
 
     parser.error(f"Unknown command: {args.command}")

@@ -22,6 +22,7 @@ from autoresearch.experiment_registry.registry import (
     upsert_branch,
 )
 from autoresearch.experiment_runner import run_experiment
+from autoresearch.run_artifacts import next_iteration_dir, proposal_iteration_dir
 from autoresearch.utils.io import read_json, write_json
 
 
@@ -43,7 +44,8 @@ def generate_and_enqueue_proposal(config: ProjectConfig) -> dict[str, Any]:
         raw_text = str(exc)
 
     proposal_id = _proposal_id(parsed)
-    out_dir = config.artifacts_dir / "proposals" / proposal_id
+    iteration_dir = next_iteration_dir(config, proposal_id)
+    out_dir = iteration_dir / "proposal"
     out_dir.mkdir(parents=True, exist_ok=True)
     context_path = out_dir / "context.json"
     prompt_path = out_dir / "prompt.txt"
@@ -115,7 +117,8 @@ def enqueue_proposal_from_file(config: ProjectConfig, proposal_path: Path) -> di
     champion = _require_champion(config)
     parsed = read_json(proposal_path)
     proposal, errors = _validate_and_normalise(config, parsed, champion)
-    out_dir = config.artifacts_dir / "proposals" / proposal["proposal_id"]
+    iteration_dir = next_iteration_dir(config, proposal["proposal_id"])
+    out_dir = iteration_dir / "proposal"
     out_dir.mkdir(parents=True, exist_ok=True)
     stored_path = out_dir / "proposal.json"
     errors_path = out_dir / "validation_errors.json"
@@ -156,14 +159,15 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
 
     proposal_id = proposal["proposal_id"]
     update_proposal_status(config.registry_path, proposal_id, "running", notes="Deterministic execution started.")
-    out_dir = config.artifacts_dir / "proposals" / proposal_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    experiment_config_path = out_dir / "experiment_config.toml"
+    iteration_dir = proposal_iteration_dir(config, proposal)
+    proposal_dir = iteration_dir / "proposal"
+    proposal_dir.mkdir(parents=True, exist_ok=True)
+    experiment_config_path = proposal_dir / "experiment_config.toml"
     experiment_config_path.write_text(_to_toml(proposal["config"]), encoding="utf-8")
 
     try:
-        outputs = run_experiment(config, experiment_config_path)
-        experiment_id = outputs["metrics"].parent.name
+        outputs = run_experiment(config, experiment_config_path, output_dir=iteration_dir / "experiment")
+        experiment_id = read_json(outputs["config_snapshot"])["experiment_id"]
         update_proposal_status(config.registry_path, proposal_id, "completed", experiment_id=experiment_id)
         upsert_branch(
             config.registry_path,
@@ -175,7 +179,12 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
             description=proposal.get("change_summary"),
         )
 
-        comparison_outputs = compare_experiments(config, champion["champion_id"], experiment_id)
+        comparison_outputs = compare_experiments(
+            config,
+            champion["champion_id"],
+            experiment_id,
+            output_dir=iteration_dir / "comparison",
+        )
         report = read_json(comparison_outputs["promotion_report"])
         comparison_id = report["comparison_id"]
         decision = report["promotion_decision"]

@@ -16,6 +16,7 @@ from autoresearch.evaluation.metrics import evaluate_predictions
 from autoresearch.experiment_registry.registry import init_registry, record_experiment
 from autoresearch.models.baselines import RAW_CLAIM_COST
 from autoresearch.models.dispatcher import dispatch_model
+from autoresearch.run_artifacts import next_iteration_dir
 from autoresearch.utils.environment import capture_environment
 from autoresearch.utils.integrity import (
     check_integrity,
@@ -32,7 +33,12 @@ def load_experiment_config(path: Path) -> dict[str, Any]:
         return tomllib.load(f)
 
 
-def run_experiment(config: ProjectConfig, experiment_config_path: Path) -> dict[str, Path]:
+def run_experiment(
+    config: ProjectConfig,
+    experiment_config_path: Path,
+    *,
+    output_dir: Path | None = None,
+) -> dict[str, Path]:
     """Run one deterministic experiment end to end."""
 
     ensure_project_dirs(config)
@@ -84,7 +90,7 @@ def run_experiment(config: ProjectConfig, experiment_config_path: Path) -> dict[
             notes=msg,
         )
         raise ValueError(msg)
-    run_dir = config.artifacts_dir / "experiments" / experiment_id
+    run_dir = output_dir or (next_iteration_dir(config, exp["experiment_name"]) / "experiment")
     run_dir.mkdir(parents=True, exist_ok=True)
 
     frame = load_search_dataset(config.processed_dir, config.agent_dataset_name)

@@ -74,17 +74,40 @@ For an isolated ClaudeCode or Codex research track, prefer the idempotent
 bootstrap command:
 
 ```bash
-autoresearch --track codex bootstrap-track
+autoresearch --track codex --run-id CodexTimeX bootstrap-track
 ```
 
-This prepares shared data if needed, creates or migrates
-`artifacts/tracks/codex/registry.sqlite`, runs the baseline experiments if the
-track is empty, initializes the official champion, writes proposal templates,
-and exports `artifacts/tracks/codex/auto_research/context/latest_context.json`.
+This prepares shared data if needed, creates or migrates the run registry,
+runs the baseline experiments if the run is empty, initializes the official
+champion, writes proposal templates, and exports:
+
+`artifacts/tracks/codex/runs/CodexTimeX/context/latest_context.json`
+
+Everything created for that run is under:
+
+```text
+artifacts/tracks/codex/runs/CodexTimeX/
+  registry.sqlite
+  RESEARCH_LOG.md
+  run_manifest.json
+  context/
+  handoffs/
+  proposal_inbox/
+  proposal_processed/
+  results/
+  iterations/
+    000_bootstrap/
+    001_<proposal-id>/
+      proposal/
+      experiment/
+      comparison/
+```
+
+Delete the run folder to remove artifacts from a failed or unwanted run.
 After that, an agent can continue with:
 
 ```bash
-autoresearch --track codex run-cycles 10
+autoresearch --track codex --run-id CodexTimeX run-cycles 10
 ```
 
 ## Dashboard

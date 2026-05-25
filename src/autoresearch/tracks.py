@@ -316,10 +316,6 @@ def _load_predictions(config: ProjectConfig, experiment_id: str) -> pd.DataFrame
     for artifact in artifacts:
         if artifact["artifact_type"] == "predictions":
             return pd.read_csv(artifact["path"])
-    # Fallback to conventional path
-    fallback = config.artifacts_dir / "experiments" / experiment_id / "predictions.csv"
-    if fallback.exists():
-        return pd.read_csv(fallback)
     raise FileNotFoundError(
         f"No predictions artifact for experiment '{experiment_id}' in track '{config.track_id}'"
     )

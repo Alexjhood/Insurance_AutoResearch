@@ -26,6 +26,7 @@ from autoresearch.experiment_registry.registry import (
     record_comparison,
     record_experiment_artifacts,
 )
+from autoresearch.run_artifacts import next_iteration_dir
 from autoresearch.utils.io import read_json, write_json
 
 
@@ -62,7 +63,7 @@ def run_repeated_evaluation(config: ProjectConfig, experiment_id: str) -> dict[s
         "std_score": float(scores["score"].std(ddof=0)),
     }
 
-    out_dir = config.artifacts_dir / "experiments" / experiment_id
+    out_dir = Path(experiment.get("metrics_path") or _artifact_path(config, experiment_id, "predictions")).parent
     score_path = out_dir / "repeated_scores.csv"
     summary_path = out_dir / "repeated_summary.json"
     scores.to_csv(score_path, index=False)
@@ -75,7 +76,13 @@ def run_repeated_evaluation(config: ProjectConfig, experiment_id: str) -> dict[s
     return {"repeated_scores": score_path, "repeated_summary": summary_path}
 
 
-def compare_experiments(config: ProjectConfig, champion_id: str, challenger_id: str) -> dict[str, Path]:
+def compare_experiments(
+    config: ProjectConfig,
+    champion_id: str,
+    challenger_id: str,
+    *,
+    output_dir: Path | None = None,
+) -> dict[str, Path]:
     """Run a paired volatility-aware comparison and persist promotion evidence."""
 
     ensure_project_dirs(config)
@@ -143,7 +150,7 @@ def compare_experiments(config: ProjectConfig, champion_id: str, challenger_id: 
     )
 
     comparison_id = _comparison_id(champion_id, challenger_id)
-    out_dir = config.artifacts_dir / "comparisons" / comparison_id
+    out_dir = output_dir or (next_iteration_dir(config, comparison_id) / "comparison")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     payload = {
@@ -283,10 +290,9 @@ def _load_diagnostics(config: ProjectConfig, experiment_id: str) -> dict[str, An
         diag_path = _artifact_path(config, experiment_id, "diagnostics")
         return read_json(diag_path)
     except Exception:
-        # Fall back to filesystem path
-        diag_path = config.artifacts_dir / "experiments" / experiment_id / "diagnostics.json"
-        if diag_path.exists():
-            return read_json(diag_path)
+        for diag_path in config.artifacts_dir.glob(f"iterations/*/experiment/diagnostics.json"):
+            if experiment_id in str(diag_path.parent):
+                return read_json(diag_path)
         return None
 
 

@@ -60,6 +60,17 @@ def test_default_config_uses_file_handoff() -> None:
     assert "auto_research" in str(config.handoff_base_dir)
 
 
+def test_tracked_config_scopes_artifacts_to_run() -> None:
+    config = load_config(track_id="codex", run_id="CodexTimeX")
+
+    assert config.track_id == "codex"
+    assert config.run_id == "CodexTimeX"
+    assert config.artifacts_dir.name == "CodexTimeX"
+    assert config.artifacts_dir.parent.name == "runs"
+    assert config.registry_path == config.artifacts_dir / "registry.sqlite"
+    assert config.handoff_context_dir == config.artifacts_dir / "context"
+
+
 def test_export_context_and_template(tmp_path: Path) -> None:
     config = _config(tmp_path)
     config = replace(

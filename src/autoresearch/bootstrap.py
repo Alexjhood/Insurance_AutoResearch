@@ -15,6 +15,7 @@ from autoresearch.experiment_registry.registry import (
     list_experiments,
 )
 from autoresearch.experiment_runner import run_experiment
+from autoresearch.run_artifacts import bootstrap_iteration_dir
 
 
 def bootstrap_track(
@@ -128,6 +129,8 @@ def bootstrap_track(
 
     return {
         "track": config.track_id,
+        "run_id": config.run_id,
+        "run_dir": str(config.artifacts_dir),
         "registry": str(config.registry_path),
         "context": str(context_outputs["latest_context_json"]),
         "handoff": str(context_outputs["latest_handoff_markdown"]),
@@ -153,9 +156,10 @@ def _run_baselines_resilient(config: ProjectConfig) -> tuple[list[dict[str, Path
     runs: list[dict[str, Path]] = []
     errors: list[str] = []
     exp_dir = config.root / "configs" / "experiments"
+    base_dir = bootstrap_iteration_dir(config) / "baseline_experiments"
     for path in sorted(exp_dir.glob("*.toml")):
         try:
-            runs.append(run_experiment(config, path))
+            runs.append(run_experiment(config, path, output_dir=base_dir / path.stem))
         except Exception as exc:
             errors.append(f"{path.name}: {exc}")
     return runs, errors
