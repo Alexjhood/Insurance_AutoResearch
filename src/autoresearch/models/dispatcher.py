@@ -40,6 +40,7 @@ def dispatch_model(
     feature_inclusions: list[str] | None = None,
     feature_exclusions: list[str] | None = None,
     model_script_path: Path | None = None,
+    allow_holdout_split: bool = False,
 ) -> ModelResult:
     """Fit the requested model family and return scored predictions.
 
@@ -64,7 +65,7 @@ def dispatch_model(
     data = frame.merge(split_frame[["record_id", "split"]], on="record_id", how="inner")
     if len(data) < len(frame):
         raise ValueError(f"{len(frame) - len(data)} rows dropped during split merge — split pack may be stale")
-    if (data["split"] == "milestone_holdout").any() and "milestone_holdout" in score_splits:
+    if not allow_holdout_split and (data["split"] == "milestone_holdout").any() and "milestone_holdout" in score_splits:
         raise ValueError("Milestone holdout cannot be requested for ordinary scoring")
 
     train = data[data["split"] == train_split].copy()
@@ -126,55 +127,9 @@ def _call_model(
             hyperparameters=hp,
         )
 
-    if model_family == "tweedie_glm":
-        from autoresearch.models.glm import run_tweedie_glm
-        return run_tweedie_glm(
-            train, score,
-            alpha=float(hp.get("alpha", 1.0)),
-            power=float(hp.get("power", 1.5)),
-            feature_inclusions=feature_inclusions,
-            feature_exclusions=feature_exclusions,
-        )
-
-    if model_family == "frequency_severity_glm":
-        from autoresearch.models.glm import run_frequency_severity_glm
-        return run_frequency_severity_glm(
-            train, score,
-            freq_alpha=float(hp.get("freq_alpha", 1.0)),
-            sev_alpha=float(hp.get("sev_alpha", 1.0)),
-            feature_inclusions=feature_inclusions,
-            feature_exclusions=feature_exclusions,
-        )
-
-    if model_family == "tweedie_gbm":
-        from autoresearch.models.gbm import run_tweedie_gbm
-        return run_tweedie_gbm(
-            train, score,
-            max_iter=int(hp.get("max_iter", 500)),
-            max_depth=int(hp.get("max_depth", 5)),
-            learning_rate=float(hp.get("learning_rate", 0.05)),
-            min_samples_leaf=int(hp.get("min_samples_leaf", 200)),
-            l2_regularization=float(hp.get("l2_regularization", 0.0)),
-            feature_inclusions=feature_inclusions,
-            feature_exclusions=feature_exclusions,
-        )
-
-    if model_family == "regularized_linear":
-        from autoresearch.models.baselines import _fit_direct, _fit_frequency_severity, _feature_columns
-        features = _feature_columns(train, feature_inclusions, feature_exclusions)
-        if target_strategy == "direct_pure_premium":
-            predicted = _fit_direct(train, score, float(hp.get("alpha", 1.0)), feature_inclusions, feature_exclusions)
-        elif target_strategy == "frequency_severity":
-            predicted = _fit_frequency_severity(train, score, float(hp.get("alpha", 1.0)), feature_inclusions, feature_exclusions)
-        else:
-            raise ValueError(f"Unsupported target strategy for regularized_linear: {target_strategy!r}")
-        notes = {
-            "model_family": "regularized_linear",
-            "target_strategy": target_strategy,
-            "alpha": float(hp.get("alpha", 1.0)),
-            "feature_columns": features,
-        }
-        return predicted, notes
+    if model_family == "global_mean":
+        from autoresearch.models.global_mean import fit_predict
+        return fit_predict(train, score, feature_inclusions=feature_inclusions, feature_exclusions=feature_exclusions, **hp)
 
     # Open registry: try to import autoresearch.models.<model_family>
     # The module must expose fit_predict(train, score, *, feature_inclusions,
