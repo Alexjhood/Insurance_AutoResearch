@@ -1,14 +1,10 @@
-"""LLM proposal providers for the file-handoff and API-backed workflows."""
+"""File-handoff proposal provider."""
 
 from __future__ import annotations
 
 import json
-import os
-import time
 from pathlib import Path
 from typing import Any, Protocol
-import urllib.error
-import urllib.request
 
 
 class Proposer(Protocol):
@@ -17,42 +13,6 @@ class Proposer(Protocol):
     def propose(self, context: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
         """Return raw response text and parsed proposal when available."""
 
-
-def build_prompt(context: dict[str, Any]) -> str:
-    """Create the prompt sent to an API-backed proposer."""
-
-    return (
-        "You are proposing one controlled insurance burning-cost modelling experiment.\n"
-        "Return JSON only matching the proposal schema. Do not include Markdown fences.\n"
-        "The deterministic framework will validate, run, evaluate, and compare the proposal.\n"
-        "For autonomous proposals, every non-global_mean experiment must be backed by a "
-        "run-local model script. In file-handoff mode, write that script beside the JSON "
-        "and set experiment_config.model.script_path to its filename. Do not rely on "
-        "pre-existing src/autoresearch/models implementations; if you choose GLM, GBM, "
-        "or another method, write the modelling logic into the run-local script.\n"
-        "Do not request milestone_holdout access or metric changes.\n\n"
-        "Exploration philosophy — follow this carefully:\n"
-        "- Every run begins from the `global_mean` no-model baseline (a flat exposure-weighted\n"
-        "  burning rate). Develop relative to it through many small, well-motivated steps.\n"
-        "- Prefer lower-cost, lower-complexity changes before higher-cost ones. Reserve\n"
-        "  computationally expensive approaches for after cheaper paths have been explored.\n"
-        "- One change at a time. The change_summary should read as 'X relative to the champion'.\n"
-        "- Across cycles, prioritise breadth — try several different ideas before\n"
-        "  iterating deeply on any one.\n\n"
-        "Fixed constraints:\n"
-        "- The claim cap is **100,000** and is applied identically to training and testing.\n"
-        "  Always set preprocessing.claim_capping_enabled=true and\n"
-        "  preprocessing.claim_cap_threshold=100000. No other cap value is allowed.\n\n"
-        "Required JSON keys: proposal_id, parent_experiment_id, parent_branch_id, branch_action, "
-        "experiment_name, rationale, change_summary, expected_benefit, key_risk, experiment_config.\n\n"
-        f"Allowed search space:\n{json.dumps(context.get('allowed_search_space', {}), indent=2)}\n\n"
-        f"Recent non-promotion summaries (read before proposing to avoid duplication):\n"
-        f"{json.dumps(context.get('recent_proposals', []), indent=2)}\n\n"
-        f"Context:\n{json.dumps(context, indent=2, sort_keys=True)}"
-    )
-
-
-# ── File-based proposer ────────────────────────────────────────────────────────
 
 class FileProposer:
     """Read the next proposal from a local JSONL file."""
@@ -70,166 +30,6 @@ class FileProposer:
         raise ValueError(f"Proposal file contains no JSON proposals: {self.path}")
 
 
-class FileHandoffProposer:
-    """Use a handoff proposal JSONL file; raise if absent or empty (no mock fallback)."""
-
-    def __init__(self, path: Path) -> None:
-        self.file_proposer = FileProposer(path)
-
-    def propose(self, context: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
-        return self.file_proposer.propose(context)
-
-
-# ── OpenAI proposer ───────────────────────────────────────────────────────────
-
-class OpenAIProposer:
-    """OpenAI Responses API proposer with retries and schema validation."""
-
-    def __init__(self, model: str, temperature: float) -> None:
-        self.model = model
-        self.temperature = temperature
-
-    def propose(self, context: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is required for provider=openai")
-
-        prompt = build_prompt(context)
-        payload = {
-            "model": self.model,
-            "input": prompt,
-            "temperature": self.temperature,
-        }
-        text, parsed = self._call_with_retries(api_key, payload)
-        return text, parsed
-
-    def _call_with_retries(self, api_key: str, payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
-        last_exc: Exception | None = None
-        for attempt in range(3):
-            if attempt > 0:
-                time.sleep(4 ** attempt)
-            try:
-                req = urllib.request.Request(
-                    "https://api.openai.com/v1/responses",
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=60) as response:
-                    body = json.loads(response.read().decode("utf-8"))
-                text = _extract_openai_text(body)
-                parsed = _parse_json(text)
-                return text, parsed
-            except urllib.error.HTTPError as exc:
-                if exc.code in (429, 500, 502, 503, 504):
-                    last_exc = exc
-                    continue
-                raise
-            except (json.JSONDecodeError, ValueError) as exc:
-                last_exc = exc
-                continue
-        raise RuntimeError(f"OpenAI API failed after 3 attempts: {last_exc}")
-
-
-# ── Anthropic proposer ────────────────────────────────────────────────────────
-
-class AnthropicProposer:
-    """Anthropic Messages API proposer with retries and schema validation."""
-
-    def __init__(self, model: str, temperature: float) -> None:
-        self.model = model
-        self.temperature = temperature
-
-    def propose(self, context: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY is required for provider=anthropic")
-        prompt = build_prompt(context)
-        payload = {
-            "model": self.model,
-            "max_tokens": 2000,
-            "temperature": self.temperature,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        text, parsed = self._call_with_retries(api_key, payload)
-        return text, parsed
-
-    def _call_with_retries(self, api_key: str, payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
-        last_exc: Exception | None = None
-        for attempt in range(3):
-            if attempt > 0:
-                time.sleep(4 ** attempt)
-            try:
-                req = urllib.request.Request(
-                    "https://api.anthropic.com/v1/messages",
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={
-                        "x-api-key": api_key,
-                        "anthropic-version": "2023-06-01",
-                        "Content-Type": "application/json",
-                    },
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=60) as response:
-                    body = json.loads(response.read().decode("utf-8"))
-                text = "".join(
-                    part.get("text", "")
-                    for part in body.get("content", [])
-                    if part.get("type") == "text"
-                )
-                parsed = _parse_json(text)
-                return text, parsed
-            except urllib.error.HTTPError as exc:
-                if exc.code in (429, 500, 502, 503, 504):
-                    last_exc = exc
-                    continue
-                raise
-            except (json.JSONDecodeError, ValueError) as exc:
-                last_exc = exc
-                continue
-        raise RuntimeError(f"Anthropic API failed after 3 attempts: {last_exc}")
-
-
-# ── Factory ───────────────────────────────────────────────────────────────────
-
 def proposer_from_config(config) -> Proposer:
-    """Create the configured proposal provider."""
-
-    provider = config.llm_provider.lower()
-    if provider == "file":
-        return FileProposer(config.llm_proposal_file)
-    if provider == "file_handoff":
-        return FileHandoffProposer(config.llm_proposal_file)
-    if provider == "openai":
-        return OpenAIProposer(config.llm_model, config.llm_temperature)
-    if provider in ("anthropic", "claude"):
-        return AnthropicProposer(config.llm_model, config.llm_temperature)
-    raise ValueError(f"Unsupported LLM provider: {config.llm_provider!r}")
-
-
-def _extract_openai_text(body: dict[str, Any]) -> str:
-    if "output_text" in body:
-        return str(body["output_text"])
-    texts: list[str] = []
-    for item in body.get("output", []):
-        for content in item.get("content", []):
-            if content.get("type") in {"output_text", "text"}:
-                texts.append(content.get("text", ""))
-    return "".join(texts)
-
-
-def _parse_json(text: str) -> dict[str, Any] | None:
-    # Strip markdown code fences if present
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        lines = stripped.splitlines()
-        stripped = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        return None
-
-
+    """Create the file-handoff proposal provider."""
+    return FileProposer(config.proposal_inbox_file)

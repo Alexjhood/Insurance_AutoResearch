@@ -56,11 +56,6 @@ class ProjectConfig:
     max_predicted_to_actual_drift: float
     require_diagnostics: bool
     bonferroni_lookback: int
-    # llm
-    llm_provider: str
-    llm_model: str
-    llm_temperature: float
-    llm_proposal_file: Path
     # handoff dirs
     handoff_base_dir: Path
     handoff_context_dir: Path
@@ -68,6 +63,7 @@ class ProjectConfig:
     handoff_proposal_processed_dir: Path
     handoff_results_dir: Path
     handoff_handoffs_dir: Path
+    proposal_inbox_file: Path
     # dedup
     deduplication_policy: str
     deduplication_lookback: int
@@ -107,7 +103,6 @@ def load_config(
     evaluation = raw["evaluation"]
     resampling = raw["resampling"]
     promotion = raw["promotion"]
-    llm = raw["llm"]
     handoff = raw["handoff"]
     deduplication = raw["deduplication"]
     search_space = raw["search_space"]
@@ -131,7 +126,6 @@ def load_config(
         handoff_proposal_processed_dir = run_base / "proposal_processed"
         handoff_results_dir = run_base / "results"
         handoff_handoffs_dir = run_base / "handoffs"
-        llm_proposal_file = handoff_proposal_inbox_dir / "manual_proposals.jsonl"
     else:
         artifacts_dir = base_artifacts
         registry_path = _resolve(PROJECT_ROOT, paths["registry_path"])
@@ -142,7 +136,6 @@ def load_config(
         handoff_proposal_processed_dir = _resolve(PROJECT_ROOT, handoff["proposal_processed_dir"])
         handoff_results_dir = _resolve(PROJECT_ROOT, handoff["results_dir"])
         handoff_handoffs_dir = _resolve(PROJECT_ROOT, handoff["handoffs_dir"])
-        llm_proposal_file = _resolve(PROJECT_ROOT, llm["proposal_file"])
 
     return ProjectConfig(
         root=PROJECT_ROOT,
@@ -184,16 +177,13 @@ def load_config(
         max_predicted_to_actual_drift=float(promotion.get("max_predicted_to_actual_drift", 0.05)),
         require_diagnostics=bool(promotion.get("require_diagnostics", True)),
         bonferroni_lookback=int(promotion.get("bonferroni_lookback", 10)),
-        llm_provider=str(llm["provider"]),
-        llm_model=str(llm["model"]),
-        llm_temperature=float(llm["temperature"]),
-        llm_proposal_file=llm_proposal_file,
         handoff_base_dir=handoff_base_dir,
         handoff_context_dir=handoff_context_dir,
         handoff_proposal_inbox_dir=handoff_proposal_inbox_dir,
         handoff_proposal_processed_dir=handoff_proposal_processed_dir,
         handoff_results_dir=handoff_results_dir,
         handoff_handoffs_dir=handoff_handoffs_dir,
+        proposal_inbox_file=handoff_proposal_inbox_dir / "manual_proposals.jsonl",
         deduplication_policy=str(deduplication["policy"]),
         deduplication_lookback=int(deduplication["lookback"]),
         search_space=dict(search_space),
