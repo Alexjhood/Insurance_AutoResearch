@@ -36,25 +36,27 @@ _HOLDOUT_MARKERS = frozenset(
     }
 )
 
-# Files that are *allowed* to reference holdout markers.
-# This covers core framework files that legitimately check for the guard string
-# and the vault/milestone modules themselves.
+# Exact paths relative to src/autoresearch/ that may reference holdout markers.
 _SCAN_WHITELIST = frozenset(
     {
-        "holdout_vault.py",
+        "data/holdout_vault.py",
         "milestone.py",
-        "dispatcher.py",   # contains the guard check itself
-        "baselines.py",    # original framework baseline
-        "integrity.py",    # this file
-        "test_holdout",
-        "test_split",
-        "test_vault",
+        "models/dispatcher.py",
+        "utils/integrity.py",
     }
 )
 
+_AUTORESEARCH_ROOT = Path(__file__).resolve().parent.parent  # src/autoresearch/
+
 
 def _file_is_whitelisted(path: Path) -> bool:
-    return any(w in path.name for w in _SCAN_WHITELIST)
+    """Return True only for exact-path matches under src/autoresearch/."""
+    try:
+        rel = path.resolve().relative_to(_AUTORESEARCH_ROOT)
+        return str(rel) in _SCAN_WHITELIST
+    except ValueError:
+        # Path is not under src/autoresearch/ — always scan, never whitelist
+        return False
 
 
 def _ast_strings(tree: ast.AST) -> list[str]:
