@@ -2,7 +2,7 @@
 
 Local Python backbone for reproducible insurance burning-cost experimentation on freMTPL2-style local data.
 
-This repository implements a full autonomous experimentation loop: data preparation → model training → actuarially-rigorous evaluation → promotion-gated champion management → LLM-guided proposal generation.
+This repository implements a full autonomous experimentation loop: data preparation → model training → actuarially-rigorous evaluation → promotion-gated champion management → file-handoff proposal generation.
 
 ## Features
 
@@ -13,16 +13,14 @@ This repository implements a full autonomous experimentation loop: data preparat
 - Configurable claim capping with visible per-decile diagnostics
 - **Architecturally-separated milestone holdout vault** — `agent_dataset_search.parquet` (never contains holdout rows) stored separately from `data/holdout_vault/agent_dataset_holdout.parquet` (token-gated)
 - 5-fold deterministic CV with variance decomposition (between-fold vs. within-fold)
-- **Actuarially-correct model layer**: Tweedie GLM, frequency×severity Poisson/Gamma GLM, Tweedie GBM (HistGradientBoosting), regularized linear baseline
+- **Open model surface** — every non-`global_mean` experiment supplies a run-local Python `fit_predict` script. The built-in `global_mean` baseline is the no-model starting champion for every run.
 - **Full actuarial metric panel**: exposure-weighted Gini as the promotion metric, plus Tweedie deviance (power=1.5), double-lift slope, predicted-to-actual ratio, and Poisson deviance
 - Calibration diagnostics by predicted decile and exposure band, PSI, segment loss ratios
 - **Hardened promotion gate**: relative lift floor (0.5%), MDE estimation, Bonferroni adjustment for multiple comparisons, calibration check
 - Reproducibility environment manifest (git SHA, pip freeze, file SHA256s) written per experiment
-- Controlled LLM-guided proposal queue with per-family hyperparameter validation
-- MockProposer with a 5-entry rotating pool (prevents autonomous loop deadlock)
-- Retry logic with exponential backoff for OpenAI/Anthropic proposers
-- Branch lineage for proposed experiments; deduplication by proposal fingerprint
-- 64 tests covering statistical claims (false-positive rate, true-positive rate, variance decomposition, holdout separation)
+- File-handoff proposal queue with deduplication by proposal fingerprint
+- Branch lineage for proposed experiments
+- The test suite covers statistical claims (false-positive rate, true-positive rate, variance decomposition, holdout separation)
 
 ## Local Setup
 
@@ -107,7 +105,7 @@ Delete the run folder to remove artifacts from a failed or unwanted run.
 After that, an agent can continue with:
 
 ```bash
-autoresearch --track codex --run-id CodexTimeX run-cycles 10
+autoresearch --track codex --run-id CodexTimeX run-session-cycles 10
 ```
 
 ## Dashboard
@@ -126,10 +124,7 @@ at a neighbouring Python file. That script is copied into the iteration folder,
 scanned for holdout access, executed through `fit_predict()`, and preserved as
 an experiment artifact.
 
-The checked-in `src/autoresearch/models` implementations remain available for
-manual/backward-compatible baseline configs, but they are not the autonomous
-research surface. If an agent wants to try a GLM, GBM, or any other model, it
-writes that modelling logic into the proposal's script.
+If an agent wants to try a GLM, GBM, or any other model, it writes that modelling logic into the proposal's script.
 
 Required script hook:
 
@@ -154,11 +149,10 @@ Additional panel metrics:
 
 ## Baseline Experiments
 
-Run one named baseline:
+Run the global-mean baseline:
 
 ```bash
-autoresearch run-baseline configs/experiments/direct_pure_premium.toml
-autoresearch run-baseline configs/experiments/frequency_severity.toml
+autoresearch run-baseline configs/experiments/global_mean.toml
 ```
 
 Run all checked-in baselines:
@@ -258,7 +252,7 @@ Initialise the official champion as the direct pure premium baseline:
 autoresearch init-official-champion
 ```
 
-The official champion is intentionally distinct from the best point-estimate experiment. It starts as the Tweedie GLM baseline by product decision and changes only through the promotion gate.
+The official champion is intentionally distinct from the best point-estimate experiment. It starts as the `global_mean` baseline and changes only through the promotion gate.
 
 Export context and handoff instructions for Codex or Claude Code:
 
@@ -358,35 +352,10 @@ Session logs and summaries are written under:
 
 See `docs/autonomous_session_workflow.md` for the full operating model.
 
-## Optional Runtime Proposers
-
-The primary workflow does not require API keys. Runtime API-backed proposers are available as an alternative to the file-handoff workflow.
-
-```toml
-[llm]
-provider = "file_handoff"
-model = "claude-opus-4-7"
-temperature = 0.2
-proposal_file = "artifacts/auto_research/proposals/inbox/manual_proposals.jsonl"
-```
-
-Supported `provider` values: `file_handoff`, `mock`, `file`, `openai`, `anthropic`. `openai` uses `OPENAI_API_KEY`; `anthropic` uses `ANTHROPIC_API_KEY`. The `mock` provider cycles through a pool of 5 diverse pre-defined proposals (Tweedie GLM ×2, freq×sev GLM, Tweedie GBM ×2) to prevent autonomous loop deadlock.
-
-All providers return the same structured proposal schema, which is validated before anything is run. Per-family hyperparameter bounds are enforced (e.g. GBM proposals cannot set `power`; alpha values are checked against the configured search space ranges).
-
-Legacy direct proposer commands:
-
-```bash
-autoresearch generate-proposal
-autoresearch enqueue-proposal path/to/proposal.json
-autoresearch run-cycle
-autoresearch run-cycles 3
-```
-
 ## Tests
 
 ```bash
 pytest
 ```
 
-52 tests cover data pipeline, model dispatch, metric panel statistical properties, CV variance decomposition, holdout separation, calibration diagnostics, promotion gate false-positive rate (≤ 20% under H0), and promotion gate true-positive rate (≥ 70% for a 10% improvement).
+The test suite covers data pipeline, model dispatch, metric panel statistical properties, CV variance decomposition, holdout separation, calibration diagnostics, promotion gate false-positive rate (≤ 20% under H0), and promotion gate true-positive rate (≥ 70% for a 10% improvement).

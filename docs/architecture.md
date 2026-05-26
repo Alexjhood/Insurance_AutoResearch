@@ -13,9 +13,7 @@ src/autoresearch/
 │   └── holdout_vault.py       # write_vault / load_search_dataset / load_holdout_dataset
 ├── models/
 │   ├── dispatcher.py          # dispatch_model() → ModelResult
-│   ├── glm.py                 # run_tweedie_glm(), run_frequency_severity_glm()
-│   ├── gbm.py                 # run_tweedie_gbm()
-│   └── baselines.py           # run_baseline_model() (regularized linear, legacy)
+│   └── global_mean.py         # built-in global-mean baseline
 ├── evaluation/
 │   ├── metrics.py             # full_metric_panel(), evaluate_predictions()
 │   ├── diagnostics.py         # compute_diagnostics() — calibration, PSI, segments
@@ -25,8 +23,8 @@ src/autoresearch/
 │   └── registry.py            # SQLite: record_experiment, set_official_champion, …
 ├── controller/
 │   ├── proposal_schema.py     # allowed_search_space(), validate_proposal()
-│   ├── proposer.py            # MockProposer, OpenAIProposer, AnthropicProposer
-│   ├── workflow.py            # generate_and_enqueue_proposal()
+│   ├── proposer.py            # FileProposer (file-handoff inbox)
+│   ├── workflow.py            # enqueue_proposal_from_file(), run_next_queued_proposal()
 │   ├── champion.py            # initialise_official_champion()
 │   └── handoff.py             # export_context(), write_proposal_template()
 ├── utils/
@@ -46,7 +44,7 @@ prepare-data
 
 run-baseline / run-next-proposal
   → load_search_dataset()  ← only train + search_validation rows visible
-  → dispatch_model()       ← routes to tweedie_glm / freq_sev_glm / tweedie_gbm / regularized_linear
+  → dispatch_model()       ← routes to global_mean built-in or a run-local script
   → evaluate_predictions() ← Tweedie deviance panel + Gini + double-lift
   → compute_diagnostics()  ← calibration by pred decile, PSI, segment ratios
   → capture_environment()  ← git SHA, pip freeze, file SHA256s
@@ -79,9 +77,9 @@ single run. This means GLMs, GBMs, GAMs, ensembles, or simpler hand-built rules
 are all possible research directions, but the implementation is an auditable
 per-run artifact instead of a pre-selected method imported from `src/models`.
 
-The `global_mean` no-model baseline remains checked in as the bootstrap
-starting point. Legacy built-in model modules remain available for manual
-baseline configs, but queued autonomous proposals must provide a script.
+The `global_mean` no-model baseline is the built-in bootstrap starting point.
+All other experiments must supply a run-local `fit_predict` script via
+`experiment_config.model.script_path`.
 
 `dispatch_model()` in `models/dispatcher.py` handles script loading, prediction
 DataFrame construction, and a row-count assertion to catch silent drops.
