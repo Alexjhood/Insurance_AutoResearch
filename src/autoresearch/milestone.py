@@ -23,14 +23,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 from autoresearch.config import ProjectConfig
 from autoresearch.data.preprocessing import apply_claim_capping
 from autoresearch.evaluation.diagnostics import compute_diagnostics
 from autoresearch.evaluation.metrics import full_metric_panel
-from autoresearch.models.baselines import RAW_CLAIM_COST
+from autoresearch.models.dispatcher import RAW_CLAIM_COST, dispatch_model
 from autoresearch.experiment_registry.registry import list_artifacts
 from autoresearch.utils.io import read_json, write_json
 
@@ -70,9 +69,11 @@ def evaluate_on_holdout(
 ) -> dict[str, Any] | None:
     """Refit champion on train+sv, score on holdout, write report.
 
-    Returns a summary dict on success or None if the vault is unavailable.
-    The function never raises — any failure is logged and returned as a
-    warning in the summary so the promotion flow is not interrupted.
+    Returns a summary dict on success. Vault-absent errors (missing token or
+    missing holdout file) are caught and returned as a "skipped" warning so
+    the promotion flow is not interrupted. Any other failure (missing model
+    script, dispatch error, metric failure) writes the warning AND re-raises
+    so the caller sees the problem.
     """
 
     report_dir = config.artifacts_dir / "milestone_reports"
@@ -83,6 +84,7 @@ def evaluate_on_holdout(
     try:
         return _run_evaluation(config, champion_id, promotion_id, report_path, json_path)
     except Exception as exc:
+        is_vault_absent = "AUTORESEARCH_MILESTONE_TOKEN" in str(exc)
         warning = {
             "promotion_id": promotion_id,
             "champion_id": champion_id,
@@ -97,6 +99,8 @@ def evaluate_on_holdout(
             "Re-run with `autoresearch evaluate-milestone {champion_id}` after resolving.\n",
             encoding="utf-8",
         )
+        if not is_vault_absent:
+            raise
         return warning
 
 
@@ -109,12 +113,20 @@ def _run_evaluation(
 ) -> dict[str, Any]:
     from autoresearch.data.holdout_vault import load_holdout_dataset, load_search_dataset
 
+    # Defensive vault check — raises EnvironmentError with token name if unavailable
+    try:
+        holdout_frame = load_holdout_dataset(config.holdout_vault_dir)
+    except (FileNotFoundError, PermissionError) as exc:
+        raise EnvironmentError(
+            f"AUTORESEARCH_MILESTONE_TOKEN: holdout vault unavailable — {exc}"
+        ) from exc
+
     # Load the champion's experiment config
     config_snapshot_path = _artifact_path(config, champion_id, "config_snapshot")
     snapshot = read_json(config_snapshot_path)
     exp = snapshot.get("experiment", {})
 
-    model_family = exp.get("model_family", "regularized_linear")
+    model_family = exp.get("model_family", "global_mean")
     target_strategy = exp.get("target_strategy", "direct_pure_premium")
     model_cfg = exp.get("model", {})
     preprocessing = exp.get("preprocessing", {})
@@ -122,13 +134,22 @@ def _run_evaluation(
     cap_enabled = bool(preprocessing.get("claim_capping_enabled", config.claim_capping_enabled))
     cap_threshold = float(preprocessing.get("claim_cap_threshold", config.claim_cap_threshold))
 
-    # Load search partition (train + sv) and holdout
+    raw_script = snapshot.get("model_script_path")
+    if raw_script:
+        model_script_path: Path | None = Path(raw_script)
+        if not model_script_path.exists():
+            raise FileNotFoundError(
+                f"Model script from snapshot does not exist: {model_script_path}"
+            )
+    else:
+        model_script_path = None
+
+    # Load search partition (train + sv)
     search_frame = load_search_dataset(config.processed_dir, config.agent_dataset_name)
-    holdout_frame = load_holdout_dataset(config.holdout_vault_dir)
 
     # Load SV predictions for the gap calculation (already computed)
     sv_predictions_path = _artifact_path(config, champion_id, "predictions")
-    sv_predictions = pd.read_csv(sv_predictions_path)
+    sv_predictions = pd.read_parquet(sv_predictions_path)
     sv_only = sv_predictions[sv_predictions["split"] == "search_validation"]
 
     # Apply capping to both frames
@@ -156,7 +177,7 @@ def _run_evaluation(
         builder = importlib.import_module(feature_builder_module)
         combined_frame = builder.build_features(combined_frame)
 
-    result = _dispatch_for_milestone(
+    model_result = dispatch_model(
         frame=combined_frame,
         split_frame=combined_split,
         model_family=model_family,
@@ -166,9 +187,11 @@ def _run_evaluation(
         hyperparameters=hyperparameters,
         feature_inclusions=model_cfg.get("feature_inclusions"),
         feature_exclusions=model_cfg.get("feature_exclusions") or None,
+        model_script_path=model_script_path,
+        allow_holdout_split=True,
     )
 
-    holdout_preds = result[result["split"] == "milestone_holdout"]
+    holdout_preds = model_result.predictions[model_result.predictions["split"] == "milestone_holdout"]
     if holdout_preds.empty:
         raise ValueError("No holdout rows in milestone predictions — check split pack")
 
@@ -235,50 +258,6 @@ def _run_evaluation(
     }
     write_json(json_path, summary)
     return summary
-
-
-def _dispatch_for_milestone(
-    *,
-    frame: pd.DataFrame,
-    split_frame: pd.DataFrame,
-    model_family: str,
-    target_strategy: str,
-    train_split: str,
-    score_splits: tuple[str, ...],
-    hyperparameters: dict,
-    feature_inclusions: list[str] | None,
-    feature_exclusions: list[str] | None,
-) -> pd.DataFrame:
-    """Dispatch a model for milestone scoring without the holdout guard."""
-
-    from autoresearch.models.dispatcher import (
-        RECORD_ID, EXPOSURE, CLAIM_COST, RAW_CLAIM_COST,
-    )
-    from autoresearch.models.dispatcher import _call_model  # type: ignore[attr-defined]
-
-    data = frame.merge(split_frame[["record_id", "split"]], on="record_id", how="inner")
-    train = data[data["split"] == train_split].copy()
-    score = data[data["split"].isin((train_split, *score_splits))].copy()
-    if train.empty:
-        raise ValueError(f"Training split {train_split!r} is empty")
-
-    predicted_cost, _ = _call_model(
-        model_family, target_strategy, train, score, hyperparameters,
-        feature_inclusions, feature_exclusions,
-    )
-
-    preds = pd.DataFrame({
-        RECORD_ID: score[RECORD_ID].to_numpy(),
-        "split": score["split"].to_numpy(),
-        "exposure": score[EXPOSURE].astype(float).to_numpy(),
-        "actual_claim_cost": score[CLAIM_COST].astype(float).to_numpy(),
-        "actual_claim_cost_uncapped": score[RAW_CLAIM_COST].astype(float).to_numpy(),
-        "predicted_claim_cost": np.clip(predicted_cost, 0.0, None),
-    })
-    exp = preds["exposure"].clip(lower=1e-12)
-    preds["actual_pure_premium"] = preds["actual_claim_cost"] / exp
-    preds["predicted_pure_premium"] = preds["predicted_claim_cost"] / exp
-    return preds
 
 
 def _artifact_path(config: ProjectConfig, experiment_id: str, artifact_type: str) -> Path:
