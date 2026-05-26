@@ -1,90 +1,123 @@
 # Insurance AutoResearch
 
-Local Python backbone for reproducible insurance burning-cost experimentation on freMTPL2-style local data.
+Autonomous insurance burning-cost research loop on freMTPL2, driven by an LLM agent (Claude Code or Codex).
 
-This repository implements a full autonomous experimentation loop: data preparation → model training → actuarially-rigorous evaluation → promotion-gated champion management → file-handoff proposal generation.
+[![CI](https://github.com/Alexjhood/Insurance_AutoResearch/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexjhood/Insurance_AutoResearch/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Features
+## System Overview
 
-- Clean `src/` Python package layout with a frozen `ProjectConfig` dataclass
-- SQLite experiment registry with session, proposal, branch, and champion state tables
-- Streamlit dashboard: experiment tables, promotion decisions, calibration diagnostics, proposal queue, branch lineage
-- Raw data loading from `data/raw/` with deterministic anonymisation and column renaming
-- Configurable claim capping with visible per-decile diagnostics
-- **Architecturally-separated milestone holdout vault** — `agent_dataset_search.parquet` (never contains holdout rows) stored separately from `data/holdout_vault/agent_dataset_holdout.parquet` (token-gated)
-- 5-fold deterministic CV with variance decomposition (between-fold vs. within-fold)
-- **Open model surface** — every non-`global_mean` experiment supplies a run-local Python `fit_predict` script. The built-in `global_mean` baseline is the no-model starting champion for every run.
-- **Full actuarial metric panel**: exposure-weighted Gini as the promotion metric, plus Tweedie deviance (power=1.5), double-lift slope, predicted-to-actual ratio, and Poisson deviance
-- Calibration diagnostics by predicted decile and exposure band, PSI, segment loss ratios
-- **Hardened promotion gate**: relative lift floor (0.5%), MDE estimation, Bonferroni adjustment for multiple comparisons, calibration check
-- Reproducibility environment manifest (git SHA, pip freeze, file SHA256s) written per experiment
-- File-handoff proposal queue with deduplication by proposal fingerprint
-- Branch lineage for proposed experiments
-- The test suite covers statistical claims (false-positive rate, true-positive rate, variance decomposition, holdout separation)
+```mermaid
+flowchart TD
+    A["data/raw/"] --> B["prepare-data"]
+    B --> C["data/processed/agent_dataset_search.parquet"]
+    B --> D["data/holdout_vault/agent_dataset_holdout.parquet"]
+    C --> E["experiment_runner"]
+    E --> F["artifacts/tracks/track/runs/run-id/registry.sqlite"]
+    E --> G["promotion_gate"]
+    G --> H["champion"]
+    D -. "token-gated" .-> I["milestone evaluation"]
+```
 
-## Local Setup
+## What This Is / Is Not
+
+**What this is:**
+
+- A reproducible local Python environment for iterative insurance burning-cost model improvement
+- An autonomous research loop where an LLM agent proposes, runs, and evaluates experiments
+- A rigorous actuarial evaluation harness with exposure-weighted Gini as the promotion metric
+
+**What this is not:**
+
+- A production pricing system
+- A hosted service
+- A benchmark of one specific model
+
+## Requirements
+
+- Python 3.11+
+- ~2 GB free disk space
+- macOS or Linux (Windows via WSL)
+
+## Quickstart
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e ".[dev]"
+git clone https://github.com/Alexjhood/Insurance_AutoResearch.git
+cd Insurance_AutoResearch
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+python scripts/generate_synthetic_data.py
+autoresearch --track demo --run-id quickstart bootstrap-track
+autoresearch --track demo --run-id quickstart start-session quickstart
+autoresearch --track demo --run-id quickstart run-session-cycles 1
 ```
 
-## Prepare Data
+You should see a comparison report under `artifacts/tracks/demo/runs/quickstart/iterations/`.
 
-Raw files are expected under `data/raw/`. The loader discovers freMTPL2 frequency and severity files recursively by filename.
+To inspect results in a browser:
 
 ```bash
-autoresearch prepare-data
+streamlit run src/autoresearch/dashboard/app.py
 ```
 
-This writes:
+## Run with an Agent
 
-- `data/processed/agent_dataset_search.parquet` — train + search_validation rows only (no holdout)
-- `data/holdout_vault/agent_dataset_holdout.parquet` — milestone holdout (token-gated)
-- `data/metadata/private_column_mapping.json`
-- `data/metadata/agent_schema.json`
-- `data/metadata/dataset_profile.json`
-- `data/metadata/capping_diagnostics.json`
-- `data/splits/split_pack.csv`
-- `data/splits/split_pack_manifest.json`
-- `data/splits/split_pack_folds.parquet` — 5-fold CV assignments
+### Claude Code
 
-The default split reserves 20% of the full dataset as `milestone_holdout`. Ordinary baseline evaluation fits on `train` and scores on `search_validation` only. The holdout rows are never visible to experiment runners; access requires the `AUTORESEARCH_MILESTONE_TOKEN` environment variable.
+See [`docs/RUN_WITH_CLAUDE_CODE.md`](docs/RUN_WITH_CLAUDE_CODE.md) for full setup instructions.
 
-The default claim cap is configured in `configs/default.toml`:
-
-```toml
-[preprocessing]
-claim_capping_enabled = true
-claim_cap_threshold = 100000
-```
-
-## Experiment Registry
+Prerequisites: Claude Code installed and the quickstart above completed. Open the repo:
 
 ```bash
-autoresearch init-registry
+cd <repo> && claude
 ```
 
-The default registry lives at `artifacts/experiment_registry.sqlite`.
+Paste the first prompt from `docs/RUN_WITH_CLAUDE_CODE.md`. The agent reads
+[`AGENT.md`](AGENT.md) and drives the research loop autonomously.
 
-For an isolated ClaudeCode or Codex research track, prefer the idempotent
-bootstrap command:
+### Codex
 
-```bash
-autoresearch --track codex --run-id CodexTimeX bootstrap-track
+See [`docs/RUN_WITH_CODEX.md`](docs/RUN_WITH_CODEX.md) for Codex-specific instructions.
+
+The `.codex/config.toml` is pre-configured with `sandbox_mode = "workspace-write"` and
+`network_access = true`. Network access is required for the OpenML data fetch.
+
+## Agent Loop
+
+```mermaid
+flowchart LR
+    A["handoff"] --> B["agent writes proposal + script"]
+    B --> C["proposal inbox"]
+    C --> D["ingest"]
+    D --> E["run experiment"]
+    E --> F["compare to champion"]
+    F --> G["promotion gate"]
+    G -- "pass" --> H["new champion"]
+    G -- "fail" --> I["rejected"]
+    H --> A
+    I --> A
 ```
 
-This prepares shared data if needed, creates or migrates the run registry,
-runs the baseline experiments if the run is empty, initializes the official
-champion, writes proposal templates, and exports:
-
-`artifacts/tracks/codex/runs/CodexTimeX/context/latest_context.json`
-
-Everything created for that run is under:
+## Repo Layout
 
 ```text
-artifacts/tracks/codex/runs/CodexTimeX/
+Insurance_AutoResearch/
+├── artifacts/
+├── configs/
+├── data/
+│   ├── processed/
+│   ├── raw/
+│   └── holdout_vault/
+├── docs/
+├── scripts/
+├── src/
+│   └── autoresearch/
+└── tests/
+```
+
+Tracked run layout under `artifacts/`:
+
+```text
+artifacts/tracks/<track>/runs/<run-id>/
   registry.sqlite
   RESEARCH_LOG.md
   run_manifest.json
@@ -101,261 +134,20 @@ artifacts/tracks/codex/runs/CodexTimeX/
       comparison/
 ```
 
-Delete the run folder to remove artifacts from a failed or unwanted run.
-After that, an agent can continue with:
+## Working with Real freMTPL2 Data
 
-```bash
-autoresearch --track codex --run-id CodexTimeX run-session-cycles 10
-```
+Run `python scripts/fetch_fremtpl2.py` to download ~678K rows from OpenML.
+Then run `autoresearch prepare-data` to build the processed datasets.
+Licensing: freMTPL2 is subject to CASdatasets / OpenML terms; see [`data/raw/README.md`](data/raw/README.md).
 
-## Dashboard
+## Where to Go Next
 
-```bash
-streamlit run src/autoresearch/dashboard/app.py
-```
+- [`docs/CLI.md`](docs/CLI.md) — full command reference
+- [`docs/architecture.md`](docs/architecture.md) — system design
+- [`AGENT.md`](AGENT.md) — operating manual the agent reads
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — development guide
+- Streamlit dashboard: `streamlit run src/autoresearch/dashboard/app.py`
 
-The dashboard shows project status, split metadata, capping diagnostics, baseline experiment tables, official champion state, comparison views, calibration diagnostics, proposal queue, branch lineage, and file-handoff status.
+## License
 
-## Model Scripts
-
-Autonomous proposals use run-local model scripts. For any non-`global_mean`
-experiment, the proposal JSON must point `experiment_config.model.script_path`
-at a neighbouring Python file. That script is copied into the iteration folder,
-scanned for holdout access, executed through `fit_predict()`, and preserved as
-an experiment artifact.
-
-If an agent wants to try a GLM, GBM, or any other model, it writes that modelling logic into the proposal's script.
-
-Required script hook:
-
-```python
-def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hyperparameters):
-    return predicted_claim_cost_array, notes_dict
-```
-
-Scripts must return original-space claim-cost predictions. If a script models
-pure premium, multiply by exposure before returning.
-
-## Primary Metric
-
-The primary promotion metric is **exposure-weighted Gini** (`gini_weighted`). Higher is better. It gates on rank discrimination/lift while the report still shows the full actuarial panel.
-
-Additional panel metrics:
-- `tweedie_deviance_p15` — exposure-weighted Tweedie deviance at power=1.5
-- `double_lift_slope` — OLS slope of actual on predicted pure premium by decile (calibration linearity)
-- `predicted_to_actual_ratio` — aggregate calibration (should be ≈ 1.0)
-- `poisson_deviance` — frequency model calibration
-- `weighted_mae_claim_cost`, `weighted_rmse_claim_cost` — scale-dependent error metrics
-
-## Baseline Experiments
-
-Run the global-mean baseline:
-
-```bash
-autoresearch run-baseline configs/experiments/global_mean.toml
-```
-
-Run all checked-in baselines:
-
-```bash
-autoresearch run-all-baselines
-```
-
-Inspect registered runs:
-
-```bash
-autoresearch list-experiments
-```
-
-Each run writes a folder under `artifacts/experiments/` containing:
-
-- `config_snapshot.json`
-- `metrics.json`
-- `split_metrics.csv`
-- `predictions.csv`
-- `diagnostics.json` — calibration decile table, PSI, segment loss ratios
-- `environment_manifest.json` — git SHA, dirty flag, pip freeze, file SHA256s
-- `capping_diagnostics.json`
-- `validation_report.json` for autonomous proposal attempts
-
-## Volatility-Aware Comparison
-
-Run repeated search-time evaluation for one experiment:
-
-```bash
-autoresearch run-repeated-evaluation EXPERIMENT_ID
-```
-
-Compare a champion and challenger on the same repeated resamples:
-
-```bash
-autoresearch compare-experiments CHAMPION_ID CHALLENGER_ID
-```
-
-Compare a challenger against the current point-estimate champion:
-
-```bash
-autoresearch compare-to-champion CHALLENGER_ID
-```
-
-List promotion decisions:
-
-```bash
-autoresearch list-promotions
-```
-
-Every comparison writes `comparison_report.html` in the run iteration's
-`comparison/` folder. The report includes experiment details, full validation
-metric tables, champion/challenger lift curves, double-lift curves, and the
-cumulative champion-history Gini chart.
-
-Promotion requires all of the following checks to pass:
-
-- Mean lift positive (challenger has higher validation Gini than champion)
-- Relative lift ≥ 0.5% of champion score (prevents noise promotions)
-- Challenger win rate ≥ 60% across paired resamples
-- Bootstrap 90% lower bound ≥ 0 (Bonferroni-adjusted for multiple comparisons)
-- Calibration check: all predicted decile ratios in [0.3, 3.0]
-
-Default promotion settings in `configs/default.toml`:
-
-```toml
-[promotion]
-minimum_mean_lift = 0.0
-min_relative_lift = 0.005
-min_absolute_lift = 0.0
-minimum_win_rate = 0.60
-bootstrap_lower_bound = 0.0
-bootstrap_lower_bound_relative = 0.0
-confidence_level = 0.90
-max_predicted_to_actual_drift = 0.05
-require_diagnostics = true
-bonferroni_lookback = 10
-```
-
-## K-Fold Cross-Validation
-
-When `use_cv = true` in `[evaluation]`, experiments use 5-fold CV instead of the single search_validation split. CV results include variance decomposition: `between_fold_variance`, `within_fold_variance`, `total_variance`, and a warning flag when between-fold variance dominates (indicating data leakage risk or unstable feature engineering).
-
-```toml
-[evaluation]
-use_cv = false
-cv_folds = 5
-cv_n_repeats = 1
-```
-
-## File-Based Codex / Claude Code Workflow
-
-Initialise the official champion as the direct pure premium baseline:
-
-```bash
-autoresearch init-official-champion
-```
-
-The official champion is intentionally distinct from the best point-estimate experiment. It starts as the `global_mean` baseline and changes only through the promotion gate.
-
-Export context and handoff instructions for Codex or Claude Code:
-
-```bash
-autoresearch export-context
-autoresearch write-proposal-template
-autoresearch show-latest-handoff
-autoresearch show-proposal-inbox-status
-```
-
-External agent workflow:
-
-1. Read `artifacts/auto_research/handoffs/latest_handoff.md`
-2. Read `artifacts/auto_research/context/latest_context.json`
-3. Read `artifacts/auto_research/handoffs/proposal_instructions.md`
-4. Use `artifacts/auto_research/handoffs/proposal_template.json` as the shape
-5. Write one proposal JSON file to `artifacts/auto_research/proposals/inbox/`
-
-Ingest inbox proposals and enqueue valid ones:
-
-```bash
-autoresearch ingest-proposals
-autoresearch enqueue-ingested-proposals
-```
-
-Run the next queued proposal through deterministic execution, comparison, and promotion:
-
-```bash
-autoresearch run-next-proposal
-```
-
-Run a full cycle from the latest inbox proposal:
-
-```bash
-autoresearch run-latest-proposal-cycle
-```
-
-The file-handoff workflow writes inspectable artifacts under:
-
-- `artifacts/auto_research/context/latest_context.json`
-- `artifacts/auto_research/context/current_champion_summary.json`
-- `artifacts/auto_research/context/recent_comparisons_summary.json`
-- `artifacts/auto_research/context/recent_branch_summary.json`
-- `artifacts/auto_research/handoffs/latest_handoff.md`
-- `artifacts/auto_research/handoffs/proposal_template.json`
-- `artifacts/auto_research/handoffs/proposal_schema.json`
-- `artifacts/auto_research/handoffs/proposal_instructions.md`
-- `artifacts/auto_research/proposals/inbox/`
-- `artifacts/auto_research/proposals/processed/valid/`
-- `artifacts/auto_research/proposals/processed/invalid/`
-- `artifacts/auto_research/results/latest_cycle_result.md`
-
-Inspect queue, champion, and lineage state:
-
-```bash
-autoresearch list-proposals
-autoresearch inspect-proposal PROPOSAL_ID
-autoresearch list-champion-history
-autoresearch list-branches
-```
-
-## Supervised Autonomous Sessions
-
-Create a named session that Codex or Claude Code can continue:
-
-```bash
-autoresearch start-session local-research --max-cycles 10
-autoresearch session-status
-```
-
-Run one local-side cycle. If no proposal is available, the session moves to `waiting_for_proposal` and refreshes the handoff files for the external agent:
-
-```bash
-autoresearch run-session-cycle
-```
-
-Run up to N cycles, stopping automatically if the next proposal is needed:
-
-```bash
-autoresearch run-session-cycles 3
-```
-
-Pause, resume, or stop:
-
-```bash
-autoresearch pause-session
-autoresearch resume-session
-autoresearch stop-session
-```
-
-Session logs and summaries are written under:
-
-- `artifacts/auto_research/sessions/`
-- `artifacts/auto_research/results/latest_session_summary.md`
-- `artifacts/auto_research/results/latest_cycle_result.md`
-- `artifacts/auto_research/results/non_promoted/`
-
-See `docs/autonomous_session_workflow.md` for the full operating model.
-
-## Tests
-
-```bash
-pytest
-```
-
-The test suite covers data pipeline, model dispatch, metric panel statistical properties, CV variance decomposition, holdout separation, calibration diagnostics, promotion gate false-positive rate (≤ 20% under H0), and promotion gate true-positive rate (≥ 70% for a 10% improvement).
+MIT. See `LICENSE`.

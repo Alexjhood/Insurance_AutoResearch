@@ -12,3 +12,9 @@ build/
 artifacts/*
 outputs/*
 data/*
+!data/.gitkeep
+!data/raw/
+data/raw/*
+!data/raw/.gitkeep
+!data/raw/README.md
+!artifacts/.gitkeep

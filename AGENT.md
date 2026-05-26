@@ -60,9 +60,10 @@ autoresearch --track claude bootstrap-track
 # Read it to understand current champion state before proposing anything.
 ```
 
-**Run N cycles**:
+**Run N cycles** — `run-session-cycles` requires an active session. On a fresh run, create one first (idempotent name is fine):
 ```bash
-autoresearch --track claude run-cycles <N>
+autoresearch --track claude start-session main         # only needed once per run
+autoresearch --track claude run-session-cycles <N>
 ```
 
 If the user supplies a specific `--run-id` (e.g. `CC20260526_01`), pass it to every command. Otherwise omit it.
@@ -73,6 +74,7 @@ If the user supplies a specific `--run-id` (e.g. `CC20260526_01`), pass it to ev
 
 ```bash
 autoresearch --track claude bootstrap-track      # idempotent; safe every time
+autoresearch --track claude start-session main   # idempotent name; required before run-session-cycles
 autoresearch --track claude list-champion-history
 autoresearch --track claude list-experiments
 ```
@@ -334,7 +336,8 @@ autoresearch --track claude --run-id ClaudeTimeX init-registry
 autoresearch --track claude --run-id ClaudeTimeX run-all-baselines
 autoresearch --track claude --run-id ClaudeTimeX init-official-champion
 autoresearch --track claude --run-id ClaudeTimeX export-context   # read this at session start
-autoresearch --track claude --run-id ClaudeTimeX run-cycles 10
+autoresearch --track claude --run-id ClaudeTimeX start-session main
+autoresearch --track claude --run-id ClaudeTimeX run-session-cycles 10
 ```
 
 `bootstrap-track` is idempotent. It prepares shared data if needed, creates or
