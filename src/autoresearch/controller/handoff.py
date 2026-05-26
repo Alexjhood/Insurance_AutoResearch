@@ -227,23 +227,85 @@ def inbox_status(config: ProjectConfig) -> dict[str, Any]:
 
 
 def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> str:
-    """Render a compact pointer file for external agents."""
+    """Render a self-contained handoff file for external agents.
 
+    Embeds the proposal template, key constraints, and champion metrics inline
+    so the agent can start writing a proposal immediately without reading
+    additional files (proposal_schema.json, proposal_template.json, context.json).
+    """
     champion = context.get("official_champion") or {}
-    return "\n".join([
+    champion_id = champion.get("champion_id", "FILL_IN_CHAMPION_ID")
+    branch_id = champion.get("branch_id", "main")
+
+    # Find champion Gini from recent_experiments list
+    gini_str = ""
+    for exp in context.get("recent_experiments") or []:
+        if exp.get("experiment_id") == champion_id:
+            score = exp.get("mean_score")
+            if score is not None:
+                gini_str = f", Gini {float(score):.4f}"
+            break
+
+    search_space = context.get("allowed_search_space") or {}
+    features = search_space.get("feature_columns") or []
+    target_strategies = search_space.get("target_strategies") or ["direct_pure_premium"]
+    feature_list = ", ".join(f"`{f}`" for f in features)
+
+    template_json = json.dumps({
+        "proposal_id": "<short_unique_id>",
+        "parent_experiment_id": champion_id,
+        "parent_branch_id": branch_id,
+        "branch_action": "new_branch",
+        "experiment_name": "<concise_name>",
+        "rationale": "<why this change is worth trying>",
+        "change_summary": "<exact modelling/preprocessing change from parent>",
+        "expected_benefit": "<expected improvement mechanism>",
+        "key_risk": "<most likely failure mode>",
+        "experiment_config": {
+            "experiment_name": "<concise_name>",
+            "model_family": "scripted_challenger",
+            "target_strategy": "direct_pure_premium",
+            "parent_experiment_id": champion_id,
+            "preprocessing": {"claim_capping_enabled": True, "claim_cap_threshold": 100000},
+            "model": {"script_path": "model_<name>.py"},
+        },
+    }, indent=2)
+
+    lines = [
         "# Auto-Research Handoff",
         "",
         "Read `AGENT.md` for the full operating manual.",
         "",
-        f"- Current champion: `{champion.get('champion_id')}` "
-        f"(branch `{champion.get('branch_id')}`)",
-        f"- Context JSON: `{config.handoff_context_dir / 'latest_context.json'}`",
-        f"- Proposal schema: `{config.handoff_handoffs_dir / 'proposal_schema.json'}`",
-        f"- Proposal template: `{config.handoff_handoffs_dir / 'proposal_template.json'}`",
-        f"- Write proposal JSON + model script to: `{config.handoff_proposal_inbox_dir}`",
+        "## Current state",
         "",
-        "Then run `autoresearch run-session-cycle`.",
-    ]) + "\n"
+        f"- **Champion**: `{champion_id}` (branch `{branch_id}`{gini_str})",
+        f"- **Inbox**: `{config.handoff_proposal_inbox_dir}`  ← write proposal JSON + model script here",
+        f"- **Next command**: `autoresearch --track {config.track_id} --run-id {config.run_id} run-latest-proposal-cycle`",
+        "",
+        "## Proposal quick-start",
+        "",
+        f"Copy this to `{config.handoff_proposal_inbox_dir}/proposal_<name>.json` and fill in the `<...>` fields.",
+        "Also write `model_<name>.py` (same directory) with a `fit_predict(train, score, ...)` function.",
+        "",
+        "```json",
+        template_json,
+        "```",
+        "",
+        "## Key constraints",
+        "",
+        f"- **Features available**: {feature_list}",
+        f"- **Target strategies**: {', '.join(f'`{s}`' for s in target_strategies)}",
+        "- **Claim cap**: `100000` (fixed — never change `claim_cap_threshold`)",
+        "- **`model.py` interface**: must expose `fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hyperparameters) -> tuple[np.ndarray, dict]`",
+        "- **Return claim costs** (not rates): if predicting pure premium, multiply by `score['exposure_term_a']`",
+        "- **Always apply** `apply_training_calibration` from `autoresearch.models.calibration` before returning",
+        "- **Never reference** `milestone_holdout`, `holdout_vault`, or `AUTORESEARCH_MILESTONE_TOKEN`",
+        "",
+        "## Context JSON (full detail)",
+        "",
+        f"`{config.handoff_context_dir / 'latest_context.json'}`",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def proposal_schema_document(config: ProjectConfig, context: dict[str, Any]) -> dict[str, Any]:
@@ -277,18 +339,29 @@ def proposal_schema_document(config: ProjectConfig, context: dict[str, Any]) -> 
 def render_cycle_summary(summary: dict[str, Any]) -> str:
     result = summary["cycle_result"]
     champion = summary.get("official_champion") or {}
-    return "\n".join(
-        [
-            "# Latest Cycle Result",
+    metrics = result.get("metrics_summary") or {}
+    lines = [
+        "# Latest Cycle Result",
+        "",
+        f"- completed_at: {summary['completed_at']}",
+        f"- proposal_id: `{result.get('proposal_id')}`",
+        f"- experiment_id: `{result.get('experiment_id')}`",
+        f"- comparison_id: `{result.get('comparison_id')}`",
+        f"- **decision**: `{result.get('decision')}`",
+        f"- official_champion: `{champion.get('champion_id')}`",
+    ]
+    if metrics:
+        lines += [
             "",
-            f"- completed_at: {summary['completed_at']}",
-            f"- proposal_id: `{result.get('proposal_id')}`",
-            f"- experiment_id: `{result.get('experiment_id')}`",
-            f"- comparison_id: `{result.get('comparison_id')}`",
-            f"- decision: `{result.get('decision')}`",
-            f"- official_champion: `{champion.get('champion_id')}`",
+            "## Key metrics",
+            f"- challenger Gini: {metrics.get('challenger_gini', 'n/a')}",
+            f"- champion Gini:   {metrics.get('champion_gini', 'n/a')}",
+            f"- mean lift:       {metrics.get('mean_lift', 'n/a'):+.6f}" if isinstance(metrics.get('mean_lift'), float) else f"- mean lift:       {metrics.get('mean_lift', 'n/a')}",
+            f"- win rate:        {metrics.get('win_rate', 'n/a')}",
         ]
-    ) + "\n"
+    if result.get("comparison_report"):
+        lines += ["", f"- comparison report: `{result['comparison_report']}`"]
+    return "\n".join(lines) + "\n"
 
 
 def detect_duplicate_proposal(config: ProjectConfig, proposal_id: str) -> dict[str, str] | None:

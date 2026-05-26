@@ -154,11 +154,21 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
                 comparison_id=comparison_id,
                 notes=decision["rationale"],
             )
+        # Include key metrics in the return so callers can surface them without
+        # requiring additional file reads of the comparison report.
+        comp_summary = report.get("comparison_summary") or {}
         return {
             "proposal_id": proposal_id,
             "experiment_id": experiment_id,
             "comparison_id": comparison_id,
             "decision": decision["decision"],
+            "comparison_report": str(comparison_outputs.get("html_report", "")),
+            "metrics_summary": {
+                "challenger_gini": round(float(comp_summary.get("challenger_mean_score") or 0), 6),
+                "champion_gini": round(float(comp_summary.get("champion_mean_score") or 0), 6),
+                "mean_lift": round(float(comp_summary.get("mean_lift") or 0), 6),
+                "win_rate": round(float(comp_summary.get("challenger_win_rate") or 0), 4),
+            },
         }
     except ExperimentNeedsRepair as exc:
         update_proposal_status(config.registry_path, proposal_id, "needs_repair", notes=str(exc))
@@ -242,6 +252,14 @@ def _run_validated_experiment_attempts(
         )
         if report["valid"]:
             return outputs
+        # Produce a diagnostic comparison report even for failed attempts so the
+        # agent can see the actual metrics (Gini, lift curve, A/E) before deciding
+        # how to repair.  record=False keeps this out of the official comparison
+        # registry and avoids inflating the Bonferroni count.
+        report = _attach_failed_attempt_comparison(
+            config, champion_id, experiment_id, report,
+            comparison_dir=iteration_dir / f"failed_attempt_{attempt}_comparison",
+        )
         last_report = report
         if attempt < 3:
             _write_repair_request(proposal_dir, attempt + 1, report)
@@ -281,6 +299,48 @@ def _validate_attempt_outputs(
     }
 
 
+def _attach_failed_attempt_comparison(
+    config: ProjectConfig,
+    champion_id: str,
+    experiment_id: str,
+    report: dict[str, Any],
+    comparison_dir: Path,
+) -> dict[str, Any]:
+    """Generate a diagnostic comparison report for a failed validation attempt.
+
+    Produces the full HTML comparison report without recording the comparison in
+    the registry (record=False), so it does not inflate Bonferroni counts.
+    Attaches the report path and a compact metrics summary to the report dict so
+    they appear in the repair_request JSON.
+
+    Returns an updated copy of ``report`` with ``comparison_report`` and
+    ``metrics_summary`` fields added.
+    """
+    report = dict(report)
+    try:
+        artifacts = compare_experiments(
+            config,
+            champion_id,
+            experiment_id,
+            output_dir=comparison_dir,
+            record=False,
+        )
+        report["comparison_report"] = str(artifacts.get("html_report", ""))
+        # Pull the key numbers directly from the validation's already-computed
+        # lift_summary and metric_panel so no extra work is done.
+        lift = report.get("lift_summary") or {}
+        panel = report.get("metric_panel") or {}
+        report["metrics_summary"] = {
+            "challenger_gini": round(float(panel.get("gini_weighted") or 0), 6),
+            "champion_gini": round(float(lift.get("champion_score") or 0), 6),
+            "raw_lift": round(float(lift.get("lift") or 0), 6),
+            "predicted_to_actual_ratio": round(float(panel.get("predicted_to_actual_ratio") or 0), 4),
+        }
+    except Exception:
+        pass  # best-effort; never block the repair flow
+    return report
+
+
 def _artifact_path(config: ProjectConfig, experiment_id: str, artifact_type: str) -> Path:
     for artifact in list_artifacts(config.registry_path, experiment_id):
         if artifact["artifact_type"] == artifact_type:
@@ -294,9 +354,13 @@ def _write_repair_request(proposal_dir: Path, next_attempt: int, report: dict[st
         "write_script": f"model_attempt_{next_attempt}.py",
         "reason": report.get("reason"),
         "failed_checks": [check for check in report.get("checks", []) if not check.get("passed")],
+        "metrics_summary": report.get("metrics_summary"),
+        "comparison_report": report.get("comparison_report"),
         "instruction": (
             "Revise the model script to fix the failed checks. Keep the same fit_predict "
-            "interface and do not access holdout data. The next run will use this script."
+            "interface and do not access holdout data. The next run will use this script. "
+            "Read comparison_report (HTML) for full Gini curves and lift charts before deciding "
+            "on the fix strategy."
         ),
     }
     path = proposal_dir / f"repair_request_{next_attempt}.json"

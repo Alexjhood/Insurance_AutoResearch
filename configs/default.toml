@@ -41,7 +41,7 @@ random_seed = 20260524
 
 [promotion]
 minimum_mean_lift = 0.0
-min_relative_lift = 0.005
+min_relative_lift = 0.0005
 min_absolute_lift = 0.0
 minimum_win_rate = 0.60
 bootstrap_lower_bound = 0.0

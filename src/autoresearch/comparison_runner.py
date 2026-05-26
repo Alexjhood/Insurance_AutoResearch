@@ -83,6 +83,7 @@ def compare_experiments(
     challenger_id: str,
     *,
     output_dir: Path | None = None,
+    record: bool = True,
 ) -> dict[str, Path]:
     """Run a paired volatility-aware comparison and persist promotion evidence."""
 
@@ -191,17 +192,18 @@ def compare_experiments(
         "promotion_report": report_path,
         "html_report": html_report_path,
     }
-    record_comparison(
-        config.registry_path,
-        comparison_id=comparison_id,
-        champion_id=champion_id,
-        challenger_id=challenger_id,
-        paired_summary=comparison_summary,
-        bootstrap_summary=bootstrap,
-        promotion_decision=decision["decision"],
-        promotion_rationale=decision["rationale"],
-        artifacts=artifacts,
-    )
+    if record:
+        record_comparison(
+            config.registry_path,
+            comparison_id=comparison_id,
+            champion_id=champion_id,
+            challenger_id=challenger_id,
+            paired_summary=comparison_summary,
+            bootstrap_summary=bootstrap,
+            promotion_decision=decision["decision"],
+            promotion_rationale=decision["rationale"],
+            artifacts=artifacts,
+        )
     return artifacts
 
 

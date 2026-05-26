@@ -16,6 +16,7 @@ from autoresearch.experiment_registry.registry import (
     get_experiment,
     list_artifacts,
     list_champion_history,
+    list_experiments,
 )
 from autoresearch.utils.io import read_json
 
@@ -40,6 +41,8 @@ _BAND_COUNTS = [5, 10, 20, 50]
 _DEFAULT_BANDS = 10
 _GINI_CURVE_POINTS = 400
 _HIST_BINS = 40
+# Scatter sample caps per percentage tier (1%, 5%, 25%, 100%)
+_SCATTER_CAPS = {"1pct": 800, "5pct": 3000, "25pct": 12000, "100pct": 30000}
 _PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.27.0.min.js"
 
 
@@ -91,7 +94,17 @@ def write_comparison_html_report(
         "champion": _compute_pred_histogram(champion_eval, _HIST_BINS),
         "challenger": _compute_pred_histogram(challenger_eval, _HIST_BINS),
     }
-    history_points = _champion_history_points(config, eval_split)
+    diff_data = _compute_diff_data(champion_eval, challenger_eval)
+
+    # The comparison report is generated *before* set_official_champion is called, so
+    # the challenger's promotion has not yet been written to champion_history.  Pass the
+    # challenger ID as a pending promotion hint so the Gini Progression chart renders it
+    # correctly on the first render (when the report is opened immediately).
+    pending_promoted = challenger_id if decision.get("decision") == "promote" else None
+    history_points = _all_experiment_history_points(config, eval_split, pending_promoted_id=pending_promoted)
+
+    champion_details = _experiment_details(config, champion_id)
+    challenger_details = _experiment_details(config, challenger_id)
 
     html = _render_html(
         comparison_id=comparison_id,
@@ -102,14 +115,15 @@ def write_comparison_html_report(
         bootstrap_summary=bootstrap_summary,
         champion_id=champion_id,
         challenger_id=challenger_id,
-        champion_details=_experiment_details(config, champion_id),
-        challenger_details=_experiment_details(config, challenger_id),
+        champion_details=champion_details,
+        challenger_details=challenger_details,
         champion_metrics=champion_metrics,
         challenger_metrics=challenger_metrics,
         lift_data=lift_data,
         double_lift_data=double_lift_data,
         gini_data=gini_data,
         pred_hist_data=pred_hist_data,
+        diff_data=diff_data,
         history_points=history_points,
     )
     output_path.write_text(html, encoding="utf-8")
@@ -127,9 +141,24 @@ def _artifact_path(config: ProjectConfig, experiment_id: str, artifact_type: str
     raise FileNotFoundError(f"Experiment {experiment_id} has no {artifact_type!r} artifact")
 
 
+def _load_proposal_for_experiment(config: ProjectConfig, experiment_id: str) -> dict | None:
+    """Try to find the proposal.json for an experiment via its config_snapshot path."""
+    try:
+        snapshot_path = _artifact_path(config, experiment_id, "config_snapshot")
+        # Path: iterations/XXX/experiment/attempt_N/config_snapshot.json → go up 3
+        iteration_dir = Path(snapshot_path).parent.parent.parent
+        proposal_path = iteration_dir / "proposal" / "proposal.json"
+        if proposal_path.exists():
+            return read_json(proposal_path)
+    except Exception:
+        pass
+    return None
+
+
 def _experiment_details(config: ProjectConfig, experiment_id: str) -> dict[str, Any]:
     experiment = get_experiment(config.registry_path, experiment_id)
     snapshot = read_json(_artifact_path(config, experiment_id, "config_snapshot"))
+    proposal = _load_proposal_for_experiment(config, experiment_id)
     return {
         "experiment_id": experiment_id,
         "experiment_name": experiment.get("experiment_name"),
@@ -139,26 +168,66 @@ def _experiment_details(config: ProjectConfig, experiment_id: str) -> dict[str, 
         "status": experiment.get("status"),
         "preprocessing": snapshot.get("effective_preprocessing"),
         "model": snapshot.get("experiment", {}).get("model"),
+        "rationale": (proposal or {}).get("rationale"),
+        "change_summary": (proposal or {}).get("change_summary"),
+        "expected_benefit": (proposal or {}).get("expected_benefit"),
+        "key_risk": (proposal or {}).get("key_risk"),
     }
 
 
-def _champion_history_points(config: ProjectConfig, eval_split: str) -> list[tuple[float, float]]:
-    points: list[tuple[float, float]] = []
-    seen: set[str] = set()
-    for row in reversed(list_champion_history(config.registry_path)):
-        champion_id = row.get("new_champion_id")
-        if not champion_id or champion_id in seen:
+def _all_experiment_history_points(
+    config: ProjectConfig,
+    eval_split: str,
+    *,
+    pending_promoted_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return all experiments in chronological order with promotion status and label.
+
+    ``pending_promoted_id`` should be set to the challenger_id when the
+    comparison report is generated for a promotion decision.  Because the report
+    is written *before* ``set_official_champion`` is called, the challenger is
+    not yet in ``champion_history``; this parameter lets the chart pre-mark it as
+    promoted so the Gini Progression renders correctly on first open.
+    """
+    promoted_ids: set[str] = set()
+    for row in list_champion_history(config.registry_path):
+        action = row.get("action", "")
+        if action in ("promoted", "initialised"):
+            eid = row.get("new_champion_id")
+            if eid:
+                promoted_ids.add(eid)
+    if pending_promoted_id:
+        promoted_ids.add(pending_promoted_id)
+
+    # All experiments in reverse-creation order (list_experiments returns newest first)
+    all_exps = list(reversed(list_experiments(config.registry_path)))
+
+    points: list[dict[str, Any]] = []
+    for exp in all_exps:
+        eid = exp.get("experiment_id")
+        if not eid:
             continue
-        seen.add(champion_id)
         try:
-            metrics = read_json(_artifact_path(config, champion_id, "metrics"))
-            split_metric = next(
-                item for item in metrics["split_metrics"] if item["split"] == eval_split
+            metrics = read_json(_artifact_path(config, eid, "metrics"))
+            split_m = next(
+                (item for item in metrics["split_metrics"] if item["split"] == eval_split),
+                None,
             )
-            points.append((float(len(points) + 1), float(split_metric["gini_weighted"])))
+            if split_m is None:
+                continue
+            gini = float(split_m["gini_weighted"])
         except Exception:
             continue
-    return points or [(1.0, 0.0)]
+        points.append({
+            "step": len(points) + 1,
+            "gini": round(gini, 6),
+            "label": exp.get("experiment_name") or eid[:32],
+            "promoted": eid in promoted_ids,
+            "experiment_id": eid,
+        })
+
+    return points or [{"step": 1, "gini": 0.0, "label": "baseline", "promoted": True,
+                       "experiment_id": ""}]
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +235,7 @@ def _champion_history_points(config: ProjectConfig, eval_split: str) -> list[tup
 # ---------------------------------------------------------------------------
 
 def _equal_exposure_bins(exposure_sorted: np.ndarray, n_bins: int) -> np.ndarray:
-    """Assign bin labels 1..n_bins to a sorted array so each bin has ~equal total exposure."""
+    """Assign bin labels 1..n_bins so each bin has ~equal total exposure."""
     if n_bins <= 0 or len(exposure_sorted) == 0:
         return np.ones(len(exposure_sorted), dtype=int)
     cum_exp = np.cumsum(exposure_sorted)
@@ -180,8 +249,7 @@ def _equal_exposure_bins(exposure_sorted: np.ndarray, n_bins: int) -> np.ndarray
 def _compute_lift_data(frame: pd.DataFrame, band_counts: list[int]) -> dict[str, list[dict]]:
     """
     Sort policies by predicted pure premium (ascending = lowest risk first).
-    Bin into equal-exposure bands. Per band: actual PP, predicted PP, A/E ratio.
-    Returned as dict of str(n_bands) → list of band dicts.
+    Bin into equal-exposure bands. Per band: actual PP, predicted PP, A/E ratio, exposure.
     """
     exp = frame["exposure"].astype(float).values
     actual_cc = frame["actual_claim_cost"].astype(float).values
@@ -221,11 +289,12 @@ def _compute_double_lift_data(
     champion: pd.DataFrame,
     challenger: pd.DataFrame,
     band_counts: list[int],
-) -> dict[str, list[dict]]:
+) -> dict[str, dict[str, list[dict]]]:
     """
-    Sort policies by Challenger / Champion predicted PP ratio (ascending).
-    Bin into equal-exposure bands. Per band: actual PP, champion PP, challenger PP.
-    X-axis value = mean ratio for the band.
+    Returns {"equal_exposure": {n: [bands]}, "equal_width": {n: [bands]}}.
+
+    equal_exposure: bins by equal total exposure; x = band ordinal (1..N).
+    equal_width: bins by equal-width ratio intervals; x = ratio midpoint.
     """
     paired = champion[["record_id", "actual_claim_cost", "predicted_claim_cost", "exposure"]].merge(
         challenger[["record_id", "predicted_claim_cost"]],
@@ -238,11 +307,11 @@ def _compute_double_lift_data(
     champ_cc = paired["predicted_claim_cost_champ"].astype(float).values
     chall_cc = paired["predicted_claim_cost_chall"].astype(float).values
 
-    # Ratio at policy level using per-policy pure premium
     champ_pp_pol = champ_cc / exp.clip(min=1e-12)
     chall_pp_pol = chall_cc / exp.clip(min=1e-12)
     ratio = chall_pp_pol / champ_pp_pol.clip(min=1e-9)
 
+    # ── Equal-exposure ─────────────────────────────────────────────────────
     sort_idx = ratio.argsort()
     exp_s = exp[sort_idx]
     actual_s = actual_cc[sort_idx]
@@ -250,7 +319,7 @@ def _compute_double_lift_data(
     chall_s = chall_cc[sort_idx]
     ratio_s = ratio[sort_idx]
 
-    result: dict[str, list[dict]] = {}
+    ee_result: dict[str, list[dict]] = {}
     for n in band_counts:
         labels = _equal_exposure_bins(exp_s, n)
         bands: list[dict] = []
@@ -264,30 +333,69 @@ def _compute_double_lift_data(
             actual_pp = float(actual_s[mask].sum()) / exp_sum
             champ_pp = float(champ_s[mask].sum()) / exp_sum
             chall_pp = float(chall_s[mask].sum()) / exp_sum
-            ratio_vals = ratio_s[mask]
+            rv = ratio_s[mask]
             bands.append({
                 "band": b,
-                "ratio_mean": round(float(ratio_vals.mean()), 4),
-                "ratio_min": round(float(ratio_vals.min()), 4),
-                "ratio_max": round(float(ratio_vals.max()), 4),
+                "x": b,  # ordinal for equal-exposure x-axis
+                "ratio_mean": round(float(rv.mean()), 4),
+                "ratio_min": round(float(rv.min()), 4),
+                "ratio_max": round(float(rv.max()), 4),
                 "actual_pp": round(actual_pp, 4),
                 "champion_pp": round(champ_pp, 4),
                 "challenger_pp": round(chall_pp, 4),
                 "exposure": round(exp_sum, 2),
                 "n_policies": int(mask.sum()),
             })
-        result[str(n)] = bands
-    return result
+        ee_result[str(n)] = bands
+
+    # ── Equal-width ────────────────────────────────────────────────────────
+    r_lo = float(np.percentile(ratio, 2))
+    r_hi = float(np.percentile(ratio, 98))
+    if r_hi <= r_lo:
+        r_hi = r_lo + 0.01
+
+    ew_result: dict[str, list[dict]] = {}
+    for n in band_counts:
+        edges = np.linspace(r_lo, r_hi, n + 1)
+        midpoints = 0.5 * (edges[:-1] + edges[1:])
+        bin_idx = np.digitize(ratio, edges) - 1
+        bin_idx = bin_idx.clip(0, n - 1)
+        bands = []
+        for b in range(n):
+            mask = bin_idx == b
+            if not mask.any():
+                continue
+            exp_sum = float(exp[mask].sum())
+            if exp_sum < 1e-12:
+                continue
+            actual_pp = float(actual_cc[mask].sum()) / exp_sum
+            champ_pp = float(champ_cc[mask].sum()) / exp_sum
+            chall_pp = float(chall_cc[mask].sum()) / exp_sum
+            rv = ratio[mask]
+            bands.append({
+                "band": b + 1,
+                "x": round(float(midpoints[b]), 4),  # actual ratio for x-axis
+                "ratio_mean": round(float(rv.mean()), 4),
+                "ratio_min": round(float(rv.min()), 4),
+                "ratio_max": round(float(rv.max()), 4),
+                "actual_pp": round(actual_pp, 4),
+                "champion_pp": round(champ_pp, 4),
+                "challenger_pp": round(chall_pp, 4),
+                "exposure": round(exp_sum, 2),
+                "n_policies": int(mask.sum()),
+            })
+        ew_result[str(n)] = bands
+
+    return {"equal_exposure": ee_result, "equal_width": ew_result}
 
 
 def _compute_gini_curve(frame: pd.DataFrame, n_points: int = 400) -> dict:
-    """
-    Lorenz curve: sort by predicted PURE PREMIUM ascending (lowest predicted risk first).
-    X = cumulative exposure share, Y = cumulative actual claim cost share.
-    A good model curves below the diagonal; Gini > 0 for a good model.
-    """
+    """Lorenz curve sorted by predicted pure premium ascending."""
     f = frame.copy()
-    f["_pred_pp"] = f["predicted_claim_cost"].astype(float) / f["exposure"].astype(float).clip(lower=1e-12)
+    f["_pred_pp"] = (
+        f["predicted_claim_cost"].astype(float)
+        / f["exposure"].astype(float).clip(lower=1e-12)
+    )
     ordered = f.sort_values("_pred_pp", ascending=True)
     exposure = ordered["exposure"].astype(float).values
     actual_cost = ordered["actual_claim_cost"].astype(float).values
@@ -334,6 +442,64 @@ def _compute_pred_histogram(frame: pd.DataFrame, n_bins: int = 40) -> dict:
     }
 
 
+def _compute_diff_data(
+    champion_eval: pd.DataFrame, challenger_eval: pd.DataFrame
+) -> dict:
+    """
+    Compute per-policy predicted PP differences between challenger and champion.
+    Returns exposure-weighted % diff histogram and a sampled scatter.
+    """
+    paired = champion_eval[["record_id", "predicted_claim_cost", "exposure"]].merge(
+        challenger_eval[["record_id", "predicted_claim_cost"]],
+        on="record_id",
+        suffixes=("_champ", "_chall"),
+    )
+    exp = paired["exposure"].astype(float).values
+    champ_pp = paired["predicted_claim_cost_champ"].astype(float).values / exp.clip(min=1e-12)
+    chall_pp = paired["predicted_claim_cost_chall"].astype(float).values / exp.clip(min=1e-12)
+
+    pct_diff = (chall_pp - champ_pp) / champ_pp.clip(min=1e-9) * 100.0
+
+    # Exposure-weighted % diff histogram
+    p2, p98 = float(np.percentile(pct_diff, 2)), float(np.percentile(pct_diff, 98))
+    if p2 >= p98:
+        p98 = p2 + 1.0
+    edges = np.linspace(p2, p98, _HIST_BINS + 1)
+    counts, _ = np.histogram(pct_diff, bins=edges, weights=exp)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    pct_hist = {
+        "x": [round(float(v), 4) for v in centers],
+        "y": [round(float(v), 4) for v in counts],
+    }
+
+    # 99th-percentile axis bound (computed from full data, not a sample)
+    p99 = float(np.percentile(np.concatenate([champ_pp, chall_pp]), 99))
+
+    # Scatter: four sample sizes — deterministic subsampling from the same pool
+    rng = np.random.default_rng(seed=42)
+    n = len(paired)
+    # Draw the largest pool first; smaller samples are prefixes of it
+    largest_cap = max(_SCATTER_CAPS.values())
+    full_pool_idx = rng.choice(n, min(n, largest_cap), replace=False)
+
+    scatter_samples: dict[str, dict] = {}
+    for label, cap in _SCATTER_CAPS.items():
+        k = min(len(full_pool_idx), cap)
+        idx = full_pool_idx[:k]
+        scatter_samples[label] = {
+            "x": [round(float(v), 2) for v in champ_pp[idx]],
+            "y": [round(float(v), 2) for v in chall_pp[idx]],
+            "n": k,
+        }
+
+    return {
+        "pct_hist": pct_hist,
+        "scatter": scatter_samples["25pct"],   # backward-compat default
+        "scatter_samples": scatter_samples,
+        "scatter_p99": round(p99, 2),
+    }
+
+
 # ---------------------------------------------------------------------------
 # HTML rendering
 # ---------------------------------------------------------------------------
@@ -356,6 +522,7 @@ def _render_html(
     double_lift_data: dict,
     gini_data: dict,
     pred_hist_data: dict,
+    diff_data: dict,
     history_points: list,
 ) -> str:
     decision_str = decision.get("decision", "?")
@@ -377,12 +544,12 @@ def _render_html(
     lift_color = "#0a5c2e" if mean_lift > 0 else "#7a1a1a"
     win_color = "#0a5c2e" if win_rate >= 0.6 else "#7a1a1a"
 
-    # Data injected into the page as JSON (no f-string escaping issues with JS braces below)
     data_script = (
         "const LIFT=" + json.dumps(lift_data, separators=(",", ":")) + ";"
         "const DL=" + json.dumps(double_lift_data, separators=(",", ":")) + ";"
         "const GINI=" + json.dumps(gini_data, separators=(",", ":")) + ";"
         "const HIST=" + json.dumps(pred_hist_data, separators=(",", ":")) + ";"
+        "const DIFF=" + json.dumps(diff_data, separators=(",", ":")) + ";"
         "const HISTORY=" + json.dumps(history_points, separators=(",", ":")) + ";"
     )
 
@@ -393,16 +560,18 @@ def _render_html(
 
     metrics_html = _metrics_table(champion_metrics, challenger_metrics)
     summary_html = _summary_table(comparison_summary, bootstrap_summary)
-    champ_details_html = _details_table("Champion", champion_details)
-    chall_details_html = _details_table("Challenger", challenger_details)
+    gate_html = _gate_table(decision, comparison_summary, bootstrap_summary, challenger_metrics)
+    champ_details_html = _details_card("Champion", champion_details)
+    chall_details_html = _details_card("Challenger", challenger_details)
+    diff_discussion_html = _experiment_diff_discussion(champion_details, challenger_details)
+    native_calib_html = _native_calibration_warning(challenger_details)
 
-    # JavaScript — written as a plain string (no Python f-string processing)
-    # so JS object braces and template literals are preserved as-is.
     js_code = r"""
 const CHAMP_COLOR='#1f77b4',CHALL_COLOR='#d62728',ACTUAL_COLOR='#2ca02c';
+const PROMO_COLOR='#0a5c2e',FAILED_COLOR='#d62728',EXP_BAR_COLOR='rgba(180,180,180,0.35)';
 const CFG={displayModeBar:true,modeBarButtonsToRemove:['select2d','lasso2d','toggleSpikelines'],displaylogo:false,responsive:true};
 const BASE_LAYOUT={
-  margin:{l:68,r:28,t:52,b:68},
+  margin:{l:68,r:68,t:52,b:68},
   font:{family:'-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif',size:12},
   plot_bgcolor:'#fff',paper_bgcolor:'#fff',
   legend:{orientation:'h',yanchor:'bottom',y:1.02,xanchor:'right',x:1,
@@ -418,6 +587,22 @@ function mkLayout(ov){
   });
 }
 
+function expBarTrace(bands, xField){
+  return {
+    name:'Exposure',x:bands.map(d=>d[xField]),y:bands.map(d=>d.exposure),
+    type:'bar',yaxis:'y2',marker:{color:EXP_BAR_COLOR},
+    hovertemplate:'%{x}<br>Exposure: %{y:,.1f}<extra>Exposure</extra>',
+    showlegend:true,
+  };
+}
+
+function expAxis(){
+  return {
+    title:'Exposure',overlaying:'y',side:'right',showgrid:false,
+    tickformat:',.0f',color:'#999',zeroline:false,
+  };
+}
+
 /* ── Lift curves ─────────────────────────────────────────────────────── */
 function renderLift(){
   const n=document.getElementById('lift-bands').value;
@@ -425,49 +610,50 @@ function renderLift(){
   const champ=LIFT.champion[n]||[];
   const chall=LIFT.challenger[n]||[];
   let traces,layout;
+  const xField='band';
 
   if(mode==='absolute'){
     traces=[
+      expBarTrace(chall, xField),
       {name:'Champion — Predicted',
-       x:champ.map(d=>d.band),y:champ.map(d=>d.predicted_pp),
+       x:champ.map(d=>d[xField]),y:champ.map(d=>d.predicted_pp),
        mode:'lines+markers',line:{color:CHAMP_COLOR,width:2},marker:{size:6},
        customdata:champ.map(d=>[d.n_policies,d.exposure,d.ae_ratio]),
        hovertemplate:'Band %{x}<br>Predicted PP: £%{y:,.2f}<br>A/E: %{customdata[2]:.3f}<br>Policies: %{customdata[0]:.0f}<br>Exposure: %{customdata[1]:.1f}<extra>Champion Predicted</extra>'},
       {name:'Champion — Actual',
-       x:champ.map(d=>d.band),y:champ.map(d=>d.actual_pp),
+       x:champ.map(d=>d[xField]),y:champ.map(d=>d.actual_pp),
        mode:'lines+markers',line:{color:CHAMP_COLOR,width:2,dash:'dash'},marker:{size:6,symbol:'circle-open'},
-       customdata:champ.map(d=>[d.n_policies,d.exposure]),
-       hovertemplate:'Band %{x}<br>Actual PP: £%{y:,.2f}<br>Policies: %{customdata[0]:.0f}<extra>Champion Actual</extra>'},
+       hovertemplate:'Band %{x}<br>Actual PP: £%{y:,.2f}<extra>Champion Actual</extra>'},
       {name:'Challenger — Predicted',
-       x:chall.map(d=>d.band),y:chall.map(d=>d.predicted_pp),
+       x:chall.map(d=>d[xField]),y:chall.map(d=>d.predicted_pp),
        mode:'lines+markers',line:{color:CHALL_COLOR,width:2},marker:{size:6},
        customdata:chall.map(d=>[d.n_policies,d.exposure,d.ae_ratio]),
        hovertemplate:'Band %{x}<br>Predicted PP: £%{y:,.2f}<br>A/E: %{customdata[2]:.3f}<br>Policies: %{customdata[0]:.0f}<br>Exposure: %{customdata[1]:.1f}<extra>Challenger Predicted</extra>'},
       {name:'Challenger — Actual',
-       x:chall.map(d=>d.band),y:chall.map(d=>d.actual_pp),
+       x:chall.map(d=>d[xField]),y:chall.map(d=>d.actual_pp),
        mode:'lines+markers',line:{color:CHALL_COLOR,width:2,dash:'dash'},marker:{size:6,symbol:'circle-open'},
-       customdata:chall.map(d=>[d.n_policies,d.exposure]),
-       hovertemplate:'Band %{x}<br>Actual PP: £%{y:,.2f}<br>Policies: %{customdata[0]:.0f}<extra>Challenger Actual</extra>'},
+       hovertemplate:'Band %{x}<br>Actual PP: £%{y:,.2f}<extra>Challenger Actual</extra>'},
     ];
     layout=mkLayout({
       title:{text:'Actual vs Predicted Pure Premium by Risk Band',font:{size:14}},
       xaxis:{title:'Risk Band  (1 = lowest predicted risk → N = highest)',dtick:1},
       yaxis:{title:'Pure Premium (£)'},
+      yaxis2:expAxis(),
     });
-  } else {
-    // A/E ratio mode
+  } else if(mode==='ae'){
     const maxBand=Math.max(champ.length,chall.length,1);
     traces=[
+      expBarTrace(chall, xField),
       {name:'Champion A/E',
-       x:champ.map(d=>d.band),y:champ.map(d=>d.ae_ratio),
+       x:champ.map(d=>d[xField]),y:champ.map(d=>d.ae_ratio),
        mode:'lines+markers',line:{color:CHAMP_COLOR,width:2},marker:{size:6},
        customdata:champ.map(d=>[d.actual_pp,d.predicted_pp,d.n_policies,d.exposure]),
-       hovertemplate:'Band %{x}<br>A/E: %{y:.3f}<br>Actual PP: £%{customdata[0]:,.2f}<br>Predicted PP: £%{customdata[1]:,.2f}<br>Policies: %{customdata[2]:.0f}<extra>Champion</extra>'},
+       hovertemplate:'Band %{x}<br>A/E: %{y:.3f}<br>Actual PP: £%{customdata[0]:,.2f}<br>Predicted PP: £%{customdata[1]:,.2f}<extra>Champion</extra>'},
       {name:'Challenger A/E',
-       x:chall.map(d=>d.band),y:chall.map(d=>d.ae_ratio),
+       x:chall.map(d=>d[xField]),y:chall.map(d=>d.ae_ratio),
        mode:'lines+markers',line:{color:CHALL_COLOR,width:2},marker:{size:6},
        customdata:chall.map(d=>[d.actual_pp,d.predicted_pp,d.n_policies,d.exposure]),
-       hovertemplate:'Band %{x}<br>A/E: %{y:.3f}<br>Actual PP: £%{customdata[0]:,.2f}<br>Predicted PP: £%{customdata[1]:,.2f}<br>Policies: %{customdata[2]:.0f}<extra>Challenger</extra>'},
+       hovertemplate:'Band %{x}<br>A/E: %{y:.3f}<br>Actual PP: £%{customdata[0]:,.2f}<br>Predicted PP: £%{customdata[1]:,.2f}<extra>Challenger</extra>'},
       {name:'Perfect Calibration (1.0)',
        x:[1,maxBand],y:[1,1],mode:'lines',
        line:{color:'#868e96',width:1.5,dash:'dot'},hoverinfo:'skip'},
@@ -476,6 +662,43 @@ function renderLift(){
       title:{text:'Actual / Expected (A/E) Ratio by Risk Band',font:{size:14}},
       xaxis:{title:'Risk Band  (1 = lowest predicted risk → N = highest)',dtick:1},
       yaxis:{title:'A/E Ratio  (Actual PP ÷ Predicted PP)'},
+      yaxis2:expAxis(),
+    });
+  } else {
+    // Rescaled: normalise all values by the exposure-weighted mean champion predicted PP.
+    // Champion predicted line crosses 1.0 at the median band; all lines express
+    // "multiples of average champion rate" — useful for comparing absolute scale.
+    const champTotalExp=champ.reduce((s,d)=>s+d.exposure,0);
+    const champMeanPred=champTotalExp>0
+      ? champ.reduce((s,d)=>s+d.predicted_pp*d.exposure,0)/champTotalExp : 1.0;
+    const sc=v=>v/Math.max(champMeanPred,1e-9);
+    traces=[
+      expBarTrace(chall, xField),
+      {name:'Champion — Predicted',
+       x:champ.map(d=>d[xField]),y:champ.map(d=>sc(d.predicted_pp)),
+       mode:'lines+markers',line:{color:CHAMP_COLOR,width:2},marker:{size:6},
+       hovertemplate:'Band %{x}<br>Rel. PP: %{y:.3f}× avg<extra>Champion Predicted</extra>'},
+      {name:'Champion — Actual',
+       x:champ.map(d=>d[xField]),y:champ.map(d=>sc(d.actual_pp)),
+       mode:'lines+markers',line:{color:CHAMP_COLOR,width:2,dash:'dash'},marker:{size:6,symbol:'circle-open'},
+       hovertemplate:'Band %{x}<br>Rel. PP: %{y:.3f}× avg<extra>Champion Actual</extra>'},
+      {name:'Challenger — Predicted',
+       x:chall.map(d=>d[xField]),y:chall.map(d=>sc(d.predicted_pp)),
+       mode:'lines+markers',line:{color:CHALL_COLOR,width:2},marker:{size:6},
+       hovertemplate:'Band %{x}<br>Rel. PP: %{y:.3f}× avg<extra>Challenger Predicted</extra>'},
+      {name:'Challenger — Actual',
+       x:chall.map(d=>d[xField]),y:chall.map(d=>sc(d.actual_pp)),
+       mode:'lines+markers',line:{color:CHALL_COLOR,width:2,dash:'dash'},marker:{size:6,symbol:'circle-open'},
+       hovertemplate:'Band %{x}<br>Rel. PP: %{y:.3f}× avg<extra>Challenger Actual</extra>'},
+      {name:'Champion mean (1.0)',
+       x:[1,champ.length],y:[1,1],mode:'lines',
+       line:{color:'#868e96',width:1.5,dash:'dot'},hoverinfo:'skip'},
+    ];
+    layout=mkLayout({
+      title:{text:'Lift Curves — Rescaled to Champion Mean PP (1.0 = champion average)',font:{size:14}},
+      xaxis:{title:'Risk Band  (1 = lowest predicted risk → N = highest)',dtick:1},
+      yaxis:{title:'PP Relative to Champion Mean  (×)'},
+      yaxis2:expAxis(),
     });
   }
   Plotly.react('lift-chart',traces,layout,CFG);
@@ -484,29 +707,62 @@ function renderLift(){
 /* ── Double lift ─────────────────────────────────────────────────────── */
 function renderDoubleLift(){
   const n=document.getElementById('dl-bands').value;
-  const bands=DL[n]||[];
-  const traces=[
-    {name:'Actual',
-     x:bands.map(d=>d.ratio_mean),y:bands.map(d=>d.actual_pp),
-     mode:'lines+markers',line:{color:ACTUAL_COLOR,width:2.5,dash:'dash'},
-     marker:{size:8,symbol:'diamond'},
-     customdata:bands.map(d=>[d.ratio_min,d.ratio_max,d.n_policies,d.exposure]),
-     hovertemplate:'Ratio %{x:.3f}×<br>Actual PP: £%{y:,.2f}<br>Ratio range: %{customdata[0]:.3f}× – %{customdata[1]:.3f}×<br>Policies: %{customdata[2]:.0f}<br>Exposure: %{customdata[3]:.1f}<extra>Actual</extra>'},
-    {name:'Champion Predicted',
-     x:bands.map(d=>d.ratio_mean),y:bands.map(d=>d.champion_pp),
-     mode:'lines+markers',line:{color:CHAMP_COLOR,width:2},marker:{size:6},
-     customdata:bands.map(d=>[d.ratio_min,d.ratio_max,d.n_policies]),
-     hovertemplate:'Ratio %{x:.3f}×<br>Champion PP: £%{y:,.2f}<br>Ratio range: %{customdata[0]:.3f}× – %{customdata[1]:.3f}×<br>Policies: %{customdata[2]:.0f}<extra>Champion</extra>'},
-    {name:'Challenger Predicted',
-     x:bands.map(d=>d.ratio_mean),y:bands.map(d=>d.challenger_pp),
-     mode:'lines+markers',line:{color:CHALL_COLOR,width:2},marker:{size:6},
-     customdata:bands.map(d=>[d.ratio_min,d.ratio_max,d.n_policies]),
-     hovertemplate:'Ratio %{x:.3f}×<br>Challenger PP: £%{y:,.2f}<br>Ratio range: %{customdata[0]:.3f}× – %{customdata[1]:.3f}×<br>Policies: %{customdata[2]:.0f}<extra>Challenger</extra>'},
-  ];
+  const dlMode=document.querySelector('input[name="dl-mode"]:checked').value;
+  const rescale=document.getElementById('dl-rescale').checked;
+  const bands=(DL[dlMode]||DL.equal_exposure)[n]||[];
+  const isEW=(dlMode==='equal_width');
+  const xField='x';
+  const xTitle=isEW?'Challenger / Champion Predicted PP Ratio':'Band  (1 = challenger predicts lowest relative to champion)';
+
+  let traces,yTitle;
+  if(!rescale){
+    yTitle='Pure Premium (£)';
+    traces=[
+      expBarTrace(bands, xField),
+      {name:'Actual',
+       x:bands.map(d=>d[xField]),y:bands.map(d=>d.actual_pp),
+       mode:'lines+markers',line:{color:ACTUAL_COLOR,width:2.5,dash:'dash'},
+       marker:{size:8,symbol:'diamond'},
+       customdata:bands.map(d=>[d.ratio_min,d.ratio_max,d.n_policies,d.exposure]),
+       hovertemplate:(isEW?'Ratio %{x:.3f}×':'Band %{x}')+'<br>Actual PP: £%{y:,.2f}<br>Policies: %{customdata[2]:.0f}<extra>Actual</extra>'},
+      {name:'Champion Predicted',
+       x:bands.map(d=>d[xField]),y:bands.map(d=>d.champion_pp),
+       mode:'lines+markers',line:{color:CHAMP_COLOR,width:2},marker:{size:6},
+       hovertemplate:(isEW?'Ratio %{x:.3f}×':'Band %{x}')+'<br>Champion PP: £%{y:,.2f}<extra>Champion</extra>'},
+      {name:'Challenger Predicted',
+       x:bands.map(d=>d[xField]),y:bands.map(d=>d.challenger_pp),
+       mode:'lines+markers',line:{color:CHALL_COLOR,width:2},marker:{size:6},
+       hovertemplate:(isEW?'Ratio %{x:.3f}×':'Band %{x}')+'<br>Challenger PP: £%{y:,.2f}<extra>Challenger</extra>'},
+    ];
+  } else {
+    // Rescaled: per-band divide by champion_pp → champion = 1.0 flat line.
+    // Challenger shows challenger/champion ratio; actual shows actual/champion.
+    yTitle='Relative to Champion Predicted  (1.0 = champion level)';
+    const nBands=bands.length;
+    traces=[
+      expBarTrace(bands, xField),
+      {name:'Actual ÷ Champion',
+       x:bands.map(d=>d[xField]),y:bands.map(d=>d.actual_pp/Math.max(d.champion_pp,1e-9)),
+       mode:'lines+markers',line:{color:ACTUAL_COLOR,width:2.5,dash:'dash'},
+       marker:{size:8,symbol:'diamond'},
+       customdata:bands.map(d=>[d.actual_pp,d.champion_pp,d.n_policies]),
+       hovertemplate:(isEW?'Ratio %{x:.3f}×':'Band %{x}')+'<br>Actual/Champ: %{y:.3f}×<br>Actual PP: £%{customdata[0]:,.2f}<extra>Actual</extra>'},
+      {name:'Champion (1.0)',
+       x:bands.map(d=>d[xField]),y:bands.map(()=>1.0),
+       mode:'lines',line:{color:CHAMP_COLOR,width:2,dash:'dot'},
+       hoverinfo:'skip'},
+      {name:'Challenger ÷ Champion',
+       x:bands.map(d=>d[xField]),y:bands.map(d=>d.challenger_pp/Math.max(d.champion_pp,1e-9)),
+       mode:'lines+markers',line:{color:CHALL_COLOR,width:2},marker:{size:6},
+       customdata:bands.map(d=>[d.challenger_pp,d.champion_pp]),
+       hovertemplate:(isEW?'Ratio %{x:.3f}×':'Band %{x}')+'<br>Chall/Champ: %{y:.3f}×<br>Challenger PP: £%{customdata[0]:,.2f}<extra>Challenger</extra>'},
+    ];
+  }
   Plotly.react('double-lift-chart',traces,mkLayout({
     title:{text:'Double Lift Curve  (bands sorted by Challenger ÷ Champion ratio)',font:{size:14}},
-    xaxis:{title:'Mean Challenger / Champion Predicted PP Ratio per Band'},
-    yaxis:{title:'Pure Premium (£)'},
+    xaxis:{title:xTitle},
+    yaxis:{title:yTitle},
+    yaxis2:expAxis(),
   }),CFG);
 }
 
@@ -534,35 +790,97 @@ function renderGini(){
 
 /* ── Prediction distribution ─────────────────────────────────────────── */
 function renderHist(){
-  const c=HIST.champion,h=HIST.challenger;
-  const traces=[
-    {name:'Champion',x:c.x,y:c.y,type:'bar',
-     marker:{color:CHAMP_COLOR,opacity:0.55},
-     hovertemplate:'PP: £%{x:,.2f}<br>Exposure: %{y:,.1f}<extra>Champion</extra>'},
-    {name:'Challenger',x:h.x,y:h.y,type:'bar',
-     marker:{color:CHALL_COLOR,opacity:0.55},
-     hovertemplate:'PP: £%{x:,.2f}<br>Exposure: %{y:,.1f}<extra>Challenger</extra>'},
-  ];
-  Plotly.react('hist-chart',traces,mkLayout({
-    barmode:'overlay',
-    title:{text:'Predicted Pure Premium Distribution  (exposure-weighted)',font:{size:14}},
-    xaxis:{title:'Predicted Pure Premium (£)'},
-    yaxis:{title:'Total Exposure'},
-  }),CFG);
+  const view=document.querySelector('input[name="hist-view"]:checked').value;
+  if(view==='dist'){
+    const c=HIST.champion,h=HIST.challenger;
+    const traces=[
+      {name:'Champion',x:c.x,y:c.y,type:'bar',
+       marker:{color:CHAMP_COLOR,opacity:0.55},
+       hovertemplate:'PP: £%{x:,.2f}<br>Exposure: %{y:,.1f}<extra>Champion</extra>'},
+      {name:'Challenger',x:h.x,y:h.y,type:'bar',
+       marker:{color:CHALL_COLOR,opacity:0.55},
+       hovertemplate:'PP: £%{x:,.2f}<br>Exposure: %{y:,.1f}<extra>Challenger</extra>'},
+    ];
+    Plotly.react('hist-chart',traces,mkLayout({
+      barmode:'overlay',
+      title:{text:'Predicted Pure Premium Distribution  (exposure-weighted)',font:{size:14}},
+      xaxis:{title:'Predicted Pure Premium (£)'},
+      yaxis:{title:'Total Exposure'},
+    }),CFG);
+  } else if(view==='pctdiff'){
+    const d=DIFF.pct_hist;
+    const traces=[{
+      name:'% Difference',x:d.x,y:d.y,type:'bar',
+      marker:{color:'#9467bd',opacity:0.7},
+      hovertemplate:'%{x:.1f}%<br>Exposure: %{y:,.1f}<extra>% Diff</extra>',
+    }];
+    Plotly.react('hist-chart',traces,mkLayout({
+      title:{text:'Distribution of Predicted PP Differences  (Challenger − Champion) / Champion',font:{size:14}},
+      xaxis:{title:'% Difference  (positive = challenger predicts higher)'},
+      yaxis:{title:'Total Exposure'},
+      shapes:[{type:'line',x0:0,x1:0,y0:0,y1:1,yref:'paper',
+               line:{color:'#868e96',width:1.5,dash:'dot'}}],
+    }),CFG);
+  } else {
+    const pctKey=document.querySelector('input[name="scatter-pct"]:checked').value;
+    const s=DIFF.scatter_samples[pctKey]||DIFF.scatter;
+    const axMax=(DIFF.scatter_p99||Math.max(...s.x,...s.y))*1.02;
+    const traces=[
+      {name:'Policy (n='+s.n+')',x:s.x,y:s.y,mode:'markers',type:'scatter',
+       marker:{color:CHALL_COLOR,opacity:0.25,size:3},
+       hovertemplate:'Champion PP: £%{x:,.2f}<br>Challenger PP: £%{y:,.2f}<extra></extra>'},
+      {name:'Equal prediction',x:[0,axMax],y:[0,axMax],mode:'lines',
+       line:{color:'#868e96',width:1.5,dash:'dot'},hoverinfo:'skip'},
+    ];
+    Plotly.react('hist-chart',traces,mkLayout({
+      title:{text:'Challenger vs Champion Predicted Pure Premium  (per-policy)',font:{size:14}},
+      xaxis:{title:'Champion Predicted PP (£)',range:[0,axMax]},
+      yaxis:{title:'Challenger Predicted PP (£)',range:[0,axMax]},
+    }),CFG);
+  }
 }
 
 /* ── Champion history ────────────────────────────────────────────────── */
 function renderHistory(){
-  const traces=[{
-    name:'Champion Gini',
-    x:HISTORY.map(d=>d[0]),y:HISTORY.map(d=>d[1]),
-    mode:'lines+markers',line:{color:CHAMP_COLOR,width:2},marker:{size:8},
-    hovertemplate:'Step %{x}<br>Gini: %{y:.4f}<extra></extra>',
-  }];
+  const promoted=HISTORY.filter(d=>d.promoted);
+  const failed=HISTORY.filter(d=>!d.promoted);
+
+  // Y-axis: skip step 1 (baseline), floor at 90% of lowest promoted non-baseline
+  const nonBase=HISTORY.slice(1);
+  if(nonBase.length===0){
+    Plotly.react('history-chart',[],mkLayout({title:{text:'Champion Gini Progression'}}),CFG);
+    return;
+  }
+  const allG=nonBase.map(d=>d.gini);
+  const promG=promoted.filter(d=>d.step>1).map(d=>d.gini);
+  const lowestProm=promG.length>0?Math.min(...promG):Math.min(...allG);
+  const yFloor=lowestProm*0.9;
+  const yMin=Math.max(Math.min(...allG),yFloor);
+  const yMax=Math.max(...allG,lowestProm)+(Math.max(...allG)-yMin)*0.12;
+
+  const traces=[
+    {name:'Promoted champion',
+     x:promoted.map(d=>d.step),y:promoted.map(d=>d.gini),
+     mode:'lines+markers+text',
+     text:promoted.map(d=>d.label),
+     textposition:'top center',
+     textfont:{size:9,color:PROMO_COLOR},
+     line:{color:PROMO_COLOR,width:2.5},
+     marker:{size:9,color:PROMO_COLOR},
+     hovertemplate:'Step %{x}<br>Gini: %{y:.4f}<br>%{text}<extra>Promoted</extra>'},
+    {name:'Not promoted',
+     x:failed.map(d=>d.step),y:failed.map(d=>d.gini),
+     mode:'markers+text',
+     text:failed.map(d=>d.label),
+     textposition:'top center',
+     textfont:{size:9,color:FAILED_COLOR},
+     marker:{size:8,color:FAILED_COLOR,symbol:'circle-open',opacity:0.8},
+     hovertemplate:'Step %{x}<br>Gini: %{y:.4f}<br>%{text}<extra>Not promoted</extra>'},
+  ];
   Plotly.react('history-chart',traces,mkLayout({
     title:{text:'Champion Gini Progression on Validation Split',font:{size:14}},
-    xaxis:{title:'Promotion Step',dtick:1},
-    yaxis:{title:'Validation Gini  (higher = better discrimination)'},
+    xaxis:{title:'Experiment Step',dtick:1},
+    yaxis:{title:'Validation Gini  (higher = better discrimination)',range:[yMin,yMax]},
   }),CFG);
 }
 
@@ -570,6 +888,10 @@ function renderHistory(){
 document.getElementById('lift-bands').addEventListener('change',renderLift);
 document.querySelectorAll('input[name="lift-mode"]').forEach(r=>r.addEventListener('change',renderLift));
 document.getElementById('dl-bands').addEventListener('change',renderDoubleLift);
+document.querySelectorAll('input[name="dl-mode"]').forEach(r=>r.addEventListener('change',renderDoubleLift));
+document.getElementById('dl-rescale').addEventListener('change',renderDoubleLift);
+document.querySelectorAll('input[name="hist-view"]').forEach(r=>r.addEventListener('change',renderHist));
+document.querySelectorAll('input[name="scatter-pct"]').forEach(r=>r.addEventListener('change',renderHist));
 renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
 """
 
@@ -583,7 +905,7 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
   <style>
     *,*::before,*::after{{box-sizing:border-box}}
     body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;margin:0;background:#f8f9fa;color:#212529;line-height:1.5}}
-    .page{{max-width:1200px;margin:0 auto;padding:28px 32px}}
+    .page{{max-width:1280px;margin:0 auto;padding:28px 32px}}
     h1{{font-size:22px;font-weight:700;margin:0 0 4px}}
     h2{{font-size:16px;font-weight:600;margin:28px 0 10px;color:#2c3e50;border-bottom:1px solid #dee2e6;padding-bottom:6px}}
     h3{{font-size:13px;font-weight:600;margin:0 0 8px;color:#495057}}
@@ -598,10 +920,13 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
     .kpi .sub{{font-size:11px;color:#6c757d;margin-top:3px}}
     .two-col{{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:8px}}
     .card{{background:#fff;border:1px solid #dee2e6;border-radius:8px;padding:16px}}
+    .discussion{{font-size:13px;color:#495057;margin:0 0 12px;line-height:1.6;background:#f8f9fa;border-radius:4px;padding:10px 14px;border-left:3px solid #6c9bc5}}
+    .discussion strong{{color:#212529}}
     table{{border-collapse:collapse;width:100%;font-size:13px}}
     th,td{{border:1px solid #dee2e6;padding:6px 10px;text-align:left}}
     th{{background:#f3f5f7;font-weight:600}}
     tr:nth-child(even) td{{background:#fafbfc}}
+    .pass{{color:#0a5c2e;font-weight:600}}.fail{{color:#7a1a1a;font-weight:600}}
     .section{{margin-bottom:32px}}
     .controls{{display:flex;align-items:center;gap:18px;margin-bottom:10px;flex-wrap:wrap}}
     .controls label{{font-size:13px;color:#495057;display:flex;align-items:center;gap:6px;cursor:pointer}}
@@ -650,12 +975,20 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
   </div>
 
   <div class="section">
+    <h2>Promotion Gates</h2>
+    <p class="chart-note">All gates must pass for promotion. Challenger values are computed on the search-validation split.</p>
+    <div class="card" style="padding:12px">{gate_html}</div>
+  </div>
+
+  <div class="section">
     <h2>Statistical Summary</h2>
     <div class="card" style="padding:12px">{summary_html}</div>
   </div>
 
   <div class="section">
     <h2>Experiment Details</h2>
+    {native_calib_html}
+    {diff_discussion_html}
     <div class="two-col">
       <div class="card">{champ_details_html}</div>
       <div class="card">{chall_details_html}</div>
@@ -672,14 +1005,15 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
     <h2>Lift Curves — Actual vs Predicted by Risk Band</h2>
     <p class="chart-note">
       Policies sorted ascending by each model's own predicted pure premium (Band 1 = lowest risk,
-      Band N = highest risk). Bands contain equal total exposure. Solid lines = predicted PP;
-      dashed lines = actual PP observed in that band. A well-discriminating model shows a steep,
-      monotone rise with predicted and actual tracking closely.
+      Band N = highest). Bands contain equal total exposure; grey bars show exposure per band (right axis).
+      Solid lines = predicted PP; dashed = actual PP. A well-discriminating model shows a steep monotone
+      rise with predicted and actual tracking closely.
     </p>
     <div class="controls">
       <label>Bands: <select id="lift-bands">{band_options}</select></label>
       <label><input type="radio" name="lift-mode" value="absolute" checked> Absolute PP (£)</label>
       <label><input type="radio" name="lift-mode" value="ae"> A/E Ratio</label>
+      <label><input type="radio" name="lift-mode" value="rescaled"> Rescaled to champion mean</label>
     </div>
     <div class="chart-wrap"><div id="lift-chart" style="height:440px"></div></div>
   </div>
@@ -688,14 +1022,17 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
   <div class="section">
     <h2>Double Lift Curve</h2>
     <p class="chart-note">
-      Policies sorted ascending by Challenger ÷ Champion predicted PP ratio
-      (Band 1 = bands where challenger predicts relatively lower than champion; Band N = higher).
-      Bands contain equal total exposure. X-axis shows the mean ratio within each band.
-      The chart reveals where the two models disagree and whether the challenger's higher-risk
-      bands actually observe more claims.
+      Policies sorted ascending by Challenger ÷ Champion predicted PP ratio.
+      Grey bars show exposure per band (right axis).
+      <strong>Equal exposure:</strong> N bands of equal total exposure; x-axis = band ordinal.
+      <strong>Equal width:</strong> N bands of equal ratio-interval width (2nd–98th percentile range);
+      x-axis = the actual ratio midpoint — spacing reflects where the models truly disagree.
     </p>
     <div class="controls">
       <label>Bands: <select id="dl-bands">{band_options}</select></label>
+      <label><input type="radio" name="dl-mode" value="equal_exposure" checked> Equal exposure</label>
+      <label><input type="radio" name="dl-mode" value="equal_width"> Equal width</label>
+      <label><input type="checkbox" id="dl-rescale"> Rescale to champion (champion&nbsp;=&nbsp;1.0)</label>
     </div>
     <div class="chart-wrap"><div id="double-lift-chart" style="height:440px"></div></div>
   </div>
@@ -704,11 +1041,9 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
   <div class="section">
     <h2>Gini Lorenz Curves</h2>
     <p class="chart-note">
-      Policies ranked by predicted pure premium <strong>ascending</strong> (lowest risk first —
-      matching the evaluation metric convention). X = cumulative exposure share; Y = cumulative
-      actual claim cost share. A well-discriminating model curves <em>below</em> the diagonal
-      (low-risk policies accumulate little actual cost) → Gini &gt; 0. The diagonal = uncorrelated
-      (random) predictor. Gini values match the reported <code>gini_weighted</code> metric exactly.
+      Policies ranked by predicted pure premium <strong>ascending</strong>. X = cumulative exposure share;
+      Y = cumulative actual claim cost share. A well-discriminating model curves <em>below</em> the diagonal.
+      Gini values match the reported <code>gini_weighted</code> metric exactly.
     </p>
     <div class="chart-wrap"><div id="gini-chart" style="height:460px"></div></div>
   </div>
@@ -717,18 +1052,36 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
   <div class="section">
     <h2>Predicted Pure Premium Distribution</h2>
     <p class="chart-note">
-      Exposure-weighted histogram of predicted pure premiums (1st–99th percentile shown).
-      A wider spread indicates better discrimination; a spike at the grand mean indicates
-      the model is producing near-constant predictions.
+      Three views of the predicted pure premium spread.
+      <strong>Distribution:</strong> exposure-weighted histogram per model (1st–99th pct).
+      <strong>% Diff:</strong> exposure-weighted histogram of (Challenger − Champion) / Champion per policy.
+      <strong>Scatter:</strong> champion vs challenger PP per policy; axes capped at 99th percentile.
+      Use the sample size selector to control density.
     </p>
-    <div class="chart-wrap"><div id="hist-chart" style="height:360px"></div></div>
+    <div class="controls">
+      <label><input type="radio" name="hist-view" value="dist" checked> Distribution</label>
+      <label><input type="radio" name="hist-view" value="pctdiff"> % Diff</label>
+      <label><input type="radio" name="hist-view" value="scatter"> Scatter</label>
+      <span style="color:#adb5bd;margin:0 4px">|</span>
+      <label><input type="radio" name="scatter-pct" value="1pct"> 1%</label>
+      <label><input type="radio" name="scatter-pct" value="5pct"> 5%</label>
+      <label><input type="radio" name="scatter-pct" value="25pct" checked> 25%</label>
+      <label><input type="radio" name="scatter-pct" value="100pct"> 100%</label>
+    </div>
+    <div class="chart-wrap"><div id="hist-chart" style="height:380px"></div></div>
   </div>
 
   <!-- ── CHAMPION HISTORY ── -->
   <div class="section">
     <h2>Champion Gini Progression</h2>
-    <p class="chart-note">Validation Gini for each successive champion in this run.</p>
-    <div class="chart-wrap"><div id="history-chart" style="height:320px"></div></div>
+    <p class="chart-note">
+      Validation Gini for every experiment in this run.
+      <span style="color:#0a5c2e;font-weight:600">Green filled = promoted</span>;
+      <span style="color:#d62728;font-weight:600">red open = not promoted</span>.
+      The connected line traces only the champion lineage. Y-axis excludes the global-mean baseline
+      to show resolution on later experiments; lower bound is at most 10% relative below the lowest promoted Gini.
+    </p>
+    <div class="chart-wrap"><div id="history-chart" style="height:360px"></div></div>
   </div>
 
 </div>
@@ -741,8 +1094,192 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
 
 
 # ---------------------------------------------------------------------------
-# Table helpers (unchanged)
+# Table helpers
 # ---------------------------------------------------------------------------
+
+def _gate_table(
+    decision: dict[str, Any],
+    comparison_summary: dict[str, Any],
+    bootstrap_summary: dict[str, Any],
+    challenger_metrics: dict[str, Any],
+) -> str:
+    checks = decision.get("checks", {})
+    thresholds = decision.get("thresholds", {})
+
+    mean_lift = float(comparison_summary.get("mean_lift") or 0)
+    win_rate = float(comparison_summary.get("challenger_win_rate") or 0)
+    champ_score = float(comparison_summary.get("champion_mean_score") or 1e-9)
+    rel_lift_pct = mean_lift / max(abs(champ_score), 1e-9) * 100.0
+    bs_lower = float(bootstrap_summary.get("interval_lower") or 0)
+    bs_lower_rel = bs_lower / max(abs(champ_score), 1e-9) * 100.0
+    pred_actual = float(challenger_metrics.get("predicted_to_actual_ratio") or 1.0)
+    drift_pct = abs(pred_actual - 1.0) * 100.0
+    max_drift_pct = float(thresholds.get("max_predicted_to_actual_drift", 0.1)) * 100.0
+    min_rel_pct = float(thresholds.get("min_relative_lift", 0.005)) * 100.0
+    min_win = float(thresholds.get("minimum_win_rate", 0.6)) * 100.0
+    bs_lb = float(thresholds.get("bootstrap_lower_bound", 0.0))
+    bs_lb_rel = float(thresholds.get("bootstrap_lower_bound_relative", 0.0)) * 100.0
+
+    def _row(label: str, threshold: str, challenger_val: str, passed: bool | None) -> str:
+        if passed is None:
+            icon, cls = "—", ""
+        elif passed:
+            icon, cls = "✓", "pass"
+        else:
+            icon, cls = "✗", "fail"
+        return (
+            f"<tr><td>{escape(label)}</td>"
+            f"<td>{escape(threshold)}</td>"
+            f"<td>{escape(challenger_val)}</td>"
+            f"<td class='{cls}'>{icon}</td></tr>"
+        )
+
+    rows = [
+        "<table>",
+        "<tr><th>Gate</th><th>Threshold</th><th>Challenger value</th><th>Result</th></tr>",
+        _row("Win rate (30 resamples)", f"≥ {min_win:.0f}%", f"{win_rate*100:.1f}%",
+             checks.get("challenger_win_rate")),
+        _row("Mean lift > 0", "> 0.0000", f"{mean_lift:+.5f}",
+             checks.get("mean_lift_positive")),
+        _row("Absolute lift", f"≥ {thresholds.get('min_absolute_lift', 0.0):.4f}",
+             f"{mean_lift:+.5f}", checks.get("absolute_lift")),
+        _row("Relative lift", f"≥ {min_rel_pct:.3f}%", f"{rel_lift_pct:+.4f}%",
+             checks.get("relative_lift")),
+        _row("Bootstrap lower bound (absolute)", f"≥ {bs_lb:.4f}",
+             f"{bs_lower:+.5f}", checks.get("bootstrap_lower_bound")),
+        _row("Bootstrap lower bound (relative)", f"≥ {bs_lb_rel:.3f}%",
+             f"{bs_lower_rel:+.4f}%", checks.get("bootstrap_lower_bound_relative")),
+        _row("Calibration (pred/actual drift)", f"≤ ±{max_drift_pct:.0f}%",
+             f"{pred_actual:.4f}  ({drift_pct:.1f}% drift)", checks.get("calibration_ok")),
+        _row("Diagnostics present", "required",
+             "present" if checks.get("diagnostics_present") else "absent",
+             checks.get("diagnostics_present")),
+        "</table>",
+    ]
+    return "\n".join(rows)
+
+
+def _experiment_diff_discussion(
+    champion_details: dict[str, Any],
+    challenger_details: dict[str, Any],
+) -> str:
+    """Generate a human-readable paragraph comparing champion and challenger."""
+    champ_name = champion_details.get("experiment_name") or "champion"
+    chall_name = challenger_details.get("experiment_name") or "challenger"
+    champ_family = champion_details.get("model_family") or "?"
+    chall_family = challenger_details.get("model_family") or "?"
+    champ_model = champion_details.get("model") or {}
+    chall_model = challenger_details.get("model") or {}
+    champ_target = champion_details.get("target_strategy") or ""
+    chall_target = challenger_details.get("target_strategy") or ""
+
+    parts: list[str] = []
+
+    # Model family
+    if champ_family == chall_family:
+        parts.append(f"Both experiments use <strong>{escape(champ_family)}</strong>.")
+    else:
+        parts.append(
+            f"Champion uses <strong>{escape(champ_family)}</strong>; "
+            f"challenger uses <strong>{escape(chall_family)}</strong>."
+        )
+
+    # Target strategy
+    if champ_target and chall_target:
+        if champ_target == chall_target:
+            parts.append(f"Target strategy: <strong>{escape(champ_target)}</strong> (unchanged).")
+        else:
+            parts.append(
+                f"Target strategy changed from <strong>{escape(champ_target)}</strong> to "
+                f"<strong>{escape(chall_target)}</strong>."
+            )
+
+    # Regularisation
+    try:
+        ca = float(champ_model.get("alpha") or 0.1)
+        ha = float(chall_model.get("alpha") or 0.1)
+        if abs(ca - ha) > 1e-9:
+            parts.append(f"Regularisation α: {ca} → {ha}.")
+    except (TypeError, ValueError):
+        pass
+
+    # Feature exclusions
+    champ_excl = set(champ_model.get("feature_exclusions") or [])
+    chall_excl = set(chall_model.get("feature_exclusions") or [])
+    added_excl = chall_excl - champ_excl
+    removed_excl = champ_excl - chall_excl
+    if added_excl:
+        parts.append(f"Features excluded in challenger: {escape(', '.join(sorted(added_excl)))}.")
+    if removed_excl:
+        parts.append(f"Features re-included in challenger: {escape(', '.join(sorted(removed_excl)))}.")
+
+    # Model script
+    champ_script = (champ_model.get("script_path") or "").rsplit("/", 1)[-1]
+    chall_script = (chall_model.get("script_path") or "").rsplit("/", 1)[-1]
+    if chall_script and champ_script != chall_script:
+        parts.append(f"New model script: <code>{escape(chall_script)}</code>.")
+
+    if not parts:
+        parts.append("No structural differences detected; challenger is a re-run of the champion configuration.")
+
+    # Proposal narrative (when available)
+    change_summary = challenger_details.get("change_summary") or ""
+    expected_benefit = challenger_details.get("expected_benefit") or ""
+    key_risk = challenger_details.get("key_risk") or ""
+    rationale = challenger_details.get("rationale") or ""
+
+    narrative_parts: list[str] = []
+    if change_summary:
+        narrative_parts.append(f"<strong>Change:</strong> {escape(change_summary)}")
+    if expected_benefit:
+        narrative_parts.append(f"<strong>Expected benefit:</strong> {escape(expected_benefit)}")
+    if key_risk:
+        narrative_parts.append(f"<strong>Key risk:</strong> {escape(key_risk)}")
+
+    html = f'<div class="discussion"><strong>{escape(champ_name)}</strong> vs <strong>{escape(chall_name)}</strong> — '
+    html += " ".join(parts)
+    if rationale:
+        html += f"<br><em>{escape(rationale)}</em>"
+    if narrative_parts:
+        html += "<br>" + " &nbsp;·&nbsp; ".join(narrative_parts)
+    html += "</div>"
+    return html
+
+
+def _native_calibration_warning(challenger_details: dict[str, Any]) -> str:
+    """
+    Show a soft warning banner if the challenger's model notes record a
+    native_pred_to_actual_ratio (i.e. ratio before calibration was applied).
+    This preserves observability of the underlying model bias even after
+    the calibration scalar has been applied and the gate passes.
+    """
+    model = challenger_details.get("model") or {}
+    # model notes are stored flat in the snapshot under [model] → script hyperparams
+    native_ratio = model.get("native_pred_to_actual_ratio")
+    calib_factor = model.get("calib_factor")
+    if native_ratio is None:
+        return ""
+    try:
+        ratio_f = float(native_ratio)
+        drift_pct = abs(ratio_f - 1.0) * 100.0
+        if drift_pct < 5.0:
+            return ""  # negligible — no need to surface
+        color = "#7a1a1a" if drift_pct > 20.0 else "#5a4500"
+        bg = "#fce8e8" if drift_pct > 20.0 else "#fffde7"
+        calib_str = f"  Correction applied: ×{float(calib_factor):.4f}." if calib_factor else ""
+        return (
+            f'<div style="padding:8px 14px;border-radius:6px;border-left:4px solid {color};'
+            f'background:{bg};color:{color};font-size:13px;margin-bottom:12px">'
+            f"<strong>Native calibration note:</strong> Before the training-total calibration "
+            f"scalar was applied, the challenger's predicted/actual ratio was "
+            f"<strong>{ratio_f:.4f}</strong> ({drift_pct:.1f}% drift).{escape(calib_str)} "
+            f"This indicates a structural bias in the model's link/regularisation; "
+            f"the promoted predictions have been rescaled but the underlying model "
+            f"should be reviewed.</div>"
+        )
+    except (TypeError, ValueError):
+        return ""
+
 
 def _summary_table(comparison_summary: dict[str, Any], bootstrap_summary: dict[str, Any]) -> str:
     return _dict_table({
@@ -757,8 +1294,13 @@ def _summary_table(comparison_summary: dict[str, Any], bootstrap_summary: dict[s
     })
 
 
-def _details_table(title: str, details: dict[str, Any]) -> str:
-    return f"<h3>{escape(title)}</h3>{_dict_table(details)}"
+def _details_card(title: str, details: dict[str, Any]) -> str:
+    display = {
+        k: v for k, v in details.items()
+        if k not in ("rationale", "change_summary", "expected_benefit", "key_risk")
+        and v is not None
+    }
+    return f"<h3>{escape(title)}</h3>{_dict_table(display)}"
 
 
 def _metrics_table(champion: dict[str, Any], challenger: dict[str, Any]) -> str:

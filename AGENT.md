@@ -37,23 +37,47 @@ This applies to every cycle, including the very first proposal of a fresh run.
 
 ---
 
+## Quick-start — how to interpret short user instructions
+
+Your default track is **`claude`**. Your default cycle count is **3**. Omit `--run-id` and the framework picks up the latest run (or creates a timestamped one).
+
+| User says | What to do |
+|-----------|-----------|
+| "Go!" / "Start" | Bootstrap, read handoff, run 3 cycles |
+| "Run X experiments" | Bootstrap, read handoff, run X cycles |
+| "Continue" / "Keep going" | Read handoff, run 3 cycles (skip bootstrap) |
+| "Continue and run Y" | Read handoff, run Y cycles (skip bootstrap) |
+| "Bootstrap only" | Bootstrap and read handoff, then stop |
+
+**Bootstrap** — idempotent, safe to run at the start of every fresh conversation:
+```bash
+autoresearch --track claude bootstrap-track
+```
+
+**Read handoff** — always do this after bootstrap or at the start of a continuing session:
+```bash
+# The handoff path is printed by bootstrap — it ends in handoffs/latest_handoff.md
+# Read it to understand current champion state before proposing anything.
+```
+
+**Run N cycles**:
+```bash
+autoresearch --track claude run-cycles <N>
+```
+
+If the user supplies a specific `--run-id` (e.g. `CC20260526_01`), pass it to every command. Otherwise omit it.
+
+---
+
 ## Session start — always do these first
 
 ```bash
-# 1. Remind yourself of current state
-autoresearch export-context          # refreshes artifacts/auto_research/context/
-cat artifacts/auto_research/context/latest_context.json | python3 -m json.tool | head -120
-
-# 2. Read this run's research history (starts empty on a fresh run — reason from metrics alone)
-cat artifacts/tracks/<track>/runs/<run-id>/RESEARCH_LOG.md
-
-# 3. Check recent milestone reports if any promotions have happened
-ls artifacts/tracks/<track>/runs/<run-id>/milestone_reports/ 2>/dev/null
-
-# 4. Check current champion
-autoresearch list-champion-history
-autoresearch list-experiments
+autoresearch --track claude bootstrap-track      # idempotent; safe every time
+autoresearch --track claude list-champion-history
+autoresearch --track claude list-experiments
 ```
+
+Then read the handoff file printed by bootstrap and this run's `RESEARCH_LOG.md` before forming any hypothesis.
 
 ---
 
@@ -63,11 +87,13 @@ autoresearch list-experiments
 Read the research log and recent experiment metrics. Ask, in roughly this order:
 - Is there an obvious feature transformation (log, binning, indicator) that the current champion misses?
 - Is there a single interaction (e.g. factor_a × factor_b, factor_c × factor_d) that I have not yet tried?
-- Could a single-feature or few-feature GLM clarify which signal the data actually carries?
+- Could a simple model with few features clarify which signal the data actually carries?
 - Is the current champion's calibration breaking down on a specific segment (by region, age band, vehicle type)?
-- Have I exhausted the cheap interpretable ideas before reaching for higher-capacity models?
+- Have I exhausted the cheap interpretable ideas before reaching for higher-capacity approaches?
 
-Prefer the smallest change that would credibly improve on the current champion. If you have not yet seen what a thoughtful GLM with a few features does, do that before proposing a GBM. If you have not yet looked at calibration residuals, do that before adding more capacity.
+Quick data investigations on the training set can be valuable for forming and sharpening hypotheses before committing to an experiment.
+
+Prefer the smallest change that would credibly improve on the current champion. If you have not yet seen what a simple model with a few features does, do that before reaching for something more complex. If you have not yet looked at calibration residuals, do that before adding more capacity.
 
 Write your hypothesis — and why it is the cheapest next step — at the top of your next research log entry before coding.
 
@@ -77,14 +103,13 @@ Write your hypothesis — and why it is the cheapest next step — at the top of
 Create one proposal JSON and one neighbouring Python script in the proposal
 inbox. The JSON must set `experiment_config.model.script_path` to the script
 filename. Do not rely on pre-existing model implementations in
-`src/autoresearch/models`; if you want a GLM, GBM, or any other approach, write
-that modelling logic into this run's script.
+`src/autoresearch/models`; write the modelling logic into this run's script.
 
 Proposal config shape:
 
 ```toml
 experiment_name = "my_descriptive_name"
-model_family = "scripted_tweedie_glm"  # descriptive label for this script
+model_family = "scripted_model"        # descriptive label for this script
 target_strategy = "direct_pure_premium"
 parent_experiment_id = ""              # fill in after first run
 
@@ -96,8 +121,7 @@ claim_cap_threshold = 100000
 
 [model]
 script_path = "model_my_descriptive_name.py"
-alpha = 1.0
-power = 1.5
+# Any hyperparameters declared here are passed as **hyperparameters to fit_predict
 # Optional: feature subset
 # feature_inclusions = ["feature_a", "feature_b", "feature_c"]
 ```
@@ -142,18 +166,38 @@ Column constants (import from `autoresearch.models.dispatcher`):
 - `CLAIM_EVENTS = "claim_event_count_l"`
 - `RECORD_ID = "record_id"`
 
-If you need a new library (e.g. LightGBM): add it to `pyproject.toml` and run:
+**Calibration — always apply**
+
+Every model script must apply a training-total calibration scalar before
+returning predictions.  This is a single aggregate correction (one degree of
+freedom, no leakage risk) that guarantees the aggregate gate passes and
+preserves visibility of the model's native bias in the comparison report.
+
+```python
+from autoresearch.models.calibration import apply_training_calibration
+
+# pred_train_cost and pred_score_cost must be claim costs (not rates)
+pred_score_cost, calib_factor = apply_training_calibration(
+    pred_score_cost, pred_train_cost, train[CLAIM_COST].values
+)
+notes["native_pred_to_actual_ratio"] = round(1.0 / calib_factor, 4)
+notes["calib_factor"] = round(float(calib_factor), 4)
+```
+
+If you need a new library: add it to `pyproject.toml` and run:
 ```bash
 pip install -e ".[dev]"
 ```
 
 ### Step 3 — Validate your changes
 
-**Always run tests before running an experiment:**
+The experiment runner runs pytest automatically inside `run-latest-proposal-cycle` and fails immediately if any test fails — **you do not need to run pytest manually before calling that command**. Only run it yourself when you have added a new module or test file and want to verify it passes before submitting, or when debugging a test failure:
+
 ```bash
-pytest --tb=short -q
+pytest --tb=short -q   # optional: only when you've added/changed test files
 ```
-The experiment runner will also run pytest automatically and fail immediately if tests don't pass. New model families or feature builders should come with at least a smoke test in `tests/`.
+
+New model families or feature builders should come with at least a smoke test in `tests/`.
 
 ### Step 4 — Run the experiment
 

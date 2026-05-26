@@ -83,6 +83,8 @@ def _flatten_cycle_result(raw: dict[str, Any]) -> dict[str, Any]:
         "experiment_id": inner.get("experiment_id"),
         "comparison_id": inner.get("comparison_id"),
         "decision": inner.get("decision"),
+        "metrics_summary": inner.get("metrics_summary"),
+        "comparison_report": inner.get("comparison_report"),
     }
 
 
