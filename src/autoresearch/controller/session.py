@@ -130,7 +130,6 @@ def run_session_cycle(config: ProjectConfig, session_id: str | None = None) -> d
 
     state["state"] = "running"
     _persist_state(config, state, event_type="running", message="Cycle started.")
-    export_context_bundle(config)
 
     inbox = inbox_status(config)
     queued_before = _queued_count(config)
@@ -165,7 +164,6 @@ def run_session_cycle(config: ProjectConfig, session_id: str | None = None) -> d
         state["state"] = "failed"
         state["latest_error"] = str(exc)
         _persist_state(config, state, event_type="failed", message=str(exc))
-        export_context_bundle(config)
         raise
 
     state["current_cycle"] += 1

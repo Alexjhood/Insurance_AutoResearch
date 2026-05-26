@@ -8,39 +8,28 @@ from autoresearch.config import ProjectConfig
 from autoresearch.controller.proposal_schema import allowed_search_space
 from autoresearch.experiment_registry.registry import (
     get_official_champion,
-    list_champion_history,
     list_comparisons,
     list_experiments,
     list_proposals,
-    list_sessions,
 )
 from autoresearch.utils.io import read_json
-
-
-def _read_research_log_tail(config: ProjectConfig, n_lines: int = 60) -> str | None:
-    """Return the last n_lines of RESEARCH_LOG.md, or None if absent."""
-    log_path = config.research_log_path
-    if not log_path.exists():
-        return None
-    lines = log_path.read_text(encoding="utf-8").splitlines()
-    return "\n".join(lines[-n_lines:])
 
 
 def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
     """Build the bounded context that is safe to provide to the proposer."""
 
     schema_path = config.metadata_dir / "agent_schema.json"
-    capping_path = config.metadata_dir / "capping_diagnostics.json"
     latest_nonpromotion_path = config.handoff_results_dir / "latest_nonpromotion_summary.json"
-    latest_session_path = config.handoff_results_dir / "latest_session_summary.json"
     latest_cycle_path = config.handoff_results_dir / "latest_cycle_result.json"
-    agent_schema = read_json(schema_path) if schema_path.exists() else None
+    raw_schema = read_json(schema_path) if schema_path.exists() else None
     champion = get_official_champion(config.registry_path)
     experiments = list_experiments(config.registry_path)[:10]
     comparisons = list_comparisons(config.registry_path)[:10]
     all_proposals = list_proposals(config.registry_path)
     proposals = all_proposals[:10]
-    history = list_champion_history(config.registry_path)[:10]
+
+    raw_cycle = read_json(latest_cycle_path) if latest_cycle_path.exists() else None
+    latest_cycle_result = _flatten_cycle_result(raw_cycle) if raw_cycle else None
 
     return {
         "project_goal": (
@@ -54,15 +43,10 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
         "recent_comparisons": _compact_comparisons(comparisons),
         "recent_proposals": _compact_proposals(proposals),
         "proposal_count": len(all_proposals),
-        "champion_history": history,
-        "latest_session_summary": read_json(latest_session_path) if latest_session_path.exists() else None,
-        "recent_sessions": list_sessions(config.registry_path)[:5],
-        "latest_cycle_result": read_json(latest_cycle_path) if latest_cycle_path.exists() else None,
+        "latest_cycle_result": latest_cycle_result,
         "latest_nonpromotion_summary": read_json(latest_nonpromotion_path) if latest_nonpromotion_path.exists() else None,
-        "agent_schema": agent_schema,
-        "default_capping_diagnostics": read_json(capping_path) if capping_path.exists() else None,
-        "allowed_search_space": allowed_search_space(config, agent_schema),
-        "research_log_tail": _read_research_log_tail(config),
+        "agent_schema": _compact_agent_schema(raw_schema),
+        "allowed_search_space": allowed_search_space(config, raw_schema),
         "evaluation_rules": {
             "ordinary_train_split": config.ordinary_train_split,
             "ordinary_eval_splits": list(config.ordinary_eval_splits),
@@ -79,6 +63,29 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
     }
 
 
+def _compact_agent_schema(schema: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not schema:
+        return None
+    return {
+        "row_count": schema.get("row_count"),
+        "columns": [
+            {"name": c["name"], "role": c["role"]}
+            for c in schema.get("columns", [])
+        ],
+    }
+
+
+def _flatten_cycle_result(raw: dict[str, Any]) -> dict[str, Any]:
+    inner = raw.get("cycle_result") or {}
+    return {
+        "completed_at": raw.get("completed_at"),
+        "proposal_id": inner.get("proposal_id"),
+        "experiment_id": inner.get("experiment_id"),
+        "comparison_id": inner.get("comparison_id"),
+        "decision": inner.get("decision"),
+    }
+
+
 def _compact_experiments(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     keys = ["experiment_id", "experiment_name", "target_strategy", "model_family", "mean_score", "std_score"]
     return [{key: row.get(key) for key in keys} for row in rows]
@@ -91,4 +98,11 @@ def _compact_comparisons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _compact_proposals(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     keys = ["proposal_id", "status", "experiment_name", "change_summary", "experiment_id", "comparison_id"]
-    return [{key: row.get(key) for key in keys} for row in rows]
+    result = []
+    for row in rows:
+        item = {key: row.get(key) for key in keys}
+        cs = item.get("change_summary") or ""
+        if len(cs) > 200:
+            item["change_summary"] = cs[:200] + "…"
+        result.append(item)
+    return result

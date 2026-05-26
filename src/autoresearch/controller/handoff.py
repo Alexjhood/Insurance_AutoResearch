@@ -10,12 +10,9 @@ from typing import Any
 
 from autoresearch.config import ProjectConfig, ensure_project_dirs
 from autoresearch.controller.context import build_llm_context
-from autoresearch.controller.proposal_schema import allowed_search_space
 from autoresearch.controller.workflow import enqueue_proposal_from_file, run_next_queued_proposal
 from autoresearch.experiment_registry.registry import (
     get_official_champion,
-    list_branches,
-    list_comparisons,
     list_proposals,
     record_proposal,
     update_proposal_status,
@@ -28,37 +25,19 @@ def export_context_bundle(config: ProjectConfig) -> dict[str, Path]:
 
     ensure_project_dirs(config)
     context = build_llm_context(config)
-    stamp = _stamp()
-    context_path = config.handoff_context_dir / f"context_{stamp}.json"
     latest_context = config.handoff_context_dir / "latest_context.json"
-    handoff_path = config.handoff_handoffs_dir / f"handoff_{stamp}.md"
     latest_handoff = config.handoff_handoffs_dir / "latest_handoff.md"
-    champion_summary = config.handoff_context_dir / "current_champion_summary.json"
-    comparisons_summary = config.handoff_context_dir / "recent_comparisons_summary.json"
-    branch_summary = config.handoff_context_dir / "recent_branch_summary.json"
 
-    write_json(context_path, context)
     write_json(latest_context, context)
-    handoff_text = render_handoff_markdown(config, context)
-    handoff_path.write_text(handoff_text, encoding="utf-8")
-    latest_handoff.write_text(handoff_text, encoding="utf-8")
-    write_json(champion_summary, context.get("official_champion") or {})
-    write_json(comparisons_summary, context.get("recent_comparisons") or [])
-    write_json(branch_summary, list_branches(config.registry_path))
-    write_proposal_template(config)
+    latest_handoff.write_text(render_handoff_markdown(config, context), encoding="utf-8")
     return {
-        "context_json": context_path,
         "latest_context_json": latest_context,
-        "handoff_markdown": handoff_path,
         "latest_handoff_markdown": latest_handoff,
-        "champion_summary": champion_summary,
-        "comparisons_summary": comparisons_summary,
-        "branch_summary": branch_summary,
     }
 
 
 def write_proposal_template(config: ProjectConfig) -> dict[str, Path]:
-    """Write proposal template, schema description, and instructions."""
+    """Write proposal template and schema description."""
 
     ensure_project_dirs(config)
     context = build_llm_context(config)
@@ -91,16 +70,13 @@ def write_proposal_template(config: ProjectConfig) -> dict[str, Path]:
     schema = proposal_schema_document(config, context)
     template_path = config.handoff_handoffs_dir / "proposal_template.json"
     schema_path = config.handoff_handoffs_dir / "proposal_schema.json"
-    instructions_path = config.handoff_handoffs_dir / "proposal_instructions.md"
     inbox_template_path = config.handoff_proposal_inbox_dir / "proposal_template.json"
     write_json(template_path, template)
     write_json(schema_path, schema)
     write_json(inbox_template_path, template)
-    instructions_path.write_text(render_proposal_instructions(config, context), encoding="utf-8")
     return {
         "proposal_template": template_path,
         "proposal_schema": schema_path,
-        "proposal_instructions": instructions_path,
         "inbox_template": inbox_template_path,
     }
 
@@ -172,7 +148,7 @@ def ingest_proposals(config: ProjectConfig) -> dict[str, Any]:
                 config=None,
                 validation_errors=result["validation_errors"],
                 llm_provider="file_handoff",
-                llm_model=config.llm_model,
+                llm_model=None,
                 prompt_path=None,
                 response_path=None,
                 proposal_path=proposal_file,
@@ -236,8 +212,6 @@ def inbox_status(config: ProjectConfig) -> dict[str, Any]:
     valid_dir = config.handoff_proposal_processed_dir / "valid"
     invalid_dir = config.handoff_proposal_processed_dir / "invalid"
     return {
-        "provider": config.llm_provider,
-        "mode": "file-based handoff" if config.llm_provider == "file_handoff" else config.llm_provider,
         "inbox_dir": str(config.handoff_proposal_inbox_dir),
         "inbox_json_count": len([p for p in config.handoff_proposal_inbox_dir.glob("*.json") if p.name != "proposal_template.json"]),
         "inbox_files": [str(p) for p in sorted(config.handoff_proposal_inbox_dir.glob("*.json"))],
@@ -253,121 +227,23 @@ def inbox_status(config: ProjectConfig) -> dict[str, Any]:
 
 
 def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> str:
-    """Render human-readable handoff instructions for external agents."""
+    """Render a compact pointer file for external agents."""
 
     champion = context.get("official_champion") or {}
-    return "\n".join(
-        [
-            "# Auto-Research Handoff",
-            "",
-            "You are acting as the external experiment-design agent for this local lab.",
-            "Write exactly one valid proposal JSON file into the proposal inbox.",
-            "",
-            "## Project Goal",
-            context["project_goal"],
-            "",
-            "## Current Official Champion",
-            f"- champion_id: `{champion.get('champion_id')}`",
-            f"- branch_id: `{champion.get('branch_id')}`",
-            f"- reason: {champion.get('reason')}",
-            "",
-            "## Exploration Philosophy",
-            "- Every run starts from the `global_mean` no-model baseline (a flat exposure-weighted",
-            "  burning cost). Your job is to develop relative to it through many small, well-motivated",
-            "  steps.",
-            "- Prefer lower-cost, lower-complexity changes before higher-cost ones. Reserve",
-            "  computationally expensive approaches for after cheaper paths have been explored.",
-            "- One change at a time — each proposal should be readable as 'X relative to the champion'.",
-            "- Explore broadly: try several different ideas before doubling down on any one.",
-            "",
-            "## Fixed Constraints",
-            "- Claim cap is **100,000**, applied identically to training and testing. Do not propose",
-            "  an alternative cap; the only allowed `claim_cap_threshold` is `100000`.",
-            "- Do not request or reference `milestone_holdout`.",
-            "- Do not redefine evaluation metrics.",
-            "- Stay within the allowed search space in `latest_context.json`.",
-            "- The Python framework will validate, run, compare, and decide promotion.",
-            "- For any non-`global_mean` experiment, write a run-local Python script and reference it",
-            "  as `experiment_config.model.script_path`. Do not rely on pre-existing scripts in",
-            "  `src/autoresearch/models/`; if you want a GLM, GBM, or other method, write that",
-            "  implementation into this proposal's script.",
-            "- Avoid near-duplicate proposals; inspect recent proposals and non-promotion summaries first.",
-            "",
-            "## Where To Read",
-            f"- Context JSON: `{config.handoff_context_dir / 'latest_context.json'}`",
-            f"- Proposal schema: `{config.handoff_handoffs_dir / 'proposal_schema.json'}`",
-            f"- Proposal template: `{config.handoff_handoffs_dir / 'proposal_template.json'}`",
-            f"- Proposal instructions: `{config.handoff_handoffs_dir / 'proposal_instructions.md'}`",
-            "",
-            "## Where To Write",
-            f"- Write one proposal JSON file and one model script to: `{config.handoff_proposal_inbox_dir}`",
-            "- Use neighbouring filenames such as `proposal_alpha_10.json` and `model_alpha_10.py`.",
-            "- In the JSON, set `experiment_config.model.script_path` to the script filename.",
-            "",
-            "## How To Continue The Session",
-            "- After writing a proposal file, run `autoresearch run-session-cycle`.",
-            "- If the session reports `waiting_for_proposal`, write the next proposal and run it again.",
-            "- Use `autoresearch session-status` to inspect state.",
-            "- Use `autoresearch pause-session` or `autoresearch stop-session` when needed.",
-            "",
-            "## Recent Comparisons",
-            json.dumps(context.get("recent_comparisons", []), indent=2, sort_keys=True),
-        ]
-    ) + "\n"
-
-
-def render_proposal_instructions(config: ProjectConfig, context: dict[str, Any]) -> str:
-    """Instructions focused on producing a proposal file."""
-
-    return "\n".join(
-        [
-            "# Proposal Instructions",
-            "",
-            "Create one JSON file matching `proposal_template.json`.",
-            "Also create one neighbouring Python model script and reference it via",
-            "`experiment_config.model.script_path`.",
-            "The proposal should be a modest, interpretable challenger to the official champion.",
-            "",
-            "## How to choose what to propose",
-            "- Every run starts at the `global_mean` no-model baseline; the champion you see is the",
-            "  state of the run so far. Propose the smallest credible improvement on it.",
-            "- Prefer lower-cost, lower-complexity changes before higher-cost ones. Reserve",
-            "  computationally expensive approaches for after cheaper paths have been explored.",
-            "- One change at a time. Your `change_summary` should read as 'X relative to the",
-            "  champion'.",
-            "- Across cycles, prioritise breadth — try several different ideas before iterating",
-            "  deeply on any one.",
-            "",
-            "## Fixed constraints",
-            "- Claim cap is fixed at **100,000** (applied to training and testing alike). Set",
-            "  `preprocessing.claim_capping_enabled = true` and `preprocessing.claim_cap_threshold = 100000`.",
-            "  No other value is accepted.",
-            "- Do not reference `milestone_holdout`.",
-            "- Do not use Markdown fences in the proposal file. The file content must be JSON only.",
-            "- Do not repeat a recent executable configuration or identical change summary.",
-            "- Do not import a ready-made model implementation from `src/autoresearch/models`. The",
-            "  experiment script is the modelling implementation for this run. Reusing general",
-            "  project constants and public Python/scikit-learn APIs is fine.",
-            "",
-            "## Model script contract",
-            "- The script must expose `fit_predict(train, score, *, feature_inclusions=None,",
-            "  feature_exclusions=None, **hyperparameters)`.",
-            "- It must return `(predicted_claim_cost_array, notes_dict)`.",
-            "- Predictions must be original-space claim cost, not pure premium. Multiply by exposure",
-            "  if your model predicts pure premium.",
-            "- If the validation gate fails, revise the script named by the latest",
-            "  `repair_request_*.json` up to three attempts.",
-            "",
-            "Allowed search space is embedded below:",
-            "",
-            "```json",
-            json.dumps(context["allowed_search_space"], indent=2, sort_keys=True),
-            "```",
-            "",
-            f"Write proposal files to `{config.handoff_proposal_inbox_dir}`.",
-            "Then run `autoresearch run-session-cycle` to let the lab ingest, execute, compare, and refresh handoff files.",
-        ]
-    ) + "\n"
+    return "\n".join([
+        "# Auto-Research Handoff",
+        "",
+        "Read `AGENT.md` for the full operating manual.",
+        "",
+        f"- Current champion: `{champion.get('champion_id')}` "
+        f"(branch `{champion.get('branch_id')}`)",
+        f"- Context JSON: `{config.handoff_context_dir / 'latest_context.json'}`",
+        f"- Proposal schema: `{config.handoff_handoffs_dir / 'proposal_schema.json'}`",
+        f"- Proposal template: `{config.handoff_handoffs_dir / 'proposal_template.json'}`",
+        f"- Write proposal JSON + model script to: `{config.handoff_proposal_inbox_dir}`",
+        "",
+        "Then run `autoresearch run-session-cycle`.",
+    ]) + "\n"
 
 
 def proposal_schema_document(config: ProjectConfig, context: dict[str, Any]) -> dict[str, Any]:
