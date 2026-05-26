@@ -14,18 +14,11 @@ Everything you build develops relative to this. The first real model you propose
 
 ## Exploration philosophy — small steps, broad search
 
-The research loop rewards **many small, well-motivated improvements** over a few jumps to high-complexity methods. When you choose what to try next, prefer in roughly this order:
+The research loop rewards **many small, well-motivated improvements** over a few large jumps. When you choose what to try next:
 
-1. **Feature engineering and data work** — bin a numeric column into actuarial bands, log-transform a skewed feature, add a single interaction term, mark outlier rows, examine residuals by segment. These are cheap to run and frequently move the metric.
-2. **Simple model forms with thoughtful priors** — a one-feature GLM, an exposure-weighted GLM with a small handful of features, a Poisson frequency model. These tell you which signal lives in the data before you spend compute on capacity.
-3. **Modest hyperparameter changes** to the current champion — a different regularisation strength, a different Tweedie power, a different feature subset.
-4. **Higher-capacity models** (GBM, deeper trees, ensembling, GAM, monotone constraints) — reserve these for after the simpler paths have plateaued. A GBM proposed in cycle 1 is almost always premature.
-
-Concretely:
-
-- **Bias toward breadth over depth.** Try a handful of different cheap ideas before doubling down on any one. A run that explores ten interpretable variants in a session is better than one that explores three deep GBM hyperparameter sweeps.
-- **One change at a time.** Every experiment should be readable as "X relative to the current champion". If you change the model family and the features and the cap, the next cycle has no clean signal to learn from.
-- **Spend compute last.** A 2000-tree GBM is a fine experiment, but only after you have understood what the simpler models can and cannot capture.
+- **Bias toward breadth over depth.** Try a range of different ideas before doubling down on any one direction. A run that explores many distinct hypotheses in a session is better than one that iterates narrowly.
+- **One change at a time.** Every experiment should be readable as "X relative to the current champion". If you change multiple things at once, the next cycle has no clean signal to learn from.
+- **Prefer lower-cost approaches before higher-cost ones.** Cheap, fast experiments tell you what the data can support before you commit compute to expensive methods.
 - **Use the research log.** Log what each step taught you, not just whether it promoted. A non-promotion that taught you something about a segment is valuable.
 
 This applies to every cycle, including the very first proposal of a fresh run.
@@ -69,7 +62,7 @@ autoresearch list-experiments
 ### Step 1 — Form a hypothesis
 Read the research log and recent experiment metrics. Ask, in roughly this order:
 - Is there an obvious feature transformation (log, binning, indicator) that the current champion misses?
-- Is there a single interaction (e.g. age × power, region × density) that I have not yet tried?
+- Is there a single interaction (e.g. factor_a × factor_b, factor_c × factor_d) that I have not yet tried?
 - Could a single-feature or few-feature GLM clarify which signal the data actually carries?
 - Is the current champion's calibration breaking down on a specific segment (by region, age band, vehicle type)?
 - Have I exhausted the cheap interpretable ideas before reaching for higher-capacity models?
@@ -106,7 +99,7 @@ script_path = "model_my_descriptive_name.py"
 alpha = 1.0
 power = 1.5
 # Optional: feature subset
-# feature_inclusions = ["exposure_term_a", "driver_age_band_d", "vehicle_power_band_b"]
+# feature_inclusions = ["feature_a", "feature_b", "feature_c"]
 ```
 
 The model script must expose:
@@ -136,7 +129,7 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
     Must not access holdout data. Must be deterministic."""
     frame = frame.copy()
     # e.g. interaction term:
-    frame["age_x_power"] = frame["driver_age_band_d"] * frame["vehicle_power_band_b"]
+    frame["feature_a_x_feature_b"] = frame["feature_a"] * frame["feature_b"]
     return frame
 ```
 
@@ -367,32 +360,5 @@ autoresearch list-tracks   # see all tracks and their current champion
    `artifacts/tracks/<other-agent>/` are off-limits during your session.
 
 ---
-
-## Research ideas to explore (ordered cheapest → most expensive)
-
-Work through these top-to-bottom. Most runs should spend the majority of their cycles in the first two groups.
-
-**Cheap data work (try first)**
-- Add a single feature transformation: `np.log1p(density_index_i)`, an actuarial age band, a high-mileage indicator.
-- Inspect residuals of the current champion by region, age band, vehicle make; let a real gap motivate the next experiment.
-- Try a single interaction term (e.g. `driver_age_band_d * vehicle_power_band_b`).
-- Drop a noisy feature and re-fit; sometimes fewer features beat more.
-
-**Simple model forms (try second)**
-- One- or few-feature Tweedie GLM to verify which signal carries the lift.
-- Poisson frequency GLM alone, no severity model, to understand the frequency-only ceiling.
-- Frequency × severity split with very low regularisation.
-- Modest hyperparameter sweep around the current champion: alpha, Tweedie power, feature subset.
-
-**Higher-capacity models (only after the above plateau)**
-- Tweedie GBM with conservative depth and learning rate (3–5 depth, 0.03–0.05 lr).
-- LightGBM/XGBoost/CatBoost with native Tweedie or monotone constraints (age ↑ → risk ↑).
-- GAM for smooth age/power effects.
-- Stacked or calibration overlay (e.g. isotonic regression on top of a champion's predictions).
-
-**Process / methodology**
-- Exposure-stratified cross-validation.
-- Group k-fold on `region_cluster_j`.
-- Logging residual diagnostics by segment after every promotion.
 
 Note: the claim cap is fixed at 100,000; do not propose alternative thresholds or disabling capping.

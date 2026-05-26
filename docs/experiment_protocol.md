@@ -54,14 +54,12 @@ The token prevents accidental reads. The holdout file lives in `data/holdout_vau
 
 ## Model Families
 
-Always choose a properly specified model for new experiments:
+The following families are supported within the allowed search space:
 
-| Family | When to use |
-|--------|-------------|
-| `tweedie_glm` | Default. Well-calibrated for imbalanced claim distributions. Interpretable coefficients. |
-| `frequency_severity_glm` | When frequency and severity have different drivers. More granular diagnostics. |
-| `tweedie_gbm` | Non-linear challenger. Handles interactions without explicit feature engineering. Requires more data. |
-| `regularized_linear` | Legacy baseline only. Not recommended for new proposals (misspecified target + metric). |
+- `tweedie_glm`
+- `frequency_severity_glm`
+- `tweedie_gbm`
+- `regularized_linear`
 
 ## Required Artifacts Per Experiment
 
