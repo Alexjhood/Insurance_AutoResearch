@@ -44,11 +44,11 @@ This applies to every cycle, including the very first proposal of a fresh run.
 autoresearch export-context          # refreshes artifacts/auto_research/context/
 cat artifacts/auto_research/context/latest_context.json | python3 -m json.tool | head -120
 
-# 2. Read research history
-cat docs/RESEARCH_LOG.md
+# 2. Read this run's research history (starts empty on a fresh run — reason from metrics alone)
+cat artifacts/tracks/<track>/runs/<run-id>/RESEARCH_LOG.md
 
 # 3. Check recent milestone reports if any promotions have happened
-ls artifacts/milestone_reports/ 2>/dev/null
+ls artifacts/tracks/<track>/runs/<run-id>/milestone_reports/ 2>/dev/null
 
 # 4. Check current champion
 autoresearch list-champion-history
@@ -196,7 +196,7 @@ If promoted: a holdout report is auto-written to `artifacts/milestone_reports/<c
 
 ### Step 6 — Update the research log
 
-Append to `docs/RESEARCH_LOG.md`:
+Append to `artifacts/tracks/<track>/runs/<run-id>/RESEARCH_LOG.md` (this run's log only — do not read or write logs from other runs or prior sessions):
 
 ```markdown
 ## Cycle N — YYYY-MM-DD
