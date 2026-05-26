@@ -42,7 +42,7 @@ Track B         : `{track_b}` — champion `{champion_b_id}` ({model_b})
 
 | | Track A | Track B |
 |-|--------:|--------:|
-| Mean Tweedie deviance (p=1.5) | {score_a:.6f} | {score_b:.6f} |
+| Mean {metric_label} | {score_a:.6f} | {score_b:.6f} |
 | Gini (weighted) | {gini_a:.4f} | {gini_b:.4f} |
 | Pred/actual ratio | {pa_a:.4f} | {pa_b:.4f} |
 
@@ -199,6 +199,9 @@ def _run_comparison(config_a: ProjectConfig, config_b: ProjectConfig) -> dict[st
     gini_a, pa_a = _scalar_metrics(predictions_a, eval_split, config_a.tweedie_power)
     gini_b, pa_b = _scalar_metrics(predictions_b, eval_split, config_b.tweedie_power)
 
+    metric_label = config_a.primary_metric
+
+    # paired_comparison normalises lift so positive == challenger (B) wins, regardless of metric polarity
     if mean_lift > 0:
         winner, loser = config_b.track_id, config_a.track_id
         abs_lift = mean_lift
@@ -230,6 +233,7 @@ def _run_comparison(config_a: ProjectConfig, config_b: ProjectConfig) -> dict[st
 
     report_text = _REPORT_TEMPLATE.format(
         date=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        metric_label=metric_label,
         track_a=config_a.track_id,
         track_b=config_b.track_id,
         champion_a_id=champion_a_id,
@@ -315,7 +319,7 @@ def _load_predictions(config: ProjectConfig, experiment_id: str) -> pd.DataFrame
     artifacts = list_artifacts(config.registry_path, experiment_id)
     for artifact in artifacts:
         if artifact["artifact_type"] == "predictions":
-            return pd.read_csv(artifact["path"])
+            return pd.read_parquet(artifact["path"])
     raise FileNotFoundError(
         f"No predictions artifact for experiment '{experiment_id}' in track '{config.track_id}'"
     )

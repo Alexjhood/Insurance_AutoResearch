@@ -23,7 +23,6 @@ from autoresearch.experiment_registry.registry import (
     get_experiment,
     init_registry,
     list_comparisons,
-    list_experiments,
     record_comparison,
     record_experiment_artifacts,
 )
@@ -39,7 +38,7 @@ def run_repeated_evaluation(config: ProjectConfig, experiment_id: str) -> dict[s
     init_registry(config.registry_path)
     experiment = get_experiment(config.registry_path, experiment_id)
     predictions_path = _artifact_path(config, experiment_id, "predictions")
-    predictions = pd.read_csv(predictions_path)
+    predictions = pd.read_parquet(predictions_path)
     eval_split = config.ordinary_eval_splits[0]
 
     scores = repeated_scores(
@@ -100,8 +99,8 @@ def compare_experiments(
         )
         raise ValueError(msg)
 
-    champion_predictions = pd.read_csv(_artifact_path(config, champion_id, "predictions"))
-    challenger_predictions = pd.read_csv(_artifact_path(config, challenger_id, "predictions"))
+    champion_predictions = pd.read_parquet(_artifact_path(config, champion_id, "predictions"))
+    challenger_predictions = pd.read_parquet(_artifact_path(config, challenger_id, "predictions"))
     eval_split = config.ordinary_eval_splits[0]
 
     per_resample, comparison_summary = paired_comparison(
@@ -203,43 +202,7 @@ def compare_experiments(
         promotion_rationale=decision["rationale"],
         artifacts=artifacts,
     )
-    _append_research_log(config, comparison_id, champion_id, challenger_id, comparison_summary, decision)
     return artifacts
-
-
-def _append_research_log(
-    config: ProjectConfig,
-    comparison_id: str,
-    champion_id: str,
-    challenger_id: str,
-    comparison_summary: dict,
-    decision: dict,
-) -> None:
-    """Append a one-line auto-summary to the research log."""
-
-    log_path = config.research_log_path
-    try:
-        if not log_path.exists():
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            log_path.write_text(
-                "# Research Log\n\n"
-                "| Timestamp | Challenger | Decision | Lift | Win-rate | Rationale |\n"
-                "|-----------|-----------|----------|------|----------|----------|\n",
-                encoding="utf-8",
-            )
-        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        outcome = decision.get("decision", "?")
-        mean_lift = comparison_summary.get("mean_lift", float("nan"))
-        win_rate = comparison_summary.get("challenger_win_rate", float("nan"))
-        rationale = decision.get("rationale", "")[:120]
-        line = (
-            f"\n| {stamp} | `{challenger_id[:48]}` | **{outcome}** | "
-            f"lift={mean_lift:+.4f} | win_rate={win_rate:.2f} | {rationale} |"
-        )
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(line)
-    except Exception:
-        pass  # log append is best-effort
 
 
 def compare_against_current_champion(config: ProjectConfig, challenger_id: str) -> dict[str, Path]:
@@ -252,7 +215,11 @@ def compare_against_current_champion(config: ProjectConfig, challenger_id: str) 
     from autoresearch.milestone import evaluate_on_holdout
 
     official = get_official_champion(config.registry_path)
-    champion_id = official["champion_id"] if official else current_champion_id(config)
+    if official is None:
+        raise ValueError(
+            "Official champion is not initialised. Run init-official-champion first."
+        )
+    champion_id = official["champion_id"]
     if champion_id == challenger_id:
         raise ValueError("Challenger is already the current champion")
 
@@ -277,14 +244,6 @@ def compare_against_current_champion(config: ProjectConfig, challenger_id: str) 
 
     return artifacts
 
-
-def current_champion_id(config: ProjectConfig) -> str:
-    """Return the lowest search-time mean-score experiment id."""
-
-    rows = [row for row in list_experiments(config.registry_path) if row.get("mean_score") is not None]
-    if not rows:
-        raise ValueError("No scored experiments are available")
-    return min(rows, key=lambda row: row["mean_score"])["experiment_id"]
 
 
 def _artifact_path(config: ProjectConfig, experiment_id: str, artifact_type: str) -> Path:

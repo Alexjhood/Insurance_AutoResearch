@@ -55,22 +55,18 @@ def _make_config(tmp_path: Path) -> ProjectConfig:
         max_predicted_to_actual_drift=0.05,
         require_diagnostics=True,
         bonferroni_lookback=10,
-        llm_provider="mock",
-        llm_model="mock",
-        llm_temperature=0.2,
-        llm_proposal_file=tmp_path / "proposals.jsonl",
         handoff_base_dir=tmp_path / "auto_research",
         handoff_context_dir=tmp_path / "auto_research" / "context",
         handoff_proposal_inbox_dir=tmp_path / "auto_research" / "proposals" / "inbox",
         handoff_proposal_processed_dir=tmp_path / "auto_research" / "proposals" / "processed",
         handoff_results_dir=tmp_path / "auto_research" / "results",
         handoff_handoffs_dir=tmp_path / "auto_research" / "handoffs",
+        proposal_inbox_file=tmp_path / "auto_research" / "proposals" / "inbox" / "manual_proposals.jsonl",
         deduplication_policy="reject",
         deduplication_lookback=25,
         search_space={
-            "model_families": ["regularized_linear"],
+            "model_families": ["global_mean"],
             "target_strategies": ["direct_pure_premium", "frequency_severity"],
-            "regularized_linear": {"min_alpha": 0.01, "max_alpha": 100.0},
             "preprocessing": {"claim_cap_thresholds": [100000], "allow_disable_claim_capping": False},
         },
     )
@@ -105,7 +101,7 @@ def test_run_experiment_writes_registry_and_artifacts(tmp_path: Path) -> None:
     exp_config.write_text(
         """
 experiment_name = "test_direct"
-model_family = "regularized_linear"
+model_family = "global_mean"
 target_strategy = "direct_pure_premium"
 
 [preprocessing]
@@ -113,7 +109,6 @@ claim_capping_enabled = true
 claim_cap_threshold = 100000
 
 [model]
-alpha = 1.0
 """.strip(),
         encoding="utf-8",
     )
@@ -128,34 +123,6 @@ alpha = 1.0
     assert rows[0]["claim_cap_threshold"] == 100000
     assert "iterations" in outputs["metrics"].parts
     assert "experiments" not in outputs["metrics"].relative_to(config.artifacts_dir).parts
-
-
-def test_run_experiment_tweedie_glm(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    _write_fixtures(config)
-
-    exp_config = tmp_path / "experiment_glm.toml"
-    exp_config.write_text(
-        """
-experiment_name = "test_tweedie_glm"
-model_family = "tweedie_glm"
-target_strategy = "direct_pure_premium"
-
-[preprocessing]
-claim_capping_enabled = true
-claim_cap_threshold = 100000
-
-[model]
-alpha = 1.0
-power = 1.5
-""".strip(),
-        encoding="utf-8",
-    )
-
-    outputs = run_experiment(config, exp_config)
-    rows = list_experiments(config.registry_path)
-    assert outputs["metrics"].exists()
-    assert any(r["model_family"] == "tweedie_glm" for r in rows)
 
 
 def test_run_experiment_uses_run_local_model_script(tmp_path: Path) -> None:
@@ -200,96 +167,6 @@ script_path = "{script.name}"
     assert outputs["model_script"] == script.resolve()
 
 
-def test_metrics_include_tweedie_deviance(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    _write_fixtures(config)
-
-    exp_config = tmp_path / "experiment.toml"
-    exp_config.write_text(
-        """
-experiment_name = "test_metric_panel"
-model_family = "tweedie_glm"
-target_strategy = "direct_pure_premium"
-
-[preprocessing]
-claim_capping_enabled = true
-claim_cap_threshold = 100000
-
-[model]
-alpha = 0.1
-power = 1.5
-""".strip(),
-        encoding="utf-8",
-    )
-
-    import json
-    outputs = run_experiment(config, exp_config)
-    metrics = json.loads(outputs["metrics"].read_text())
-    panel = {m["split"]: m for m in metrics["split_metrics"]}
-    assert "tweedie_deviance_p15" in panel.get("search_validation", panel.get("train", {}))
-    assert "predicted_to_actual_ratio" in panel.get("search_validation", panel.get("train", {}))
-
-
-def test_model_notes_do_not_include_split_as_feature(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    _write_fixtures(config)
-
-    exp_config = tmp_path / "experiment_glm.toml"
-    exp_config.write_text(
-        """
-experiment_name = "test_no_split_feature"
-model_family = "tweedie_glm"
-target_strategy = "direct_pure_premium"
-
-[preprocessing]
-claim_capping_enabled = true
-claim_cap_threshold = 100000
-
-[model]
-alpha = 1.0
-power = 1.5
-""".strip(),
-        encoding="utf-8",
-    )
-
-    import json
-    outputs = run_experiment(config, exp_config)
-    metrics = json.loads(outputs["metrics"].read_text())
-
-    assert "split" not in metrics["model_notes"]["feature_columns"]
-
-
-def test_frequency_severity_glm_allows_zero_cost_claim_rows(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    _write_fixtures(config)
-    frame = pd.read_parquet(config.processed_dir / "agent_dataset.parquet")
-    frame.loc[frame["record_id"] == 2, "claim_cost_observed_k"] = 0.0
-    frame.to_parquet(config.processed_dir / "agent_dataset.parquet", index=False)
-    frame.to_parquet(config.processed_dir / "agent_dataset_search.parquet", index=False)
-
-    exp_config = tmp_path / "experiment_freq_sev.toml"
-    exp_config.write_text(
-        """
-experiment_name = "test_frequency_severity"
-model_family = "frequency_severity_glm"
-target_strategy = "frequency_severity"
-
-[preprocessing]
-claim_capping_enabled = true
-claim_cap_threshold = 100000
-
-[model]
-freq_alpha = 0.1
-sev_alpha = 0.1
-""".strip(),
-        encoding="utf-8",
-    )
-
-    outputs = run_experiment(config, exp_config)
-
-    assert outputs["metrics"].exists()
-
-
 def test_compare_experiments_writes_html_report(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     config = replace(
@@ -306,7 +183,7 @@ def test_compare_experiments_writes_html_report(tmp_path: Path) -> None:
     champion_config.write_text(
         """
 experiment_name = "champion_report"
-model_family = "regularized_linear"
+model_family = "global_mean"
 target_strategy = "direct_pure_premium"
 
 [preprocessing]
@@ -314,7 +191,6 @@ claim_capping_enabled = true
 claim_cap_threshold = 100000
 
 [model]
-alpha = 1.0
 """.strip(),
         encoding="utf-8",
     )
@@ -322,7 +198,7 @@ alpha = 1.0
     challenger_config.write_text(
         """
 experiment_name = "challenger_report"
-model_family = "regularized_linear"
+model_family = "global_mean"
 target_strategy = "direct_pure_premium"
 
 [preprocessing]
@@ -330,7 +206,6 @@ claim_capping_enabled = true
 claim_cap_threshold = 100000
 
 [model]
-alpha = 2.0
 """.strip(),
         encoding="utf-8",
     )

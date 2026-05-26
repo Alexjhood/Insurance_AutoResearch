@@ -20,9 +20,6 @@ TARGET_COLUMNS = {
     "claim_cost_capped_active",
 }
 
-_SUPPORTED_FAMILIES = {"tweedie_glm", "frequency_severity_glm", "tweedie_gbm", "regularized_linear"}
-
-
 def allowed_search_space(config, agent_schema: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build the explicit search space exposed to proposal generators."""
 
@@ -35,7 +32,7 @@ def allowed_search_space(config, agent_schema: dict[str, Any] | None = None) -> 
             if item["name"] not in TARGET_COLUMNS and item.get("role") != "target_or_outcome"
         ]
 
-    families = list(ss.get("model_families", ["tweedie_glm", "frequency_severity_glm"]))
+    families = list(ss.get("model_families", ["global_mean"]))
 
     space: dict[str, Any] = {
         "model_families": families,
@@ -46,12 +43,6 @@ def allowed_search_space(config, agent_schema: dict[str, Any] | None = None) -> 
         "allow_open_model_families": bool(ss.get("allow_open_model_families", False)),
         "requires_model_script": bool(ss.get("requires_model_script", False)),
     }
-
-    # Per-family hyperparameter ranges
-    for family in families:
-        family_cfg = ss.get(family, {})
-        if isinstance(family_cfg, dict) and family_cfg:
-            space[f"{family}_params"] = family_cfg
 
     # Preprocessing
     prep = ss.get("preprocessing", {})
@@ -118,7 +109,6 @@ def validate_proposal(proposal: dict[str, Any], search_space: dict[str, Any]) ->
         if search_space.get("requires_model_script", False) and family != "global_mean":
             if not isinstance(script_path, str) or not script_path.strip():
                 errors.append("model.script_path is required for non-global_mean autonomous experiments")
-        errors.extend(_validate_model_hyperparameters(family, model, search_space))
         allowed_features = set(search_space.get("feature_columns", []))
         for key in ("feature_inclusions", "feature_exclusions"):
             value = model.get(key)
@@ -137,51 +127,6 @@ def validate_proposal(proposal: dict[str, Any], search_space: dict[str, Any]) ->
         errors.append("proposal must not reference milestone_holdout")
     return errors
 
-
-def _validate_model_hyperparameters(family: str, model: dict[str, Any], space: dict[str, Any]) -> list[str]:
-    errors = []
-    family_params = space.get(f"{family}_params", {})
-
-    if family == "regularized_linear":
-        alpha = model.get("alpha")
-        low = float(family_params.get("min_alpha", 0.001))
-        high = float(family_params.get("max_alpha", 100.0))
-        if not isinstance(alpha, (int, float)) or not low <= float(alpha) <= high:
-            errors.append(f"model.alpha must be in [{low}, {high}]")
-
-    elif family == "tweedie_glm":
-        alpha = model.get("alpha")
-        low = float(family_params.get("min_alpha", 0.001))
-        high = float(family_params.get("max_alpha", 10.0))
-        if alpha is not None and (not isinstance(alpha, (int, float)) or not low <= float(alpha) <= high):
-            errors.append(f"model.alpha must be in [{low}, {high}] for tweedie_glm")
-        power = model.get("power")
-        allowed_powers = [float(p) for p in family_params.get("power_choices", [1.1, 1.3, 1.5, 1.7, 1.9])]
-        if power is not None and float(power) not in allowed_powers:
-            errors.append(f"model.power must be one of {allowed_powers}")
-
-    elif family == "frequency_severity_glm":
-        for param in ("freq_alpha", "sev_alpha"):
-            val = model.get(param)
-            low = float(family_params.get(f"min_{param}", 0.001))
-            high = float(family_params.get(f"max_{param}", 10.0))
-            if val is not None and (not isinstance(val, (int, float)) or not low <= float(val) <= high):
-                errors.append(f"model.{param} must be in [{low}, {high}]")
-
-    elif family == "tweedie_gbm":
-        if "power" in model:
-            errors.append("tweedie_gbm proposals must not set 'power' (it is fixed by the GBM loss)")
-        max_iter = model.get("max_iter")
-        low_iter = int(family_params.get("min_max_iter", 100))
-        high_iter = int(family_params.get("max_max_iter", 2000))
-        if max_iter is not None and (not isinstance(max_iter, int) or not low_iter <= max_iter <= high_iter):
-            errors.append(f"model.max_iter must be an integer in [{low_iter}, {high_iter}]")
-        max_depth = model.get("max_depth")
-        allowed_depths = [int(d) for d in family_params.get("max_depth_choices", [3, 5, 7, 9])]
-        if max_depth is not None and int(max_depth) not in allowed_depths:
-            errors.append(f"model.max_depth must be one of {allowed_depths}")
-
-    return errors
 
 
 def normalise_proposal(proposal: dict[str, Any], *, branch_id: str, parent_branch_id: str | None) -> dict[str, Any]:

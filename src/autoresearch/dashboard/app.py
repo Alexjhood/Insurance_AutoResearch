@@ -204,7 +204,7 @@ def render_auto_research() -> None:
             st.subheader("Validation Errors")
             st.json(row.get("validation_errors"))
     else:
-        st.info("Run `autoresearch generate-proposal` or `autoresearch run-cycle` to create proposals.")
+        st.info("Write a proposal JSON to the inbox and run `autoresearch run-session-cycle` to process it.")
 
     st.subheader("Branch Lineage")
     branches = list_branches(config.registry_path)

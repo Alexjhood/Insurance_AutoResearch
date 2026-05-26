@@ -1,5 +1,4 @@
 import json
-from dataclasses import replace
 from pathlib import Path
 
 from autoresearch.controller.champion import initialise_official_champion
@@ -7,11 +6,11 @@ from autoresearch.controller.handoff import ingest_proposals
 from autoresearch.controller.session import create_session, pause_session, resume_session, run_session_cycle, session_status, stop_session
 from autoresearch.experiment_registry.registry import list_proposals, list_sessions
 from tests.test_handoff import _record_direct, _valid_proposal
-from tests.test_phase4_controller import _config
+from tests.test_runner import _make_config as _config
 
 
 def _ready_config(tmp_path: Path):
-    config = replace(_config(tmp_path), llm_provider="file_handoff")
+    config = _config(tmp_path)
     _record_direct(config)
     initialise_official_champion(config)
     config.metadata_dir.mkdir(parents=True)

@@ -14,8 +14,7 @@ from autoresearch.data.holdout_vault import load_search_dataset
 from autoresearch.data.preprocessing import apply_claim_capping
 from autoresearch.evaluation.metrics import evaluate_predictions
 from autoresearch.experiment_registry.registry import init_registry, record_experiment
-from autoresearch.models.baselines import RAW_CLAIM_COST
-from autoresearch.models.dispatcher import dispatch_model
+from autoresearch.models.dispatcher import RAW_CLAIM_COST, dispatch_model
 from autoresearch.run_artifacts import next_iteration_dir
 from autoresearch.utils.environment import capture_environment
 from autoresearch.utils.integrity import (
@@ -110,7 +109,7 @@ def run_experiment(
 
     # Model dispatch
     model_cfg = exp.get("model", {})
-    model_family = exp.get("model_family", "regularized_linear")
+    model_family = exp.get("model_family", "global_mean")
     target_strategy = exp.get("target_strategy", "direct_pure_premium")
     hyperparameters = {k: v for k, v in model_cfg.items()
                        if k not in {"feature_inclusions", "feature_exclusions"}}
@@ -204,7 +203,7 @@ def run_experiment(
     config_path = run_dir / "config_snapshot.json"
     metrics_path = run_dir / "metrics.json"
     split_metrics_path = run_dir / "split_metrics.csv"
-    predictions_path = run_dir / "predictions.csv"
+    predictions_path = run_dir / "predictions.parquet"
     capping_path = run_dir / "capping_diagnostics.json"
     diagnostics_path = run_dir / "diagnostics.json"
     env_path = run_dir / "environment_manifest.json"
@@ -215,7 +214,7 @@ def run_experiment(
     write_json(diagnostics_path, diagnostics)
     write_json(env_path, env_manifest)
     pd.DataFrame(metrics["split_metrics"]).to_csv(split_metrics_path, index=False)
-    result.predictions.to_csv(predictions_path, index=False)
+    result.predictions.to_parquet(predictions_path, index=False)
 
     artifacts = {
         "config_snapshot": config_path,

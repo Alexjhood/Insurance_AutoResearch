@@ -1,5 +1,4 @@
 import json
-from dataclasses import replace
 from pathlib import Path
 
 from autoresearch.config import load_config
@@ -8,8 +7,7 @@ from autoresearch.controller.handoff import export_context_bundle, inbox_status,
 from autoresearch.controller.workflow import ExperimentNeedsRepair, run_next_queued_proposal
 from autoresearch.experiment_registry.registry import init_registry, list_proposals, record_experiment
 from autoresearch.experiment_runner import run_experiment
-from tests.test_phase4_controller import _config
-from tests.test_runner import _write_fixtures
+from tests.test_runner import _make_config as _config, _write_fixtures
 
 
 def _record_direct(config, experiment_id: str = "direct") -> None:
@@ -22,7 +20,7 @@ def _record_direct(config, experiment_id: str = "direct") -> None:
         config.registry_path,
         experiment_id=experiment_id,
         experiment_name="direct_pure_premium_baseline",
-        model_family="regularized_linear",
+        model_family="global_mean",
         target_strategy="direct_pure_premium",
         preprocessing_summary={"claim_capping_enabled": True, "claim_cap_threshold": 100000},
         claim_cap_threshold=100000,
@@ -40,18 +38,18 @@ def _valid_proposal(parent_id: str = "direct") -> dict:
         "parent_experiment_id": parent_id,
         "parent_branch_id": "main",
         "branch_action": "new_branch",
-        "experiment_name": "handoff_alpha_2",
-        "rationale": "Try modestly stronger regularisation.",
-        "change_summary": "Set alpha to 2.0.",
-        "expected_benefit": "Reduce variance.",
-        "key_risk": "Underfitting.",
+        "experiment_name": "handoff_global_mean_2",
+        "rationale": "Run a second global-mean baseline.",
+        "change_summary": "Identical global-mean config for comparison.",
+        "expected_benefit": "Verify reproducibility.",
+        "key_risk": "None.",
         "experiment_config": {
-            "experiment_name": "handoff_alpha_2",
-            "model_family": "regularized_linear",
+            "experiment_name": "handoff_global_mean_2",
+            "model_family": "global_mean",
             "target_strategy": "direct_pure_premium",
             "parent_experiment_id": parent_id,
             "preprocessing": {"claim_capping_enabled": True, "claim_cap_threshold": 100000},
-            "model": {"alpha": 2.0, "feature_exclusions": []},
+            "model": {"feature_exclusions": []},
         },
     }
 
@@ -59,8 +57,8 @@ def _valid_proposal(parent_id: str = "direct") -> dict:
 def test_default_config_uses_file_handoff() -> None:
     config = load_config()
 
-    assert config.llm_provider == "file_handoff"
     assert "auto_research" in str(config.handoff_base_dir)
+    assert config.proposal_inbox_file.name == "manual_proposals.jsonl"
 
 
 def test_tracked_config_scopes_artifacts_to_run() -> None:
@@ -76,12 +74,6 @@ def test_tracked_config_scopes_artifacts_to_run() -> None:
 
 def test_export_context_and_template(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    config = replace(
-        config,
-        llm_provider="file_handoff",
-        llm_model="external",
-        llm_proposal_file=config.handoff_proposal_inbox_dir / "manual.jsonl",
-    )
     _record_direct(config)
     initialise_official_champion(config)
     config.metadata_dir.mkdir(parents=True, exist_ok=True)
@@ -101,7 +93,6 @@ def test_export_context_and_template(tmp_path: Path) -> None:
 
 def test_ingest_proposals_moves_valid_and_invalid_files(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    config = replace(config, llm_provider="file_handoff")
     _record_direct(config)
     initialise_official_champion(config)
     config.metadata_dir.mkdir(parents=True, exist_ok=True)
@@ -131,8 +122,8 @@ def test_validation_failure_writes_repair_request(tmp_path: Path) -> None:
     config = _config(tmp_path)
     config.search_space["requires_model_script"] = True
     config.search_space["allow_open_model_families"] = True
-    config.processed_dir.mkdir(parents=True)
-    config.splits_dir.mkdir(parents=True)
+    config.processed_dir.mkdir(parents=True, exist_ok=True)
+    config.splits_dir.mkdir(parents=True, exist_ok=True)
     _write_fixtures(config)
     champion_config = tmp_path / "global_mean.toml"
     champion_config.write_text(

@@ -59,8 +59,8 @@ def write_comparison_html_report(
     output_path: Path,
 ) -> Path:
     """Write a self-contained interactive comparison report and return its path."""
-    champion_predictions = pd.read_csv(_artifact_path(config, champion_id, "predictions"))
-    challenger_predictions = pd.read_csv(_artifact_path(config, challenger_id, "predictions"))
+    champion_predictions = pd.read_parquet(_artifact_path(config, champion_id, "predictions"))
+    challenger_predictions = pd.read_parquet(_artifact_path(config, challenger_id, "predictions"))
     eval_split = config.ordinary_eval_splits[0]
     champion_eval = champion_predictions[champion_predictions["split"] == eval_split].copy()
     challenger_eval = challenger_predictions[challenger_predictions["split"] == eval_split].copy()

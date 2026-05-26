@@ -6,7 +6,7 @@ import pytest
 from autoresearch.bootstrap import bootstrap_track
 from autoresearch.experiment_registry.registry import get_official_champion, init_registry
 from tests.test_handoff import _record_direct
-from tests.test_phase4_controller import _config
+from tests.test_runner import _make_config as _config
 
 
 def _write_prepared_data_markers(config) -> None:
