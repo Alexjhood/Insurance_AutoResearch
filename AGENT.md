@@ -81,6 +81,66 @@ autoresearch --track claude list-experiments
 
 Then read the handoff file printed by bootstrap and this run's `RESEARCH_LOG.md` before forming any hypothesis.
 
+**Also check for** `artifacts/tracks/<track>/runs/<run-id>/OPERATING_NOTES.md` — if present, it's a per-run cheatsheet (current champion, registry path, std_lift, proposal schema) curated by prior sessions to skip rediscovery.
+
+---
+
+## Operating routines — lessons from prior runs
+
+These rules are encoded from process audits and prevent recurring failure modes. Follow them by default; deviate only with a clear reason.
+
+### A. Baseline-first rule (prevents target-column / dispatcher bugs)
+
+Before writing **any** new model family or your first proposal in a fresh run, read these three files **once**:
+
+- `src/autoresearch/models/global_mean.py` — confirms the active training-target column name
+- `src/autoresearch/models/dispatcher.py` — confirms what's in the `score` DataFrame, exposure handling, and feature constants
+- `src/autoresearch/models/calibration.py` — confirms the `apply_training_calibration` signature
+
+The agent schema in `context/latest_context.json` lists *all* historical target columns. Do not pick the training target from it — use whatever `global_mean.py` uses. Past runs have wasted 2 full experiments on this single bug.
+
+### B. Proposal-schema first (prevents inbox ingestion failures)
+
+The inbox JSON has a strict schema. Before writing your first proposal in a fresh run, read `proposal_inbox/proposal_template.json` *once*. The required top-level keys include `parent_experiment_id`, `parent_branch_id`, `branch_action`, `experiment_config`, `change_summary`, `expected_benefit`, `key_risk`, `rationale`, `proposal_id`, `experiment_name`. Slimmer JSON is rejected at ingestion and counts as a wasted cycle.
+
+### C. Inbox audit (prevents re-submitting stale stubs)
+
+`ls proposal_inbox/` at session start. Any pre-existing `model_*.py` may contain bugs from prior sessions (wrong target column, missing exposure-as-feature, outdated calibration). Either:
+- pick a fresh filename with a session prefix (e.g. `s3_<name>.py`), or
+- `Read` the existing file in full and audit it before reuse.
+
+The framework only auto-ingests `*.json` files from the inbox, so leftover `.py` files are dormant but easy to misuse.
+
+### D. Plateau detection — the std_lift gate
+
+When the champion sits at a metric plateau, marginal tuning is provably below the noise floor of the resampling gate and **cannot promote**.
+
+Before submitting an experiment, check the latest champion's `std_lift` from `paired_summary` in the most recent comparison (`comparisons` table in `registry.sqlite`, or the latest `comparison_report.html`). If the expected effect of your change is < `2 × std_lift`, the bootstrap CI will straddle zero and it cannot pass the gate — **switch to a structural change instead**:
+
+- new model family (XGBoost, CatBoost, neural net)
+- new target decomposition (freq/sev vs direct PP vs two-stage)
+- new feature (engineered interaction, new transformation)
+- new sample subset (high-exposure-only, claimants-only refinement)
+
+Rule of thumb: if you have 2 consecutive same-axis experiments at the plateau, the next experiment must change axis.
+
+### E. Repair policy — don't asymptote to zero
+
+`run-latest-proposal-cycle` allows up to 3 attempts. When attempt 1 fails:
+
+- **Attempt 2 must move in the opposite direction**, not "halfway back" to champion. If 127 leaves was too deep, try fewer leaves or stronger regularization — not 95 leaves. Halfway-back attempts converge to zero lift without ever beating champion.
+- **Attempt 3 is for abandonment or a genuinely different angle.** If attempt 2 is still negative, prefer to let it fail rather than burn the slot on a minor variation. A failed experiment is cheaper than a third near-zero attempt.
+
+### F. Use the champion template (eliminates boilerplate)
+
+`proposal_inbox/champion_template.py` is a parameterised version of the current champion. New proposals should import or copy-then-diff from it rather than restating ~100 lines of identical scaffolding. Each verbatim re-write of the champion costs ~3K output tokens for zero information gain.
+
+### G. Axis rotation
+
+Track which **axis** each experiment changes (hyperparameter / preprocessing / target / features / family). After 2 same-axis experiments — promoted or not — rotate to a different axis. This prevents the failure mode where 3+ consecutive experiments all tune the same dial.
+
+---
+
 ---
 
 ## The research cycle
