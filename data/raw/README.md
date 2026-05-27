@@ -4,6 +4,13 @@ Raw freMTPL2 frequency and severity files go here (CSV or Parquet). The loader
 auto-discovers files by filename substring: `freq` for the frequency table and
 `sev` for the severity table.
 
+**Real freMTPL2 data should sit at the top level of this directory** (e.g.
+`data/raw/freMTPL2freq.csv`). If you cloned the Kaggle distribution into a
+subdirectory like `KaggleFrenchMotorDataset/`, copy or symlink the two CSVs
+up to `data/raw/` so the loader finds them first. Files whose name or parent
+directory contains `synthetic` are deprioritised by the loader, so the 5 000-row
+CI fixtures will never silently shadow real data.
+
 ## Two ways to populate this directory
 
 **For testing / smoke runs (no network required):**

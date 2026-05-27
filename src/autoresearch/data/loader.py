@@ -41,7 +41,13 @@ def _find_one(raw_dir: Path, patterns: tuple[str, ...]) -> Path | None:
             candidates.append(path)
     if not candidates:
         return None
-    return sorted(candidates, key=lambda p: (len(p.parts), str(p)))[0]
+    # Prefer real data over synthetic smoke-test data even if the latter sits at
+    # a shorter path. ``generate_synthetic_data.py`` writes ``*_synthetic.parquet``
+    # files which would otherwise tie or beat the real CSVs on path length.
+    def _is_synthetic(p: Path) -> bool:
+        return "synthetic" in p.name.lower() or "_synthetic" in {part.lower() for part in p.parts}
+
+    return sorted(candidates, key=lambda p: (_is_synthetic(p), len(p.parts), str(p)))[0]
 
 
 def discover_fremtpl2_files(raw_dir: Path) -> tuple[Path, Path | None]:
