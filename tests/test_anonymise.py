@@ -24,4 +24,5 @@ def test_anonymise_columns_creates_private_mapping_and_public_schema() -> None:
     assert result.private_mapping["columns"][0]["original_name"] == "IDpol"
     assert result.private_mapping["columns"][1]["anonymised_name"] == "claim_count_signal_q"
     assert result.agent_schema["columns"][1]["role"] == "target_or_outcome"
+    assert result.agent_schema["columns"][2]["role"] == "exposure_offset"
     assert "original_name" not in result.agent_schema["columns"][0]

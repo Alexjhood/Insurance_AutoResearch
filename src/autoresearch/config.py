@@ -82,6 +82,7 @@ def load_config(
     config_path: str | Path | None = None,
     track_id: str | None = None,
     run_id: str | None = None,
+    new_run: bool = False,
 ) -> "ProjectConfig":
     """Load TOML config and resolve all project paths.
 
@@ -115,7 +116,7 @@ def load_config(
 
     if track_id:
         track_base = base_artifacts / "tracks" / track_id
-        resolved_run = _resolve_run_id(track_base, run_id)
+        resolved_run = _resolve_run_id(track_base, run_id, new_run=new_run)
         run_base = track_base / "runs" / resolved_run
         artifacts_dir = run_base
         registry_path = run_base / "registry.sqlite"
@@ -243,9 +244,14 @@ def ensure_project_dirs(config: ProjectConfig) -> None:
             )
 
 
-def _resolve_run_id(track_base: Path, requested_run_id: str | None) -> str:
+def _resolve_run_id(track_base: Path, requested_run_id: str | None, *, new_run: bool = False) -> str:
+    if requested_run_id and new_run:
+        raise ValueError("--run-id and --new-run are mutually exclusive")
     if requested_run_id:
         return _safe_run_id(requested_run_id)
+
+    if new_run:
+        return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     latest_path = track_base / "latest_run.json"
     if latest_path.exists():

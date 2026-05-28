@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from autoresearch.feature_policy import NON_PREDICTIVE_COLUMNS
+
 
 # ── Holdout-access scan ───────────────────────────────────────────────────────
 
@@ -111,6 +113,105 @@ def scan_file_for_holdout_access(path: Path) -> list[str]:
                 )
                 break
     return violations
+
+
+_FEATURE_CONTAINER_NAMES = frozenset(
+    {
+        "features",
+        "feature_columns",
+        "feature_inclusions",
+        "all_features",
+        "all_feats",
+        "base_features",
+        "base_numeric",
+        "numeric",
+        "numeric_features",
+        "numeric_feats",
+        "num_features",
+        "num_feats",
+        "predictors",
+        "predictor_columns",
+        "x_columns",
+        "x_cols",
+    }
+)
+
+
+def scan_file_for_non_predictive_feature_use(path: Path) -> list[str]:
+    """Flag common attempts to place reserved columns in predictor lists.
+
+    The exposure column is allowed in scripts for weights, offsets, and
+    response/rate calculations, so this deliberately scans only feature-like
+    containers rather than every occurrence of the string.
+    """
+
+    try:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+    except SyntaxError:
+        return []
+
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        target_names: list[str] = []
+        value: ast.AST | None = None
+        if isinstance(node, ast.Assign):
+            target_names = [_target_name(target) for target in node.targets]
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            target_names = [_target_name(node.target)]
+            value = node.value
+        elif isinstance(node, ast.Call):
+            for keyword in node.keywords:
+                if keyword.arg:
+                    target_names.append(keyword.arg)
+                    if _is_feature_container_name(keyword.arg):
+                        for column in _string_literals(keyword.value).intersection(NON_PREDICTIVE_COLUMNS):
+                            violations.append(_non_predictive_message(path, column, keyword.arg))
+                continue
+
+        if value is None:
+            continue
+        feature_targets = [name for name in target_names if _is_feature_container_name(name)]
+        if not feature_targets:
+            continue
+        for column in _string_literals(value).intersection(NON_PREDICTIVE_COLUMNS):
+            for name in feature_targets:
+                violations.append(_non_predictive_message(path, column, name))
+    return sorted(set(violations))
+
+
+def _target_name(target: ast.AST) -> str:
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, ast.Attribute):
+        return target.attr
+    return ""
+
+
+def _is_feature_container_name(name: str) -> bool:
+    lowered = name.lower()
+    if "non_predictive" in lowered or "reserved" in lowered or "exposure" in lowered:
+        return False
+    return lowered in _FEATURE_CONTAINER_NAMES or "feature" in lowered or "predictor" in lowered
+
+
+def _string_literals(node: ast.AST | None) -> set[str]:
+    if node is None:
+        return set()
+    return {
+        child.value
+        for child in ast.walk(node)
+        if isinstance(child, ast.Constant) and isinstance(child.value, str)
+    }
+
+
+def _non_predictive_message(path: Path, column: str, container: str) -> str:
+    return (
+        f"{path}: {column!r} appears in predictor container {container!r}; "
+        "exposure may be used only for weights, offsets, response denominators, "
+        "and converting predicted rates to claim costs"
+    )
 
 
 def scan_for_holdout_access(root: Path) -> list[str]:

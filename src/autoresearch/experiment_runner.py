@@ -21,6 +21,7 @@ from autoresearch.utils.integrity import (
     check_integrity,
     run_pytest,
     scan_file_for_holdout_access,
+    scan_file_for_non_predictive_feature_use,
     scan_for_holdout_access,
 )
 from autoresearch.utils.io import write_json
@@ -118,6 +119,26 @@ def run_experiment(
         script_violations = scan_file_for_holdout_access(model_script_path)
         if script_violations:
             msg = "Model-script holdout-access scan failed:\n" + "\n".join(script_violations)
+            record_experiment(
+                config.registry_path,
+                experiment_id=experiment_id,
+                experiment_name=exp.get("experiment_name", "unknown"),
+                model_family=exp.get("model_family", "unknown"),
+                target_strategy=exp.get("target_strategy", "unknown"),
+                preprocessing_summary={},
+                claim_cap_threshold=None,
+                status="failed",
+                parent_experiment_id=None,
+                config_snapshot_path=None,
+                metrics_path=None,
+                artifacts={},
+                code_version=None,
+                notes=msg,
+            )
+            raise ValueError(msg)
+        feature_policy_violations = scan_file_for_non_predictive_feature_use(model_script_path)
+        if feature_policy_violations:
+            msg = "Model-script feature-policy scan failed:\n" + "\n".join(feature_policy_violations)
             record_experiment(
                 config.registry_path,
                 experiment_id=experiment_id,

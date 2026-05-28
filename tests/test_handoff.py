@@ -1,9 +1,11 @@
 import json
+import re
 from pathlib import Path
 
-from autoresearch.config import load_config
+from autoresearch.config import _resolve_run_id, load_config
 from autoresearch.controller.champion import initialise_official_champion
 from autoresearch.controller.handoff import export_context_bundle, inbox_status, ingest_proposals, write_proposal_template
+from autoresearch.controller.proposal_schema import allowed_search_space, validate_proposal
 from autoresearch.controller.workflow import ExperimentNeedsRepair, run_next_queued_proposal
 from autoresearch.experiment_registry.registry import init_registry, list_proposals, record_experiment
 from autoresearch.experiment_runner import run_experiment
@@ -72,23 +74,67 @@ def test_tracked_config_scopes_artifacts_to_run() -> None:
     assert config.handoff_context_dir == config.artifacts_dir / "context"
 
 
+def test_new_run_id_is_timestamp_even_when_latest_exists(tmp_path: Path) -> None:
+    track_base = tmp_path / "artifacts" / "tracks" / "codex"
+    track_base.mkdir(parents=True)
+    (track_base / "latest_run.json").write_text('{"run_id": "CC20260526_01"}', encoding="utf-8")
+
+    run_id = _resolve_run_id(track_base, None, new_run=True)
+
+    assert run_id != "CC20260526_01"
+    assert re.fullmatch(r"\d{8}T\d{6}Z", run_id)
+
+
 def test_export_context_and_template(tmp_path: Path) -> None:
     config = _config(tmp_path)
     _record_direct(config)
     initialise_official_champion(config)
     config.metadata_dir.mkdir(parents=True, exist_ok=True)
     (config.metadata_dir / "agent_schema.json").write_text(
-        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]}',
+        json.dumps(
+            {
+                "columns": [
+                    {"name": "exposure_term_a", "role": "exposure_offset"},
+                    {"name": "driver_age_band_d", "role": "numeric_feature"},
+                ]
+            }
+        ),
         encoding="utf-8",
     )
 
     context_outputs = export_context_bundle(config)
     template_outputs = write_proposal_template(config)
+    context = json.loads(context_outputs["latest_context_json"].read_text(encoding="utf-8"))
+    handoff = context_outputs["latest_handoff_markdown"].read_text(encoding="utf-8")
 
     assert context_outputs["latest_context_json"].exists()
     assert context_outputs["latest_handoff_markdown"].exists()
     assert template_outputs["proposal_template"].exists()
     assert template_outputs["proposal_schema"].exists()
+    assert context["allowed_search_space"]["feature_columns"] == ["driver_age_band_d"]
+    assert "exposure_term_a` is not a predictive feature" in handoff
+
+
+def test_exposure_is_rejected_as_model_feature(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    search_space = allowed_search_space(
+        config=config,
+        agent_schema={
+            "columns": [
+                {"name": "exposure_term_a", "role": "exposure_offset"},
+                {"name": "driver_age_band_d", "role": "numeric_feature"},
+            ]
+        },
+    )
+    proposal = _valid_proposal()
+    proposal["experiment_config"]["model"] = {
+        "script_path": "model.py",
+        "feature_inclusions": ["exposure_term_a", "driver_age_band_d"],
+    }
+
+    errors = validate_proposal(proposal, search_space)
+
+    assert any("non-predictive columns" in error for error in errors)
 
 
 def test_ingest_proposals_moves_valid_and_invalid_files(tmp_path: Path) -> None:

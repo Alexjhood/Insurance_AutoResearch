@@ -22,13 +22,14 @@ Copy and paste this block into Claude Code:
 
 ```
 Read AGENT.md, then bootstrap a new run under track "claude" with
-run-id of your choice and run 3 cycles. Use synthetic data — I have
-already run scripts/generate_synthetic_data.py.
+a timestamped run id and run 3 cycles. Use synthetic data — I have
+already run scripts/generate_synthetic_data.py. Use `--new-run` for
+the bootstrap command.
 ```
 
 ## What Happens
 
-- **Bootstrap**: `autoresearch --track claude bootstrap-track` runs idempotently, creates the registry, runs the global-mean baseline, initialises the official champion, and exports the handoff context.
+- **Bootstrap**: `autoresearch --track claude --new-run bootstrap-track` creates a fresh timestamped run folder, creates the registry, runs the global-mean baseline, initialises the official champion, and exports the handoff context.
 - **Handoff read**: the agent reads the latest handoff file to understand the current champion state before proposing anything.
 - **Proposal generation**: the agent writes a proposal JSON and a companion model script to the proposal inbox.
 - **Experiment run**: `autoresearch run-session-cycles N` ingests the proposal, runs the experiment, and compares the challenger to the current champion.
@@ -57,6 +58,6 @@ already run scripts/generate_synthetic_data.py.
 ## Recommended Command Pair
 
 ```bash
-autoresearch --track claude --run-id <name> bootstrap-track
-autoresearch --track claude --run-id <name> run-session-cycles 3
+autoresearch --track claude --new-run bootstrap-track
+autoresearch --track claude run-session-cycles 3
 ```

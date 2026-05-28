@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from autoresearch.utils import integrity
-from autoresearch.utils.integrity import scan_file_for_holdout_access
+from autoresearch.utils.integrity import scan_file_for_holdout_access, scan_file_for_non_predictive_feature_use
 
 _MARKER_SOURCE = "milestone_holdout = 'bad'"
 
@@ -47,3 +47,33 @@ def test_model_script_outside_src_always_scanned(tmp_path: Path) -> None:
     script.write_text(_MARKER_SOURCE, encoding="utf-8")
     violations = scan_file_for_holdout_access(script)
     assert violations, "Model script outside src/autoresearch/ must be scanned regardless of name"
+
+
+def test_exposure_in_predictor_list_is_rejected(tmp_path: Path) -> None:
+    script = tmp_path / "model.py"
+    script.write_text(
+        'NUMERIC = ["exposure_term_a", "driver_age_band_d"]\n'
+        'EXPOSURE = "exposure_term_a"\n'
+        'def fit_predict(train, score, **kw):\n'
+        '    weight = train[EXPOSURE]\n'
+        '    return weight.to_numpy(), {}\n',
+        encoding="utf-8",
+    )
+
+    violations = scan_file_for_non_predictive_feature_use(script)
+
+    assert violations
+    assert "predictor container" in violations[0]
+
+
+def test_exposure_weight_usage_is_allowed(tmp_path: Path) -> None:
+    script = tmp_path / "model.py"
+    script.write_text(
+        'EXPOSURE = "exposure_term_a"\n'
+        'def fit_predict(train, score, **kw):\n'
+        '    train_exp = train[EXPOSURE].to_numpy()\n'
+        '    return score[EXPOSURE].to_numpy() * train_exp.mean(), {}\n',
+        encoding="utf-8",
+    )
+
+    assert scan_file_for_non_predictive_feature_use(script) == []

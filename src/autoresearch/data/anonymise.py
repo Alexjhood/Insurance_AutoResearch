@@ -43,6 +43,8 @@ def infer_role(column: str, series: pd.Series, id_column: str) -> str:
         return "record_id"
     if lower in {"claimnb", "claimamount", "claimamountcount"}:
         return "target_or_outcome"
+    if lower == "exposure":
+        return "exposure_offset"
     if pd.api.types.is_numeric_dtype(series):
         return "numeric_feature"
     return "categorical_feature"

@@ -6,6 +6,8 @@ import json
 import re
 from typing import Any
 
+from autoresearch.feature_policy import NON_PREDICTIVE_COLUMNS, predictive_columns
+
 
 VALID_STATUSES = {
     "proposed", "validated", "running", "completed", "failed",
@@ -27,9 +29,9 @@ def allowed_search_space(config, agent_schema: dict[str, Any] | None = None) -> 
     feature_columns = []
     if agent_schema:
         feature_columns = [
-            item["name"]
-            for item in agent_schema.get("columns", [])
-            if item["name"] not in TARGET_COLUMNS and item.get("role") != "target_or_outcome"
+            name
+            for name in predictive_columns(agent_schema.get("columns", []))
+            if name not in TARGET_COLUMNS
         ]
 
     families = list(ss.get("model_families", ["global_mean"]))
@@ -38,6 +40,14 @@ def allowed_search_space(config, agent_schema: dict[str, Any] | None = None) -> 
         "model_families": families,
         "target_strategies": list(ss.get("target_strategies", ["direct_pure_premium", "frequency_severity"])),
         "feature_columns": feature_columns,
+        "non_predictive_columns": sorted(NON_PREDICTIVE_COLUMNS),
+        "feature_policy": {
+            "exposure_term_a": (
+                "Use only for exposure weights, frequency/severity denominators, "
+                "and converting predicted pure premium rates to claim costs. "
+                "Do not use as a predictive model feature because it is unavailable at quote time."
+            )
+        },
         "branch_actions": ["extend_current", "new_branch"],
         "allow_legacy_baselines": bool(ss.get("allow_legacy_baselines", False)),
         "allow_open_model_families": bool(ss.get("allow_open_model_families", False)),
@@ -110,6 +120,7 @@ def validate_proposal(proposal: dict[str, Any], search_space: dict[str, Any]) ->
             if not isinstance(script_path, str) or not script_path.strip():
                 errors.append("model.script_path is required for non-global_mean autonomous experiments")
         allowed_features = set(search_space.get("feature_columns", []))
+        non_predictive = set(search_space.get("non_predictive_columns", []))
         for key in ("feature_inclusions", "feature_exclusions"):
             value = model.get(key)
             if value is None:
@@ -117,8 +128,13 @@ def validate_proposal(proposal: dict[str, Any], search_space: dict[str, Any]) ->
             if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
                 errors.append(f"model.{key} must be a list of strings")
                 continue
+            forbidden = sorted(set(value).intersection(non_predictive))
+            if forbidden:
+                errors.append(
+                    f"model.{key} must not contain non-predictive columns reserved for weighting/response: {forbidden}"
+                )
             if allowed_features:
-                unknown = sorted(set(value).difference(allowed_features))
+                unknown = sorted(set(value).difference(allowed_features).difference(non_predictive))
                 if unknown:
                     errors.append(f"model.{key} contains unknown features: {unknown}")
 

@@ -2,7 +2,8 @@
 
 All commands are invoked as `autoresearch [--track NAME] [--run-id ID] <command>`.
 Global flags `--track` and `--run-id` scope all artifact paths and the registry to
-`artifacts/tracks/<NAME>/runs/<ID>/`.
+`artifacts/tracks/<NAME>/runs/<ID>/`. Use `--new-run` instead of `--run-id` when
+starting a fresh timestamped run in a track.
 
 ---
 
@@ -28,6 +29,12 @@ Idempotently prepare data, registry, baselines, champion, templates, and context
 
 ```bash
 autoresearch --track demo --run-id quickstart bootstrap-track
+```
+
+For new agent runs, prefer `--new-run` so the run folder includes date and time:
+
+```bash
+autoresearch --track demo --new-run bootstrap-track
 ```
 
 Writes: registry, baseline experiments, official champion, proposal templates, and handoff context under the run directory.

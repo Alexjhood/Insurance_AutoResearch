@@ -427,7 +427,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Run id within the selected track. Tracked artifacts are written to "
             "artifacts/tracks/<track>/runs/<ID>/. Omit to continue the latest run "
-            "or create a timestamped run when none exists."
+            "or combine --track with --new-run to force a fresh timestamped run."
+        ),
+    )
+    parser.add_argument(
+        "--new-run",
+        action="store_true",
+        help=(
+            "Create a fresh timestamped run within the selected track. "
+            "Use this for new agent sessions; omit it to continue the latest run."
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -509,10 +517,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "new_run", False) and getattr(args, "run_id", None):
+        parser.error("--new-run cannot be used together with --run-id")
     config = load_config(
         args.config,
         track_id=getattr(args, "track", None),
         run_id=getattr(args, "run_id", None),
+        new_run=getattr(args, "new_run", False),
     )
     handler = COMMANDS.get(args.command)
     if handler is None:

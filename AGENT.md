@@ -39,19 +39,21 @@ This applies to every cycle, including the very first proposal of a fresh run.
 
 ## Quick-start — how to interpret short user instructions
 
-Your default track is **`claude`**. Your default cycle count is **3**. Omit `--run-id` and the framework picks up the latest run (or creates a timestamped one).
+Your default track is your current tool name: **`codex`** when running in Codex, **`claude`** when running in Claude Code. Your default cycle count is **3**.
+
+For a **new run**, always pass `--new-run`; this creates a fresh timestamped folder such as `artifacts/tracks/codex/runs/20260527T211530Z/`. For **continue** instructions, omit both `--new-run` and `--run-id` so the framework picks up that track's latest run. Only pass `--run-id` when the user explicitly supplies one.
 
 | User says | What to do |
 |-----------|-----------|
-| "Go!" / "Start" | Bootstrap, read handoff, run 3 cycles |
-| "Run X experiments" | Bootstrap, read handoff, run X cycles |
+| "Go!" / "Start" | Bootstrap a new timestamped run in your tool track, read handoff, run 3 cycles |
+| "Run X experiments" | Bootstrap a new timestamped run in your tool track, read handoff, run X cycles |
 | "Continue" / "Keep going" | Read handoff, run 3 cycles (skip bootstrap) |
 | "Continue and run Y" | Read handoff, run Y cycles (skip bootstrap) |
 | "Bootstrap only" | Bootstrap and read handoff, then stop |
 
-**Bootstrap** — idempotent, safe to run at the start of every fresh conversation:
+**Bootstrap** — run once at the start of every fresh conversation:
 ```bash
-autoresearch --track claude bootstrap-track
+autoresearch --track <codex-or-claude> --new-run bootstrap-track
 ```
 
 **Read handoff** — always do this after bootstrap or at the start of a continuing session:
@@ -62,24 +64,34 @@ autoresearch --track claude bootstrap-track
 
 **Run N cycles** — `run-session-cycles` requires an active session. On a fresh run, create one first (idempotent name is fine):
 ```bash
-autoresearch --track claude start-session main         # only needed once per run
-autoresearch --track claude run-session-cycles <N>
+autoresearch --track <codex-or-claude> start-session main         # only needed once per run
+autoresearch --track <codex-or-claude> run-session-cycles <N>
 ```
 
-If the user supplies a specific `--run-id` (e.g. `CC20260526_01`), pass it to every command. Otherwise omit it.
+If the user supplies a specific `--run-id` (e.g. `CC20260526_01`), pass it to every command. Otherwise use `--new-run` for fresh starts and omit `--run-id` for continues.
 
 ---
 
 ## Session start — always do these first
 
+For a fresh run:
+
 ```bash
-autoresearch --track claude bootstrap-track      # idempotent; safe every time
-autoresearch --track claude start-session main   # idempotent name; required before run-session-cycles
-autoresearch --track claude list-champion-history
-autoresearch --track claude list-experiments
+autoresearch --track <codex-or-claude> --new-run bootstrap-track      # fresh run with timestamped folder
+autoresearch --track <codex-or-claude> start-session main             # idempotent name; required before run-session-cycles
+autoresearch --track <codex-or-claude> list-champion-history
+autoresearch --track <codex-or-claude> list-experiments
 ```
 
-Then read the handoff file printed by bootstrap and this run's `RESEARCH_LOG.md` before forming any hypothesis.
+For a continuing run, skip `bootstrap-track` and omit `--new-run`:
+
+```bash
+autoresearch --track <codex-or-claude> start-session main
+autoresearch --track <codex-or-claude> list-champion-history
+autoresearch --track <codex-or-claude> list-experiments
+```
+
+Then read the handoff file printed by bootstrap (or the latest handoff for a continuing run) and this run's `RESEARCH_LOG.md` before forming any hypothesis.
 
 **Also check for** `artifacts/tracks/<track>/runs/<run-id>/OPERATING_NOTES.md` — if present, it's a per-run cheatsheet (current champion, registry path, std_lift, proposal schema) curated by prior sessions to skip rediscovery.
 
@@ -105,7 +117,7 @@ The inbox JSON has a strict schema. Before writing your first proposal in a fres
 
 ### C. Inbox audit (prevents re-submitting stale stubs)
 
-`ls proposal_inbox/` at session start. Any pre-existing `model_*.py` may contain bugs from prior sessions (wrong target column, missing exposure-as-feature, outdated calibration). Either:
+`ls proposal_inbox/` at session start. Any pre-existing `model_*.py` may contain bugs from prior sessions (wrong target column, exposure incorrectly used as a predictive feature, outdated calibration). Either:
 - pick a fresh filename with a session prefix (e.g. `s3_<name>.py`), or
 - `Read` the existing file in full and audit it before reuse.
 
@@ -322,7 +334,7 @@ Append to `artifacts/tracks/<track>/runs/<run-id>/RESEARCH_LOG.md` (this run's l
 | Column | Role | Notes |
 |--------|------|-------|
 | `record_id` | ID | Float; policy identifier |
-| `exposure_term_a` | Offset | Policy duration in years (use as exposure weight) |
+| `exposure_term_a` | Offset | Policy duration in years. Use only for exposure weights, response denominators, and multiplying predicted rates back to claim costs; do **not** use as a predictive feature because it is unavailable at quote time. |
 | `vehicle_power_band_b` | Feature | Numeric 1–12 |
 | `vehicle_age_band_c` | Feature | Numeric (years) |
 | `driver_age_band_d` | Feature | Numeric (years) |
@@ -388,16 +400,16 @@ experiments, champion history, or metrics of any other track.
 ### Starting a track session
 
 ```bash
-# One-command setup for a new or existing isolated run
-autoresearch --track claude --run-id ClaudeTimeX bootstrap-track
+# One-command setup for a new isolated run
+autoresearch --track <codex-or-claude> --new-run bootstrap-track
 
 # Replace 'claude' with the agent identifier for your session
-autoresearch --track claude --run-id ClaudeTimeX init-registry
-autoresearch --track claude --run-id ClaudeTimeX run-all-baselines
-autoresearch --track claude --run-id ClaudeTimeX init-official-champion
-autoresearch --track claude --run-id ClaudeTimeX export-context   # read this at session start
-autoresearch --track claude --run-id ClaudeTimeX start-session main
-autoresearch --track claude --run-id ClaudeTimeX run-session-cycles 10
+autoresearch --track <codex-or-claude> init-registry
+autoresearch --track <codex-or-claude> run-all-baselines
+autoresearch --track <codex-or-claude> init-official-champion
+autoresearch --track <codex-or-claude> export-context   # read this at session start
+autoresearch --track <codex-or-claude> start-session main
+autoresearch --track <codex-or-claude> run-session-cycles 10
 ```
 
 `bootstrap-track` is idempotent. It prepares shared data if needed, creates or
@@ -406,10 +418,11 @@ experiments, initializes the official champion if missing, writes proposal
 templates, and exports the latest context bundle. Use it at the start of a new
 ClaudeCode/Codex conversation when you want the agent to configure its own run.
 
-All standard commands accept `--track <name> --run-id <id>`. If `--run-id` is
-omitted, the command continues the track's latest run, or creates a timestamped
-run when no latest run exists. Without `--track`, commands operate on the legacy
-default paths (backward-compatible).
+All standard commands accept `--track <name> --run-id <id>`. New agent runs
+should use `--track <tool-name> --new-run bootstrap-track`, which creates a
+timestamped run id. If `--run-id` and `--new-run` are both omitted, the command
+continues the track's latest run. Without `--track`, commands operate on the
+legacy default paths (backward-compatible).
 
 Tracked run layout:
 
@@ -459,9 +472,12 @@ autoresearch list-tracks   # see all tracks and their current champion
 
 ### Safety rules for tracked sessions
 
-6. **Always pass `--track <your-agent-name>` and the intended `--run-id` to
-   every command.** Running without `--track` writes to the shared default
-   registry and is reserved for human/admin operations.
+6. **Always pass `--track <your-agent-name>` to every command.** Use `codex`
+   for Codex and `claude` for Claude Code. Use `--new-run` only on the first
+   command of a fresh run, then omit `--run-id` to continue that track's latest
+   timestamped run unless the user explicitly gives a run id. Running without
+   `--track` writes to the shared default registry and is reserved for
+   human/admin operations.
 
 7. **Never read another track's context bundle.**  The files under
    `artifacts/tracks/<other-agent>/` are off-limits during your session.

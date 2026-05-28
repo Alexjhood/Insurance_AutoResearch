@@ -294,6 +294,7 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "## Key constraints",
         "",
         f"- **Features available**: {feature_list}",
+        "- **Exposure policy**: `exposure_term_a` is not a predictive feature. Use it only for sample weights, frequency/severity denominators, and multiplying predicted pure-premium rates back to claim costs.",
         f"- **Target strategies**: {', '.join(f'`{s}`' for s in target_strategies)}",
         "- **Claim cap**: `100000` (fixed — never change `claim_cap_threshold`)",
         "- **`model.py` interface**: must expose `fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hyperparameters) -> tuple[np.ndarray, dict]`",
@@ -331,6 +332,7 @@ def proposal_schema_document(config: ProjectConfig, context: dict[str, Any]) -> 
             "experiment_config.experiment_name must equal experiment_name.",
             "experiment_config.parent_experiment_id must equal parent_experiment_id.",
             "experiment_config.model.script_path is required for non-global_mean autonomous experiments.",
+            "Do not use exposure_term_a as a predictive feature; it is reserved for weights and response calculations.",
             "Do not reference milestone_holdout.",
         ],
     }
