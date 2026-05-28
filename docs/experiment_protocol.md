@@ -6,13 +6,19 @@
 
 Fast single-pass evaluation on `search_validation`. Input data comes exclusively from `agent_dataset_search.parquet` — holdout rows are never visible.
 
-**Primary metric**: `tweedie_deviance_p15` (Tweedie deviance at power=1.5). This is a proper scoring rule for compound Poisson-Gamma loss and is the industry standard for motor insurance pure premium modelling.
+**Target mode**: `burning_cost` by default. Use `--target-mode frequency` or
+`evaluation.target_mode = "frequency"` only when a run should model expected
+claim counts/frequency instead of claim cost.
+
+**Primary metric**: configured in `[evaluation]`; the default is
+`gini_weighted`. Burning-cost runs also record Tweedie deviance at power 1.5 on
+pure premium. Frequency runs also record Poisson deviance on claim frequency.
 
 Additional panel metrics are recorded for diagnostic purposes but not used for promotion decisions:
 - `gini_weighted` — exposure-weighted Gini (rank discrimination, scale-invariant)
-- `double_lift_slope` — OLS slope of actual on predicted pure premium by decile
+- `double_lift_slope` — OLS slope of actual on predicted target rate by decile
 - `predicted_to_actual_ratio` — aggregate calibration (target: ≈ 1.0)
-- `poisson_deviance`, `weighted_mae_claim_cost`, `weighted_rmse_claim_cost`
+- target-specific totals and errors such as `weighted_mae_claim_cost` or `weighted_mae_claim_count`
 
 Calibration diagnostics (`diagnostics.json`) are written alongside every experiment:
 - Predicted-to-actual ratio by predicted decile and by exposure band
@@ -24,8 +30,8 @@ Calibration diagnostics (`diagnostics.json`) are written alongside every experim
 A challenger is compared to the champion via `compare-experiments` or `compare-to-champion`. This runs paired bootstrap resampling over `search_validation` and applies the promotion gate.
 
 **All 8 gate checks must pass for promotion**:
-1. Mean lift > 0 (challenger Tweedie deviance < champion)
-2. Relative lift ≥ 0.5% of champion score (prevents promotion on numerical noise)
+1. Mean lift > 0 (challenger improves the configured primary metric)
+2. Relative lift ≥ the configured fraction of champion score (prevents promotion on numerical noise)
 3. Absolute lift ≥ `min_absolute_lift` (default 0)
 4. Challenger win rate ≥ 60% across paired resamples
 5. Bootstrap 90% CI lower bound ≥ 0

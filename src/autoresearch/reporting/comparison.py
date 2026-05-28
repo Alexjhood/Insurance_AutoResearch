@@ -11,7 +11,8 @@ import numpy as np
 import pandas as pd
 
 from autoresearch.config import ProjectConfig
-from autoresearch.evaluation.metrics import full_metric_panel
+from autoresearch.evaluation.metrics import full_metric_panel, prediction_target_columns
+from autoresearch.targets import target_spec
 from autoresearch.experiment_registry.registry import (
     get_experiment,
     list_artifacts,
@@ -35,6 +36,14 @@ METRIC_KEYS = [
     "mean_predicted_pure_premium",
     "total_actual_claim_cost",
     "total_predicted_claim_cost",
+    "total_actual_claim_count",
+    "total_predicted_claim_count",
+    "weighted_mae_claim_count",
+    "weighted_rmse_claim_count",
+    "mean_actual_frequency",
+    "mean_predicted_frequency",
+    "rmse_frequency",
+    "mae_frequency",
 ]
 
 _BAND_COUNTS = [5, 10, 20, 50]
@@ -67,34 +76,40 @@ def write_comparison_html_report(
     eval_split = config.ordinary_eval_splits[0]
     champion_eval = champion_predictions[champion_predictions["split"] == eval_split].copy()
     challenger_eval = challenger_predictions[challenger_predictions["split"] == eval_split].copy()
+    target_mode = config.target_mode
+    spec = target_spec(target_mode)
+    champ_actual_col, champ_predicted_col = prediction_target_columns(champion_eval, target_mode)
+    chall_actual_col, chall_predicted_col = prediction_target_columns(challenger_eval, target_mode)
 
     champion_metrics = full_metric_panel(
-        champion_eval["actual_claim_cost"],
-        champion_eval["predicted_claim_cost"],
+        champion_eval[champ_actual_col],
+        champion_eval[champ_predicted_col],
         champion_eval["exposure"],
         tweedie_power=config.tweedie_power,
+        target_mode=target_mode,
     )
     challenger_metrics = full_metric_panel(
-        challenger_eval["actual_claim_cost"],
-        challenger_eval["predicted_claim_cost"],
+        challenger_eval[chall_actual_col],
+        challenger_eval[chall_predicted_col],
         challenger_eval["exposure"],
         tweedie_power=config.tweedie_power,
+        target_mode=target_mode,
     )
 
     lift_data = {
-        "champion": _compute_lift_data(champion_eval, _BAND_COUNTS),
-        "challenger": _compute_lift_data(challenger_eval, _BAND_COUNTS),
+        "champion": _compute_lift_data(champion_eval, _BAND_COUNTS, target_mode=target_mode),
+        "challenger": _compute_lift_data(challenger_eval, _BAND_COUNTS, target_mode=target_mode),
     }
-    double_lift_data = _compute_double_lift_data(champion_eval, challenger_eval, _BAND_COUNTS)
+    double_lift_data = _compute_double_lift_data(champion_eval, challenger_eval, _BAND_COUNTS, target_mode=target_mode)
     gini_data = {
-        "champion": _compute_gini_curve(champion_eval, _GINI_CURVE_POINTS),
-        "challenger": _compute_gini_curve(challenger_eval, _GINI_CURVE_POINTS),
+        "champion": _compute_gini_curve(champion_eval, _GINI_CURVE_POINTS, target_mode=target_mode),
+        "challenger": _compute_gini_curve(challenger_eval, _GINI_CURVE_POINTS, target_mode=target_mode),
     }
     pred_hist_data = {
-        "champion": _compute_pred_histogram(champion_eval, _HIST_BINS),
-        "challenger": _compute_pred_histogram(challenger_eval, _HIST_BINS),
+        "champion": _compute_pred_histogram(champion_eval, _HIST_BINS, target_mode=target_mode),
+        "challenger": _compute_pred_histogram(challenger_eval, _HIST_BINS, target_mode=target_mode),
     }
-    diff_data = _compute_diff_data(champion_eval, challenger_eval)
+    diff_data = _compute_diff_data(champion_eval, challenger_eval, target_mode=target_mode)
 
     # The comparison report is generated *before* set_official_champion is called, so
     # the challenger's promotion has not yet been written to champion_history.  Pass the
@@ -110,6 +125,8 @@ def write_comparison_html_report(
         comparison_id=comparison_id,
         eval_split=eval_split,
         primary_metric=config.primary_metric,
+        target_mode=target_mode,
+        rate_label=spec.rate_label,
         decision=decision,
         comparison_summary=comparison_summary,
         bootstrap_summary=bootstrap_summary,
@@ -164,6 +181,7 @@ def _experiment_details(config: ProjectConfig, experiment_id: str) -> dict[str, 
         "experiment_name": experiment.get("experiment_name"),
         "model_family": experiment.get("model_family"),
         "target_strategy": experiment.get("target_strategy"),
+        "target_mode": experiment.get("target_mode") or snapshot.get("target_mode"),
         "mean_score": experiment.get("mean_score"),
         "status": experiment.get("status"),
         "preprocessing": snapshot.get("effective_preprocessing"),
@@ -246,16 +264,21 @@ def _equal_exposure_bins(exposure_sorted: np.ndarray, n_bins: int) -> np.ndarray
     return np.ceil(cum_exp / total_exp * n_bins).clip(1, n_bins).astype(int)
 
 
-def _compute_lift_data(frame: pd.DataFrame, band_counts: list[int]) -> dict[str, list[dict]]:
+def _compute_lift_data(frame: pd.DataFrame, band_counts: list[int], *, target_mode: str) -> dict[str, list[dict]]:
     """
-    Sort policies by predicted pure premium (ascending = lowest risk first).
-    Bin into equal-exposure bands. Per band: actual PP, predicted PP, A/E ratio, exposure.
+    Sort policies by predicted target rate (ascending = lowest risk first).
+    Bin into equal-exposure bands. Per band: actual rate, predicted rate, A/E ratio, exposure.
     """
     exp = frame["exposure"].astype(float).values
-    actual_cc = frame["actual_claim_cost"].astype(float).values
-    pred_cc = frame["predicted_claim_cost"].astype(float).values
+    actual_col, predicted_col = prediction_target_columns(frame, target_mode)
+    actual_cc = frame[actual_col].astype(float).values
+    pred_cc = frame[predicted_col].astype(float).values
 
-    sort_idx = frame["predicted_pure_premium"].astype(float).argsort().values
+    spec = target_spec(target_mode)
+    if spec.rate_predicted_column in frame.columns:
+        sort_idx = frame[spec.rate_predicted_column].astype(float).argsort().values
+    else:
+        sort_idx = (frame[predicted_col].astype(float) / frame["exposure"].astype(float).clip(lower=1e-12)).argsort().values
     exp_s = exp[sort_idx]
     actual_s = actual_cc[sort_idx]
     pred_s = pred_cc[sort_idx]
@@ -289,6 +312,8 @@ def _compute_double_lift_data(
     champion: pd.DataFrame,
     challenger: pd.DataFrame,
     band_counts: list[int],
+    *,
+    target_mode: str,
 ) -> dict[str, dict[str, list[dict]]]:
     """
     Returns {"equal_exposure": {n: [bands]}, "equal_width": {n: [bands]}}.
@@ -296,16 +321,20 @@ def _compute_double_lift_data(
     equal_exposure: bins by equal total exposure; x = band ordinal (1..N).
     equal_width: bins by equal-width ratio intervals; x = ratio midpoint.
     """
-    paired = champion[["record_id", "actual_claim_cost", "predicted_claim_cost", "exposure"]].merge(
-        challenger[["record_id", "predicted_claim_cost"]],
+    actual_col, champion_predicted_col = prediction_target_columns(champion, target_mode)
+    _, challenger_predicted_col = prediction_target_columns(challenger, target_mode)
+    paired = champion[["record_id", actual_col, champion_predicted_col, "exposure"]].merge(
+        challenger[["record_id", challenger_predicted_col]],
         on="record_id",
         suffixes=("_champ", "_chall"),
     ).copy()
 
     exp = paired["exposure"].astype(float).values
-    actual_cc = paired["actual_claim_cost"].astype(float).values
-    champ_cc = paired["predicted_claim_cost_champ"].astype(float).values
-    chall_cc = paired["predicted_claim_cost_chall"].astype(float).values
+    actual_cc = paired[actual_col].astype(float).values
+    champ_col = f"{champion_predicted_col}_champ" if champion_predicted_col == challenger_predicted_col else champion_predicted_col
+    chall_col = f"{challenger_predicted_col}_chall" if champion_predicted_col == challenger_predicted_col else challenger_predicted_col
+    champ_cc = paired[champ_col].astype(float).values
+    chall_cc = paired[chall_col].astype(float).values
 
     champ_pp_pol = champ_cc / exp.clip(min=1e-12)
     chall_pp_pol = chall_cc / exp.clip(min=1e-12)
@@ -389,16 +418,14 @@ def _compute_double_lift_data(
     return {"equal_exposure": ee_result, "equal_width": ew_result}
 
 
-def _compute_gini_curve(frame: pd.DataFrame, n_points: int = 400) -> dict:
-    """Lorenz curve sorted by predicted pure premium ascending."""
+def _compute_gini_curve(frame: pd.DataFrame, n_points: int = 400, *, target_mode: str) -> dict:
+    """Lorenz curve sorted by predicted target rate ascending."""
     f = frame.copy()
-    f["_pred_pp"] = (
-        f["predicted_claim_cost"].astype(float)
-        / f["exposure"].astype(float).clip(lower=1e-12)
-    )
+    actual_col, predicted_col = prediction_target_columns(f, target_mode)
+    f["_pred_pp"] = f[predicted_col].astype(float) / f["exposure"].astype(float).clip(lower=1e-12)
     ordered = f.sort_values("_pred_pp", ascending=True)
     exposure = ordered["exposure"].astype(float).values
-    actual_cost = ordered["actual_claim_cost"].astype(float).values
+    actual_cost = ordered[actual_col].astype(float).values
 
     total_exp = float(exposure.sum())
     total_cost = float(actual_cost.sum())
@@ -426,9 +453,14 @@ def _compute_gini_curve(frame: pd.DataFrame, n_points: int = 400) -> dict:
     return {"x": x, "y": y, "gini": gini}
 
 
-def _compute_pred_histogram(frame: pd.DataFrame, n_bins: int = 40) -> dict:
-    """Exposure-weighted histogram of predicted pure premiums (clipped at 1st/99th pct)."""
-    pp = frame["predicted_pure_premium"].astype(float).values
+def _compute_pred_histogram(frame: pd.DataFrame, n_bins: int = 40, *, target_mode: str) -> dict:
+    """Exposure-weighted histogram of predicted target rates (clipped at 1st/99th pct)."""
+    spec = target_spec(target_mode)
+    _, predicted_col = prediction_target_columns(frame, target_mode)
+    if spec.rate_predicted_column in frame.columns:
+        pp = frame[spec.rate_predicted_column].astype(float).values
+    else:
+        pp = (frame[predicted_col].astype(float) / frame["exposure"].astype(float).clip(lower=1e-12)).values
     exp = frame["exposure"].astype(float).values
     p1, p99 = float(np.percentile(pp, 1)), float(np.percentile(pp, 99))
     if p1 >= p99:
@@ -443,20 +475,24 @@ def _compute_pred_histogram(frame: pd.DataFrame, n_bins: int = 40) -> dict:
 
 
 def _compute_diff_data(
-    champion_eval: pd.DataFrame, challenger_eval: pd.DataFrame
+    champion_eval: pd.DataFrame, challenger_eval: pd.DataFrame, *, target_mode: str
 ) -> dict:
     """
-    Compute per-policy predicted PP differences between challenger and champion.
+    Compute per-policy predicted target-rate differences between challenger and champion.
     Returns exposure-weighted % diff histogram and a sampled scatter.
     """
-    paired = champion_eval[["record_id", "predicted_claim_cost", "exposure"]].merge(
-        challenger_eval[["record_id", "predicted_claim_cost"]],
+    _, champion_predicted_col = prediction_target_columns(champion_eval, target_mode)
+    _, challenger_predicted_col = prediction_target_columns(challenger_eval, target_mode)
+    paired = champion_eval[["record_id", champion_predicted_col, "exposure"]].merge(
+        challenger_eval[["record_id", challenger_predicted_col]],
         on="record_id",
         suffixes=("_champ", "_chall"),
     )
     exp = paired["exposure"].astype(float).values
-    champ_pp = paired["predicted_claim_cost_champ"].astype(float).values / exp.clip(min=1e-12)
-    chall_pp = paired["predicted_claim_cost_chall"].astype(float).values / exp.clip(min=1e-12)
+    champ_col = f"{champion_predicted_col}_champ" if champion_predicted_col == challenger_predicted_col else champion_predicted_col
+    chall_col = f"{challenger_predicted_col}_chall" if champion_predicted_col == challenger_predicted_col else challenger_predicted_col
+    champ_pp = paired[champ_col].astype(float).values / exp.clip(min=1e-12)
+    chall_pp = paired[chall_col].astype(float).values / exp.clip(min=1e-12)
 
     pct_diff = (chall_pp - champ_pp) / champ_pp.clip(min=1e-9) * 100.0
 
@@ -509,6 +545,8 @@ def _render_html(
     comparison_id: str,
     eval_split: str,
     primary_metric: str,
+    target_mode: str,
+    rate_label: str,
     decision: dict[str, Any],
     comparison_summary: dict[str, Any],
     bootstrap_summary: dict[str, Any],
@@ -894,8 +932,25 @@ document.querySelectorAll('input[name="hist-view"]').forEach(r=>r.addEventListen
 document.querySelectorAll('input[name="scatter-pct"]').forEach(r=>r.addEventListener('change',renderHist));
 renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
 """
+    if target_mode != "burning_cost":
+        js_code = (
+            js_code
+            .replace("Pure Premium", "Claim Frequency")
+            .replace("pure premium", "claim frequency")
+            .replace("Predicted PP", "Predicted frequency")
+            .replace("Actual PP", "Actual frequency")
+            .replace("Rel. PP", "Rel. frequency")
+            .replace("Mean PP", "Mean frequency")
+            .replace("predicted PP", "predicted frequency")
+            .replace("PP:", "Frequency:")
+            .replace("PP ", "frequency ")
+            .replace(" PP", " frequency")
+            .replace("claim cost", "claim count")
+            .replace("Claim Cost", "Claim Count")
+            .replace("£", "")
+        )
 
-    return f"""<!doctype html>
+    html = f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -1091,6 +1146,18 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
 </body>
 </html>
 """
+    if target_mode != "burning_cost":
+        html = (
+            html
+            .replace("pure premium", "claim frequency")
+            .replace("Pure Premium", "Claim Frequency")
+            .replace("predicted PP", "predicted frequency")
+            .replace("PP", "frequency")
+            .replace("claim cost", "claim count")
+            .replace("Claim Cost", "Claim Count")
+            .replace("£", "")
+        )
+    return html
 
 
 # ---------------------------------------------------------------------------

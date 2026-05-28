@@ -10,6 +10,7 @@ import pandas as pd
 
 from autoresearch.config import ProjectConfig, ensure_project_dirs
 from autoresearch.evaluation.metrics import lower_is_better
+from autoresearch.evaluation.metrics import infer_target_mode
 from autoresearch.utils.integrity import check_integrity
 from autoresearch.evaluation.resampling import (
     PromotionRules,
@@ -49,12 +50,14 @@ def run_repeated_evaluation(config: ProjectConfig, experiment_id: str) -> dict[s
         resample_fraction=config.resample_fraction,
         tweedie_power=config.tweedie_power,
         primary_metric=config.primary_metric,
+        target_mode=config.target_mode,
     )
     summary = {
         "experiment_id": experiment_id,
         "experiment_name": experiment.get("experiment_name"),
         "eval_split": eval_split,
         "primary_metric": config.primary_metric,
+        "target_mode": config.target_mode,
         "lower_is_better": lower_is_better(config.primary_metric),
         "n_resamples": config.repeated_resamples,
         "resample_fraction": config.resample_fraction,
@@ -102,6 +105,18 @@ def compare_experiments(
 
     champion_predictions = pd.read_parquet(_artifact_path(config, champion_id, "predictions"))
     challenger_predictions = pd.read_parquet(_artifact_path(config, challenger_id, "predictions"))
+    champion_target_mode = infer_target_mode(champion_predictions)
+    challenger_target_mode = infer_target_mode(challenger_predictions)
+    if champion_target_mode != challenger_target_mode:
+        raise ValueError(
+            "Cannot compare experiments with different target modes: "
+            f"{champion_id}={champion_target_mode}, {challenger_id}={challenger_target_mode}"
+        )
+    if champion_target_mode != config.target_mode:
+        raise ValueError(
+            f"Configured target_mode {config.target_mode!r} does not match comparison artifacts "
+            f"({champion_target_mode!r})"
+        )
     eval_split = config.ordinary_eval_splits[0]
 
     per_resample, comparison_summary = paired_comparison(
@@ -115,6 +130,7 @@ def compare_experiments(
         resample_fraction=config.resample_fraction,
         tweedie_power=config.tweedie_power,
         primary_metric=config.primary_metric,
+        target_mode=config.target_mode,
     )
 
     # Load challenger diagnostics for calibration gate check

@@ -3,9 +3,9 @@ model_family = "global_mean"
 target_strategy = "direct_pure_premium"
 parent_experiment_id = ""
 
-# Every research run begins here: a flat burning cost.  All subsequent
-# experiments must demonstrate real lift over this constant rate before
-# anything more complex earns a place in the champion lineage.
+# Every research run begins here: a flat exposure-weighted rate for the active
+# target mode. In the default burning-cost mode this is a flat burning cost;
+# in frequency mode this is a flat expected claim count per exposure.
 
 [preprocessing]
 claim_capping_enabled = true

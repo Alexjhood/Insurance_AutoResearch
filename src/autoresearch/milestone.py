@@ -9,6 +9,10 @@ the milestone holdout.  The resulting report surfaces:
 - Gini and double-lift on holdout
 - Calibration deciles on holdout
 
+The active target mode is preserved from the promoted experiment: burning-cost
+runs are evaluated on claim cost, while frequency runs are evaluated on claim
+count/frequency.
+
 The holdout rows are accessed via ``load_holdout_dataset`` which requires
 the ``AUTORESEARCH_MILESTONE_TOKEN`` environment variable.  If the token is
 not set or the vault is absent, the evaluation is skipped with a warning
@@ -28,8 +32,9 @@ import pandas as pd
 from autoresearch.config import ProjectConfig
 from autoresearch.data.preprocessing import apply_claim_capping
 from autoresearch.evaluation.diagnostics import compute_diagnostics
-from autoresearch.evaluation.metrics import full_metric_panel
+from autoresearch.evaluation.metrics import full_metric_panel, prediction_target_columns
 from autoresearch.models.dispatcher import RAW_CLAIM_COST, dispatch_model
+from autoresearch.targets import BURNING_COST, target_spec
 from autoresearch.experiment_registry.registry import list_artifacts
 from autoresearch.utils.io import read_json, write_json
 
@@ -43,6 +48,8 @@ Champion model family: `{model_family}`
 
 ---
 
+Target mode: `{target_mode}`
+
 ## Search-validation (SV) vs Holdout comparison
 
 | Metric | Search-validation | Holdout | SV→Holdout gap |
@@ -52,7 +59,7 @@ Champion model family: `{model_family}`
 | Double-lift slope | {sv_dl:.4f} | {ho_dl:.4f} | {gap_dl:+.4f} |
 | Pred/actual ratio | {sv_pa:.4f} | {ho_pa:.4f} | {gap_pa:+.4f} |
 
-## Holdout calibration (predicted decile)
+## Holdout calibration (predicted {rate_label} decile)
 
 {calibration_table}
 
@@ -128,6 +135,8 @@ def _run_evaluation(
 
     model_family = exp.get("model_family", "global_mean")
     target_strategy = exp.get("target_strategy", "direct_pure_premium")
+    target_mode = snapshot.get("target_mode") or snapshot.get("evaluation", {}).get("target_mode") or config.target_mode
+    spec = target_spec(target_mode)
     model_cfg = exp.get("model", {})
     preprocessing = exp.get("preprocessing", {})
 
@@ -189,36 +198,44 @@ def _run_evaluation(
         feature_exclusions=model_cfg.get("feature_exclusions") or None,
         model_script_path=model_script_path,
         allow_holdout_split=True,
+        target_mode=target_mode,
     )
 
     holdout_preds = model_result.predictions[model_result.predictions["split"] == "milestone_holdout"]
     if holdout_preds.empty:
         raise ValueError("No holdout rows in milestone predictions — check split pack")
 
+    ho_actual_col, ho_predicted_col = prediction_target_columns(holdout_preds, target_mode)
+    sv_actual_col, sv_predicted_col = prediction_target_columns(sv_only, target_mode)
     ho_metrics = full_metric_panel(
-        holdout_preds["actual_claim_cost"],
-        holdout_preds["predicted_claim_cost"],
+        holdout_preds[ho_actual_col],
+        holdout_preds[ho_predicted_col],
         holdout_preds["exposure"],
         tweedie_power=config.tweedie_power,
+        target_mode=target_mode,
     )
     sv_metrics = full_metric_panel(
-        sv_only["actual_claim_cost"],
-        sv_only["predicted_claim_cost"],
+        sv_only[sv_actual_col],
+        sv_only[sv_predicted_col],
         sv_only["exposure"],
         tweedie_power=config.tweedie_power,
+        target_mode=target_mode,
     )
 
     # Calibration on holdout
     holdout_preds_for_diag = holdout_preds.copy()
     holdout_preds_for_diag["split"] = "milestone_holdout"
     try:
-        diag = compute_diagnostics(holdout_preds_for_diag, eval_split="milestone_holdout")
-        cal_rows = diag.get("calibration_by_predicted_decile", [])
-        cal_lines = ["| Decile | Pred PP | Actual PP | Pred/Actual |", "|--------|--------:|----------:|------------:|"]
+        diag = compute_diagnostics(holdout_preds_for_diag, eval_split="milestone_holdout", target_mode=target_mode)
+        cal_rows = diag.get("calibration_by_pred_decile", [])
+        cal_lines = [
+            f"| Decile | Pred {spec.rate_label} | Actual {spec.rate_label} | Actual/Pred |",
+            "|--------|--------:|----------:|------------:|",
+        ]
         for row in cal_rows:
             cal_lines.append(
-                f"| {row.get('decile','?')} | {row.get('mean_predicted_pure_premium',0):.4f} | "
-                f"{row.get('mean_actual_pure_premium',0):.4f} | {row.get('predicted_to_actual_ratio',0):.4f} |"
+                f"| {row.get('decile','?')} | {row.get('pred_rate', row.get('pred_pp', 0)):.4f} | "
+                f"{row.get('actual_rate', row.get('actual_pp', 0)):.4f} | {row.get('ratio', 0):.4f} |"
             )
         calibration_table = "\n".join(cal_lines)
     except Exception:
@@ -229,6 +246,8 @@ def _run_evaluation(
         date=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         champion_id=champion_id,
         model_family=model_family,
+        target_mode=target_mode,
+        rate_label=spec.rate_label,
         sv_tweedie=sv_metrics["tweedie_deviance_p15"],
         ho_tweedie=ho_metrics["tweedie_deviance_p15"],
         gap_tweedie=ho_metrics["tweedie_deviance_p15"] - sv_metrics["tweedie_deviance_p15"],
@@ -249,6 +268,7 @@ def _run_evaluation(
         "promotion_id": promotion_id,
         "champion_id": champion_id,
         "model_family": model_family,
+        "target_mode": target_mode,
         "status": "completed",
         "search_validation_metrics": sv_metrics,
         "holdout_metrics": ho_metrics,

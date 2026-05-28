@@ -249,6 +249,13 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
     search_space = context.get("allowed_search_space") or {}
     features = search_space.get("feature_columns") or []
     target_strategies = search_space.get("target_strategies") or ["direct_pure_premium"]
+    target_mode = search_space.get("active_target_mode") or config.target_mode
+    return_instruction = (
+        "Return expected claim counts (not rates): if predicting annual claim frequency, multiply by "
+        "`score['exposure_term_a']`"
+        if target_mode == "frequency"
+        else "Return claim costs (not rates): if predicting pure premium, multiply by `score['exposure_term_a']`"
+    )
     feature_list = ", ".join(f"`{f}`" for f in features)
 
     template_json = json.dumps({
@@ -293,12 +300,13 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "",
         "## Key constraints",
         "",
+        f"- **Target mode**: `{target_mode}`",
         f"- **Features available**: {feature_list}",
-        "- **Exposure policy**: `exposure_term_a` is not a predictive feature. Use it only for sample weights, frequency/severity denominators, and multiplying predicted pure-premium rates back to claim costs.",
+        "- **Exposure policy**: `exposure_term_a` is not a predictive feature. Use it only for sample weights, response denominators, and multiplying predicted rates back to target totals.",
         f"- **Target strategies**: {', '.join(f'`{s}`' for s in target_strategies)}",
         "- **Claim cap**: `100000` (fixed — never change `claim_cap_threshold`)",
         "- **`model.py` interface**: must expose `fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hyperparameters) -> tuple[np.ndarray, dict]`",
-        "- **Return claim costs** (not rates): if predicting pure premium, multiply by `score['exposure_term_a']`",
+        f"- **{return_instruction}**",
         "- **Always apply** `apply_training_calibration` from `autoresearch.models.calibration` before returning",
         "- **Never reference** `milestone_holdout`, `holdout_vault`, or `AUTORESEARCH_MILESTONE_TOKEN`",
         "",
@@ -333,6 +341,7 @@ def proposal_schema_document(config: ProjectConfig, context: dict[str, Any]) -> 
             "experiment_config.parent_experiment_id must equal parent_experiment_id.",
             "experiment_config.model.script_path is required for non-global_mean autonomous experiments.",
             "Do not use exposure_term_a as a predictive feature; it is reserved for weights and response calculations.",
+            f"Active target_mode is {config.target_mode}; use frequency only when the run was explicitly configured for it.",
             "Do not reference milestone_holdout.",
         ],
     }
@@ -356,8 +365,10 @@ def render_cycle_summary(summary: dict[str, Any]) -> str:
         lines += [
             "",
             "## Key metrics",
-            f"- challenger Gini: {metrics.get('challenger_gini', 'n/a')}",
-            f"- champion Gini:   {metrics.get('champion_gini', 'n/a')}",
+            f"- target_mode:     {metrics.get('target_mode', 'n/a')}",
+            f"- primary_metric:  {metrics.get('primary_metric', 'n/a')}",
+            f"- challenger score: {metrics.get('challenger_score', 'n/a')}",
+            f"- champion score:   {metrics.get('champion_score', 'n/a')}",
             f"- mean lift:       {metrics.get('mean_lift', 'n/a'):+.6f}" if isinstance(metrics.get('mean_lift'), float) else f"- mean lift:       {metrics.get('mean_lift', 'n/a')}",
             f"- win rate:        {metrics.get('win_rate', 'n/a')}",
         ]

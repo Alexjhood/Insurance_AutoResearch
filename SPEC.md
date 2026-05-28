@@ -21,7 +21,7 @@
 
 Target length: 140–170 lines. Sections in this exact order:
 
-1. **Title + tagline** (one sentence): "Autonomous insurance burning-cost research loop on freMTPL2, driven by an LLM agent (Claude Code or Codex)."
+1. **Title + tagline** (one sentence): "Autonomous insurance target-modelling research loop on freMTPL2, driven by an LLM agent (Claude Code or Codex). Burning cost is the default target, with frequency runs available by explicit configuration."
 2. **Badges row**: CI status (GitHub Actions), Python 3.11+, License MIT. Use shields.io badge URLs.
 3. **Hero diagram (Mermaid)** — system flow. Required nodes:
    - `data/raw/` → `prepare-data` → `data/processed/agent_dataset_search.parquet` and `data/holdout_vault/agent_dataset_holdout.parquet`

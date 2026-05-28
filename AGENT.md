@@ -1,6 +1,6 @@
 # AGENT.md — Auto-Research Operating Manual
 
-You are the research agent for an autonomous insurance burning-cost modelling loop on the French Motor dataset (freMTPL2, ~678K policies). Your goal is to progressively improve predictions measured by **exposure-weighted Gini** on the search-validation split, ultimately assessed on a protected holdout on every promotion.
+You are the research agent for an autonomous insurance target-modelling loop on the French Motor dataset (freMTPL2, ~678K policies). Burning cost is the default target; claim frequency is used only when the user or run configuration explicitly selects `target_mode = "frequency"`. Your goal is to progressively improve predictions measured by **exposure-weighted Gini** on the search-validation split, ultimately assessed on a protected holdout on every promotion.
 
 Read this file at the start of every session. Keep it open as reference.
 
@@ -8,7 +8,7 @@ Read this file at the start of every session. Keep it open as reference.
 
 ## Starting point — every run begins with no model
 
-Each run is bootstrapped with the **`global_mean` baseline**: predicted claim cost = (total training claim cost / total training exposure) × exposure. It is the flat exposure-weighted burning rate, the simplest possible "model", and it is the official champion at the start of every run.
+Each run is bootstrapped with the **`global_mean` baseline** for the active target: burning-cost mode predicts `(total training claim cost / total training exposure) × exposure`; frequency mode predicts `(total training claim count / total training exposure) × exposure`. It is the flat exposure-weighted rate, the simplest possible "model", and it is the official champion at the start of every run.
 
 Everything you build develops relative to this. The first real model you propose only has to beat a constant rate; you do not need to start with a sophisticated method. Take the smallest interpretable step that could plausibly outperform the global mean and iterate from there.
 
@@ -34,6 +34,11 @@ This applies to every cycle, including the very first proposal of a fresh run.
 - `double_lift_slope` — calibration linearity (want ≈ 1.0)
 - `predicted_to_actual_ratio` — aggregate calibration (want ≈ 1.0)
 - `poisson_deviance` — frequency model quality
+
+In `burning_cost` mode, model scripts return predicted claim-cost totals. In
+`frequency` mode, model scripts return expected claim-count totals. Scripts
+should model rates internally if useful, then multiply by `exposure_term_a`
+before returning.
 
 ---
 
@@ -211,12 +216,12 @@ def fit_predict(
     feature_exclusions: list[str] | None = None,
     **hyperparameters,
 ) -> tuple[np.ndarray, dict]:
-    """Fit on train, return original-space claim-cost predictions and notes."""
+    """Fit on train, return active-target total predictions and notes."""
     ...
 ```
 
-If the model predicts pure premium, multiply by `score["exposure_term_a"]`
-before returning.
+If the model predicts pure premium or annual claim frequency, multiply by
+`score["exposure_term_a"]` before returning.
 
 **Option B: New feature engineering module**
 Create `src/autoresearch/features/<name>.py`. Must expose:
@@ -250,9 +255,10 @@ preserves visibility of the model's native bias in the comparison report.
 ```python
 from autoresearch.models.calibration import apply_training_calibration
 
-# pred_train_cost and pred_score_cost must be claim costs (not rates)
-pred_score_cost, calib_factor = apply_training_calibration(
-    pred_score_cost, pred_train_cost, train[CLAIM_COST].values
+# pred_train and pred_score must be target totals (not rates)
+target = train[CLAIM_COUNT].values if hyperparameters.get("target_mode") == "frequency" else train[CLAIM_COST].values
+pred_score, calib_factor = apply_training_calibration(
+    pred_score, pred_train, target
 )
 notes["native_pred_to_actual_ratio"] = round(1.0 / calib_factor, 4)
 notes["calib_factor"] = round(float(calib_factor), 4)
@@ -334,7 +340,7 @@ Append to `artifacts/tracks/<track>/runs/<run-id>/RESEARCH_LOG.md` (this run's l
 | Column | Role | Notes |
 |--------|------|-------|
 | `record_id` | ID | Float; policy identifier |
-| `exposure_term_a` | Offset | Policy duration in years. Use only for exposure weights, response denominators, and multiplying predicted rates back to claim costs; do **not** use as a predictive feature because it is unavailable at quote time. |
+| `exposure_term_a` | Offset | Policy duration in years. Use only for exposure weights, response denominators, and multiplying predicted rates back to target totals; do **not** use as a predictive feature because it is unavailable at quote time. |
 | `vehicle_power_band_b` | Feature | Numeric 1–12 |
 | `vehicle_age_band_c` | Feature | Numeric (years) |
 | `driver_age_band_d` | Feature | Numeric (years) |
@@ -347,7 +353,7 @@ Append to `artifacts/tracks/<track>/runs/<run-id>/RESEARCH_LOG.md` (this run's l
 | `claim_count_signal_q` | Target | Count of claims |
 | `claim_event_count_l` | Target | Alternative claim count |
 | `claim_cost_observed_k` | Target | Raw claim cost (£) |
-| `claim_cost_capped_active` | **Training target** | Capped claim cost (use this for training) |
+| `claim_cost_capped_active` | Target | Capped claim cost (active training target in burning-cost mode) |
 
 Raw mapping is private; use anonymised names only in model code.
 

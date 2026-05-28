@@ -1,4 +1,4 @@
-"""Calibration and segment diagnostics for insurance burning-cost models.
+"""Calibration and segment diagnostics for insurance target models.
 
 These are mandatory per-run artifacts, not promotion gates themselves.
 The promotion gate can check calibration via ``max_predicted_to_actual_drift``.
@@ -10,6 +10,9 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from autoresearch.evaluation.metrics import infer_target_mode, prediction_target_columns
+from autoresearch.targets import target_spec
 
 
 _SEGMENT_COLS = [
@@ -25,24 +28,29 @@ def compute_diagnostics(
     eval_split: str,
     *,
     n_deciles: int = 10,
+    target_mode: str | None = None,
 ) -> dict[str, Any]:
     """Compute calibration and segment diagnostics from prediction rows.
 
-    ``predictions`` must have: record_id, split, exposure, actual_claim_cost,
-    predicted_claim_cost, and optionally the segment columns.
+    ``predictions`` must have: record_id, split, exposure, active target
+    actual/predicted columns, and optionally the segment columns.
     """
 
+    target_mode = infer_target_mode(predictions, target_mode)
+    spec = target_spec(target_mode)
     frame = predictions[predictions["split"] == eval_split].copy()
     if frame.empty:
         return {"error": f"No rows for eval split {eval_split!r}"}
 
-    decile_table = _decile_calibration(frame, n_deciles)
-    exposure_bands = _exposure_band_calibration(frame)
-    segment_loss_ratio = _segment_diagnostics(frame)
-    psi = _psi_train_vs_eval(predictions)
+    decile_table = _decile_calibration(frame, n_deciles, target_mode=target_mode)
+    exposure_bands = _exposure_band_calibration(frame, target_mode=target_mode)
+    segment_loss_ratio = _segment_diagnostics(frame, target_mode=target_mode)
+    psi = _psi_train_vs_eval(predictions, target_mode=target_mode)
 
     return {
         "eval_split": eval_split,
+        "target_mode": target_mode,
+        "rate_label": spec.rate_label,
         "row_count": int(len(frame)),
         "calibration_by_pred_decile": decile_table,
         "calibration_by_exposure_band": exposure_bands,
@@ -52,30 +60,24 @@ def compute_diagnostics(
     }
 
 
-def _decile_calibration(frame: pd.DataFrame, n_deciles: int) -> list[dict[str, Any]]:
-    """Actual vs predicted by predicted pure-premium decile.
+def _decile_calibration(frame: pd.DataFrame, n_deciles: int, *, target_mode: str) -> list[dict[str, Any]]:
+    """Actual vs predicted by active target-rate decile.
 
-    Sorting by predicted_pure_premium (or predicted_claim_cost / exposure when
-    the column is absent) ensures that the lowest decile contains genuinely
-    low-risk policies across all exposure durations, not merely short-exposure
-    policies with small absolute predicted costs.  Sorting by raw claim cost
-    floods decile 1 with 1–7-day policies whose sum_cost / sum_exposure is
-    large even when the per-year risk is average, making the calibration metric
-    misleadingly bad.
-
-    Within each decile, pure premium values are exposure-weighted
-    (sum_cost / sum_exposure), the standard actuarial computation.
+    Within each decile, rate values are exposure-weighted
+    (sum target / sum exposure), the standard actuarial computation.
     """
 
     rows = []
     frame = frame.copy()
     exp_safe = frame["exposure"].clip(lower=1e-12)
+    actual_col, predicted_col = prediction_target_columns(frame, target_mode)
+    spec = target_spec(target_mode)
 
-    if "predicted_pure_premium" in frame.columns:
-        sort_col = "predicted_pure_premium"
+    if spec.rate_predicted_column in frame.columns:
+        sort_col = spec.rate_predicted_column
     else:
-        frame["_pred_pp"] = frame["predicted_claim_cost"] / exp_safe
-        sort_col = "_pred_pp"
+        frame["_pred_rate"] = frame[predicted_col] / exp_safe
+        sort_col = "_pred_rate"
 
     try:
         frame["decile"] = pd.qcut(frame[sort_col], n_deciles, labels=False, duplicates="drop") + 1
@@ -84,25 +86,28 @@ def _decile_calibration(frame: pd.DataFrame, n_deciles: int) -> list[dict[str, A
 
     for decile, grp in frame.groupby("decile", sort=True):
         exp_sum = float(grp["exposure"].clip(lower=1e-12).sum())
-        actual_cost_sum = float(grp["actual_claim_cost"].sum())
-        pred_cost_sum = float(grp["predicted_claim_cost"].sum())
-        actual_pp = actual_cost_sum / exp_sum
-        pred_pp = pred_cost_sum / exp_sum
+        actual_sum = float(grp[actual_col].sum())
+        pred_sum = float(grp[predicted_col].sum())
+        actual_rate = actual_sum / exp_sum
+        pred_rate = pred_sum / exp_sum
         rows.append({
             "decile": int(decile),
             "n": int(len(grp)),
             "exposure": exp_sum,
-            "actual_pp": actual_pp,
-            "pred_pp": pred_pp,
-            "ratio": float(actual_pp / pred_pp) if pred_pp > 0 else float("nan"),
+            "actual_rate": actual_rate,
+            "pred_rate": pred_rate,
+            "actual_pp": actual_rate,
+            "pred_pp": pred_rate,
+            "ratio": float(actual_rate / pred_rate) if pred_rate > 0 else float("nan"),
         })
     return rows
 
 
-def _exposure_band_calibration(frame: pd.DataFrame) -> list[dict[str, Any]]:
+def _exposure_band_calibration(frame: pd.DataFrame, *, target_mode: str) -> list[dict[str, Any]]:
     """Actual vs predicted by exposure quantile band."""
 
     rows = []
+    actual_col, predicted_col = prediction_target_columns(frame, target_mode)
     try:
         frame = frame.copy()
         frame["exp_band"] = pd.qcut(frame["exposure"], 5, labels=False, duplicates="drop") + 1
@@ -115,24 +120,27 @@ def _exposure_band_calibration(frame: pd.DataFrame) -> list[dict[str, Any]]:
             "exposure_band": int(band),
             "n": int(len(grp)),
             "exposure": exp_sum,
-            "actual_pp": float(grp["actual_claim_cost"].sum() / exp_sum),
-            "pred_pp": float(grp["predicted_claim_cost"].sum() / exp_sum),
+            "actual_rate": float(grp[actual_col].sum() / exp_sum),
+            "pred_rate": float(grp[predicted_col].sum() / exp_sum),
+            "actual_pp": float(grp[actual_col].sum() / exp_sum),
+            "pred_pp": float(grp[predicted_col].sum() / exp_sum),
         })
     return rows
 
 
-def _segment_diagnostics(frame: pd.DataFrame) -> dict[str, list[dict[str, Any]]]:
+def _segment_diagnostics(frame: pd.DataFrame, *, target_mode: str) -> dict[str, list[dict[str, Any]]]:
     """Loss ratio by known segment columns (if present in predictions)."""
 
     result = {}
+    actual_col, predicted_col = prediction_target_columns(frame, target_mode)
     for col in _SEGMENT_COLS:
         if col not in frame.columns:
             continue
         rows = []
         for val, grp in frame.groupby(col, sort=True):
             exp_sum = float(grp["exposure"].clip(lower=1e-12).sum())
-            actual_pp = float(grp["actual_claim_cost"].sum() / exp_sum)
-            pred_pp = float(grp["predicted_claim_cost"].sum() / exp_sum)
+            actual_pp = float(grp[actual_col].sum() / exp_sum)
+            pred_pp = float(grp[predicted_col].sum() / exp_sum)
             rows.append({
                 "band": str(val),
                 "n": int(len(grp)),
@@ -145,7 +153,7 @@ def _segment_diagnostics(frame: pd.DataFrame) -> dict[str, list[dict[str, Any]]]
     return result
 
 
-def _psi_train_vs_eval(predictions: pd.DataFrame) -> dict[str, float]:
+def _psi_train_vs_eval(predictions: pd.DataFrame, *, target_mode: str) -> dict[str, float]:
     """Population Stability Index between train and eval splits for key columns."""
 
     train = predictions[predictions["split"] == "train"]
@@ -154,7 +162,8 @@ def _psi_train_vs_eval(predictions: pd.DataFrame) -> dict[str, float]:
         return {}
 
     psi_results = {}
-    for col in ["predicted_claim_cost", "exposure"]:
+    _, predicted_col = prediction_target_columns(predictions, target_mode)
+    for col in [predicted_col, "predicted_target", "exposure"]:
         if col not in predictions.columns:
             continue
         try:

@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 import tomllib
 
+from autoresearch.targets import BURNING_COST, normalise_target_mode
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "default.toml"
@@ -36,6 +38,7 @@ class ProjectConfig:
     ordinary_train_split: str
     ordinary_eval_splits: tuple[str, ...]
     # new evaluation settings
+    target_mode: str
     primary_metric: str
     tweedie_power: float
     use_cv: bool
@@ -159,6 +162,7 @@ def load_config(
         split_ratios={key: float(value) for key, value in splits.items()},
         ordinary_train_split=str(evaluation["ordinary_train_split"]),
         ordinary_eval_splits=tuple(str(value) for value in evaluation["ordinary_eval_splits"]),
+        target_mode=normalise_target_mode(evaluation.get("target_mode", BURNING_COST)),
         primary_metric=str(evaluation.get("primary_metric", "tweedie_deviance_p15")),
         tweedie_power=float(evaluation.get("tweedie_power", 1.5)),
         use_cv=bool(evaluation.get("use_cv", False)),

@@ -24,6 +24,7 @@ def _record_direct(config, experiment_id: str = "direct") -> None:
         experiment_name="direct_pure_premium_baseline",
         model_family="global_mean",
         target_strategy="direct_pure_premium",
+        target_mode=config.target_mode,
         preprocessing_summary={"claim_capping_enabled": True, "claim_cap_threshold": 100000},
         claim_cap_threshold=100000,
         status="completed",

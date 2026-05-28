@@ -210,7 +210,7 @@ def _non_predictive_message(path: Path, column: str, container: str) -> str:
     return (
         f"{path}: {column!r} appears in predictor container {container!r}; "
         "exposure may be used only for weights, offsets, response denominators, "
-        "and converting predicted rates to claim costs"
+        "and converting predicted rates to target totals"
     )
 
 

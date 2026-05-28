@@ -18,6 +18,7 @@ def record_experiment(
     experiment_name: str,
     model_family: str,
     target_strategy: str,
+    target_mode: str = "burning_cost",
     preprocessing_summary: dict[str, Any],
     claim_cap_threshold: float | None,
     status: str,
@@ -42,6 +43,7 @@ def record_experiment(
                 parent_experiment_id,
                 model_family,
                 target_strategy,
+                target_mode,
                 preprocessing_summary,
                 claim_cap_threshold,
                 config_snapshot_path,
@@ -49,7 +51,7 @@ def record_experiment(
                 metrics_path,
                 notes
             )
-            VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 experiment_id,
@@ -58,6 +60,7 @@ def record_experiment(
                 parent_experiment_id,
                 model_family,
                 target_strategy,
+                target_mode,
                 dumps(preprocessing_summary),
                 claim_cap_threshold,
                 str(config_snapshot_path),
@@ -133,6 +136,7 @@ def list_experiments(path: Path) -> list[dict[str, Any]]:
                 parent_experiment_id,
                 model_family,
                 target_strategy,
+                target_mode,
                 preprocessing_summary,
                 claim_cap_threshold,
                 config_snapshot_path,
@@ -152,6 +156,7 @@ def list_experiments(path: Path) -> list[dict[str, Any]]:
             item["mean_score"] = metrics.get("aggregate", {}).get("mean_score")
             item["std_score"] = metrics.get("aggregate", {}).get("std_score")
             item["primary_metric"] = metrics.get("primary_metric")
+            item["target_mode"] = item.get("target_mode") or metrics.get("target_mode")
             item["ordinary_eval_splits"] = metrics.get("ordinary_eval_splits")
         experiments.append(item)
     return experiments

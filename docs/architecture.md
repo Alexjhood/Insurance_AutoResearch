@@ -45,7 +45,7 @@ prepare-data
 run-baseline / run-next-proposal
   → load_search_dataset()  ← only train + search_validation rows visible
   → dispatch_model()       ← routes to global_mean built-in or a run-local script
-  → evaluate_predictions() ← Tweedie deviance panel + Gini + double-lift
+  → evaluate_predictions() ← target-aware metric panel + Gini + double-lift
   → compute_diagnostics()  ← calibration by pred decile, PSI, segment ratios
   → capture_environment()  ← git SHA, pip freeze, file SHA256s
   → record_experiment()    ← SQLite registry
@@ -68,7 +68,7 @@ proposal. The file must expose:
 
 ```python
 def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hyperparameters):
-    return predicted_claim_cost_array, notes_dict
+    return predicted_target_array, notes_dict
 ```
 
 The framework still owns data loading, split application, capping, evaluation,
@@ -84,6 +84,11 @@ All other experiments must supply a run-local `fit_predict` script via
 `dispatch_model()` in `models/dispatcher.py` handles script loading, prediction
 DataFrame construction, and a row-count assertion to catch silent drops.
 
+The active target is controlled by `evaluation.target_mode` or the CLI
+`--target-mode` override. `burning_cost` is the default and interprets model
+outputs as predicted claim costs. `frequency` interprets model outputs as
+expected claim counts. In both modes scripts return target totals, not rates.
+
 ## Output Validation
 
 After each queued proposal run, the controller writes `validation_report.json`
@@ -96,10 +101,12 @@ failed.
 
 ## Evaluation and Promotion
 
-**Primary metric**: Tweedie deviance at power=1.5 (`tweedie_deviance_p15`). This is a proper scoring rule for compound Poisson-Gamma loss — the industry standard for motor insurance pure premium.
+**Primary metric**: configured in `[evaluation]` and currently defaults to
+`gini_weighted`. Burning-cost runs also record Tweedie deviance on pure premium;
+frequency runs record Poisson deviance on claim frequency.
 
 **Promotion gate** (all 8 checks must pass):
-1. Mean lift > 0 (challenger has lower deviance)
+1. Mean lift > 0 (challenger improves the configured primary metric)
 2. Relative lift ≥ `min_relative_lift` (default 0.5%) — prevents noise promotions
 3. Absolute lift ≥ `min_absolute_lift`
 4. Challenger win rate ≥ `minimum_win_rate` across paired resamples

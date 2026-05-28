@@ -39,12 +39,14 @@ def allowed_search_space(config, agent_schema: dict[str, Any] | None = None) -> 
     space: dict[str, Any] = {
         "model_families": families,
         "target_strategies": list(ss.get("target_strategies", ["direct_pure_premium", "frequency_severity"])),
+        "target_modes": ["burning_cost", "frequency"],
+        "active_target_mode": config.target_mode,
         "feature_columns": feature_columns,
         "non_predictive_columns": sorted(NON_PREDICTIVE_COLUMNS),
         "feature_policy": {
             "exposure_term_a": (
                 "Use only for exposure weights, frequency/severity denominators, "
-                "and converting predicted pure premium rates to claim costs. "
+                "and converting predicted rates to target totals. "
                 "Do not use as a predictive model feature because it is unavailable at quote time."
             )
         },

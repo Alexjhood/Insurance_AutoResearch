@@ -3,7 +3,9 @@
 All commands are invoked as `autoresearch [--track NAME] [--run-id ID] <command>`.
 Global flags `--track` and `--run-id` scope all artifact paths and the registry to
 `artifacts/tracks/<NAME>/runs/<ID>/`. Use `--new-run` instead of `--run-id` when
-starting a fresh timestamped run in a track.
+starting a fresh timestamped run in a track. Burning cost is the default target;
+pass `--target-mode frequency` only for runs that should model expected claim
+counts/frequency instead.
 
 ---
 

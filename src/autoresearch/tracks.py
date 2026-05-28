@@ -124,6 +124,11 @@ def _run_comparison(config_a: ProjectConfig, config_b: ProjectConfig) -> dict[st
 
     predictions_a = _load_predictions(config_a, champion_a_id)
     predictions_b = _load_predictions(config_b, champion_b_id)
+    if config_a.target_mode != config_b.target_mode:
+        raise ValueError(
+            f"Cannot compare tracks with different target modes: "
+            f"{config_a.track_id}={config_a.target_mode}, {config_b.track_id}={config_b.target_mode}"
+        )
 
     eval_split = config_a.ordinary_eval_splits[0]
 
@@ -140,6 +145,7 @@ def _run_comparison(config_a: ProjectConfig, config_b: ProjectConfig) -> dict[st
         resample_fraction=config_a.resample_fraction,
         tweedie_power=config_a.tweedie_power,
         primary_metric=config_a.primary_metric,
+        target_mode=config_a.target_mode,
     )
 
     # Bootstrap CI on lift (no Bonferroni — this is a single planned comparison)
@@ -179,6 +185,7 @@ def _run_comparison(config_a: ProjectConfig, config_b: ProjectConfig) -> dict[st
         resample_fraction=config_a.resample_fraction,
         tweedie_power=config_a.tweedie_power,
         primary_metric=config_a.primary_metric,
+        target_mode=config_a.target_mode,
     )
     bootstrap_flipped = bootstrap_lift_summary(
         pd.Series(-per_resample["lift"].to_numpy()),
@@ -196,8 +203,8 @@ def _run_comparison(config_a: ProjectConfig, config_b: ProjectConfig) -> dict[st
     win_rate_b = float(summary["challenger_win_rate"])
 
     # Per-split scalar metrics for report
-    gini_a, pa_a = _scalar_metrics(predictions_a, eval_split, config_a.tweedie_power)
-    gini_b, pa_b = _scalar_metrics(predictions_b, eval_split, config_b.tweedie_power)
+    gini_a, pa_a = _scalar_metrics(predictions_a, eval_split, config_a.tweedie_power, config_a.target_mode)
+    gini_b, pa_b = _scalar_metrics(predictions_b, eval_split, config_b.tweedie_power, config_b.target_mode)
 
     metric_label = config_a.primary_metric
 
@@ -329,17 +336,20 @@ def _scalar_metrics(
     predictions: pd.DataFrame,
     eval_split: str,
     tweedie_power: float,
+    target_mode: str,
 ) -> tuple[float, float]:
     """Return (gini_weighted, predicted_to_actual_ratio) for the eval split."""
-    from autoresearch.evaluation.metrics import full_metric_panel
+    from autoresearch.evaluation.metrics import full_metric_panel, prediction_target_columns
     frame = predictions[predictions["split"] == eval_split]
     if frame.empty:
         return float("nan"), float("nan")
+    actual_col, predicted_col = prediction_target_columns(frame, target_mode)
     panel = full_metric_panel(
-        frame["actual_claim_cost"],
-        frame["predicted_claim_cost"],
+        frame[actual_col],
+        frame[predicted_col],
         frame["exposure"],
         tweedie_power=tweedie_power,
+        target_mode=target_mode,
     )
     return float(panel["gini_weighted"]), float(panel["predicted_to_actual_ratio"])
 

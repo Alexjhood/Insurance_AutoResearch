@@ -1,7 +1,7 @@
 # Requirements
 
 ## Goal
-Build a local auto-research platform for insurance burning-cost modelling on freMTPL2.
+Build a local auto-research platform for insurance target modelling on freMTPL2. Burning cost is the default target, and claim frequency can be selected explicitly for frequency-only runs.
 
 ## Priorities
 1. Reproducibility

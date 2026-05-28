@@ -27,6 +27,9 @@ milestone_holdout = 0.20
 [evaluation]
 ordinary_train_split = "train"
 ordinary_eval_splits = ["search_validation"]
+# Default workflow target. Set to "frequency" only when the requested run
+# should model claim counts/frequency instead of burning cost.
+target_mode = "burning_cost"
 primary_metric = "gini_weighted"
 tweedie_power = 1.5
 use_cv = true

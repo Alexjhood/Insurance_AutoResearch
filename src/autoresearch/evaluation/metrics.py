@@ -1,4 +1,4 @@
-"""Actuarially-relevant metric panel for burning-cost model evaluation.
+"""Actuarially-relevant metric panel for target-model evaluation.
 
 Primary metric is configurable. The default gate uses weighted Gini, where
 higher is better. Panel also includes calibration ratio, Tweedie deviance,
@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_tweedie_deviance
 
+from autoresearch.targets import BURNING_COST, normalise_target_mode, target_spec
+
 
 HIGHER_IS_BETTER_METRICS = {"gini_weighted"}
 
@@ -24,63 +26,79 @@ def lower_is_better(metric_name: str) -> bool:
 
 
 def full_metric_panel(
-    actual_cost: pd.Series,
-    predicted_cost: pd.Series,
+    actual_target: pd.Series,
+    predicted_target: pd.Series,
     exposure: pd.Series,
     *,
     tweedie_power: float = 1.5,
+    target_mode: str = BURNING_COST,
 ) -> dict[str, Any]:
-    """Compute the full actuarial metric panel from claim-cost predictions."""
+    """Compute the full actuarial metric panel for the active target."""
 
-    actual = actual_cost.astype(float).to_numpy()
-    predicted = np.clip(predicted_cost.astype(float).to_numpy(), 1e-9, None)
+    spec = target_spec(target_mode)
+    actual = actual_target.astype(float).to_numpy()
+    predicted = np.clip(predicted_target.astype(float).to_numpy(), 1e-9, None)
     exp = np.clip(exposure.astype(float).to_numpy(), 1e-12, None)
 
-    actual_pp = actual / exp
-    predicted_pp = predicted / exp
+    actual_rate = actual / exp
+    predicted_rate = predicted / exp
 
-    # Primary: Tweedie deviance on pure premium (exposure-weighted)
-    tweedie_dev = _tweedie_deviance(actual_pp, predicted_pp, exp, tweedie_power)
-    poisson_dev = _tweedie_deviance(actual_pp, predicted_pp, exp, 1.0)
+    # Deviance on target rate (pure premium for cost, claim frequency for count)
+    tweedie_dev = _tweedie_deviance(actual_rate, predicted_rate, exp, tweedie_power)
+    poisson_dev = _tweedie_deviance(actual_rate, predicted_rate, exp, 1.0)
 
     # Calibration: predicted/actual ratio (want ≈ 1.0)
     total_actual = float(actual.sum())
     total_predicted = float(predicted.sum())
     pred_to_actual = total_predicted / total_actual if total_actual > 0 else float("nan")
 
-    # Weighted MAE and RMSE on claim cost (not pure premium — more stable)
-    cost_error = predicted - actual
-    weighted_mae = float(np.average(np.abs(cost_error), weights=exp))
-    weighted_rmse = float(np.sqrt(np.average(cost_error**2, weights=exp)))
+    # Weighted MAE and RMSE on the target total, not the per-exposure rate
+    target_error = predicted - actual
+    weighted_mae = float(np.average(np.abs(target_error), weights=exp))
+    weighted_rmse = float(np.sqrt(np.average(target_error**2, weights=exp)))
 
     # Gini coefficient (discrimination / lift)
     gini = _gini_weighted(actual, predicted, exp)
 
-    # Double-lift slope (regression of actual_pp / pred_pp by decile)
-    double_lift_slope = _double_lift_slope(actual_pp, predicted_pp, exp)
+    # Double-lift slope (regression of actual rate on predicted rate by decile)
+    double_lift_slope = _double_lift_slope(actual_rate, predicted_rate, exp)
 
-    # Legacy RMSE on pure premium (retained for backward compat; do NOT rank on this)
-    pp_error = predicted_pp - actual_pp
-    rmse_pure_premium = float(np.sqrt(np.mean(pp_error**2)))
-    mae_pure_premium = float(np.mean(np.abs(pp_error)))
+    rate_error = predicted_rate - actual_rate
+    rmse_rate = float(np.sqrt(np.mean(rate_error**2)))
+    mae_rate = float(np.mean(np.abs(rate_error)))
 
-    return {
+    panel = {
+        "target_mode": spec.mode,
         "tweedie_deviance_p15": tweedie_dev,
         "poisson_deviance": poisson_dev,
         "predicted_to_actual_ratio": pred_to_actual,
-        "total_actual_claim_cost": total_actual,
-        "total_predicted_claim_cost": total_predicted,
+        "total_actual_target": total_actual,
+        "total_predicted_target": total_predicted,
         "exposure_sum": float(exp.sum()),
-        "weighted_mae_claim_cost": weighted_mae,
-        "weighted_rmse_claim_cost": weighted_rmse,
+        "weighted_mae_target": weighted_mae,
+        "weighted_rmse_target": weighted_rmse,
         "gini_weighted": gini,
         "double_lift_slope": double_lift_slope,
-        "mean_actual_pure_premium": float(np.average(actual_pp, weights=exp)),
-        "mean_predicted_pure_premium": float(np.average(predicted_pp, weights=exp)),
-        # Legacy — kept for diagnostics, not primary ranking
-        "rmse_pure_premium": rmse_pure_premium,
-        "mae_pure_premium": mae_pure_premium,
+        "mean_actual_rate": float(np.average(actual_rate, weights=exp)),
+        "mean_predicted_rate": float(np.average(predicted_rate, weights=exp)),
+        "rmse_rate": rmse_rate,
+        "mae_rate": mae_rate,
     }
+    panel[spec.total_actual_key] = total_actual
+    panel[spec.total_predicted_key] = total_predicted
+    panel[spec.mae_key] = weighted_mae
+    panel[spec.rmse_key] = weighted_rmse
+    panel[spec.mean_actual_rate_key] = panel["mean_actual_rate"]
+    panel[spec.mean_predicted_rate_key] = panel["mean_predicted_rate"]
+
+    if spec.mode == BURNING_COST:
+        # Legacy names retained for historical artifacts and dashboards.
+        panel["rmse_pure_premium"] = rmse_rate
+        panel["mae_pure_premium"] = mae_rate
+    else:
+        panel["rmse_frequency"] = rmse_rate
+        panel["mae_frequency"] = mae_rate
+    return panel
 
 
 def regression_metrics(
@@ -102,19 +120,24 @@ def evaluate_predictions(
     *,
     tweedie_power: float = 1.5,
     primary_metric: str = "tweedie_deviance_p15",
+    target_mode: str | None = None,
 ) -> dict[str, Any]:
     """Evaluate split-level and aggregate scores, excluding milestone holdout."""
 
     if (predictions["split"] == "milestone_holdout").any():
         raise ValueError("Ordinary evaluation cannot include milestone_holdout rows")
+    target_mode = infer_target_mode(predictions, target_mode)
+    spec = target_spec(target_mode)
 
     split_metrics: list[dict[str, Any]] = []
     for split, split_frame in predictions.groupby("split", sort=True):
+        actual_col, predicted_col = prediction_target_columns(split_frame, spec.mode)
         panel = full_metric_panel(
-            split_frame["actual_claim_cost"],
-            split_frame["predicted_claim_cost"],
+            split_frame[actual_col],
+            split_frame[predicted_col],
             split_frame["exposure"],
             tweedie_power=tweedie_power,
+            target_mode=target_mode,
         )
         panel["split"] = split
         panel["row_count"] = int(len(split_frame))
@@ -127,6 +150,7 @@ def evaluate_predictions(
     return {
         "primary_metric": primary_metric,
         "lower_is_better": lower_is_better(primary_metric),
+        "target_mode": target_mode,
         "tweedie_power": tweedie_power,
         "ordinary_eval_splits": list(eval_splits),
         "split_metrics": split_metrics,
@@ -141,7 +165,7 @@ def evaluate_predictions(
 # ── private helpers ───────────────────────────────────────────────────────────
 
 def _tweedie_deviance(actual_pp: np.ndarray, predicted_pp: np.ndarray, weights: np.ndarray, power: float) -> float:
-    """Exposure-weighted Tweedie deviance on pure premium."""
+    """Exposure-weighted Tweedie deviance on the target rate."""
 
     try:
         return float(mean_tweedie_deviance(actual_pp, predicted_pp, sample_weight=weights, power=power))
@@ -152,17 +176,15 @@ def _tweedie_deviance(actual_pp: np.ndarray, predicted_pp: np.ndarray, weights: 
 def _gini_weighted(actual: np.ndarray, predicted: np.ndarray, weights: np.ndarray) -> float:
     """Exposure-weighted Gini coefficient measuring discrimination.
 
-    Sorts by predicted PURE PREMIUM (predicted / exposure), not by predicted
-    claim cost.  Sorting by claim cost would conflate the exposure-size effect
-    with model discrimination: the global-mean model predicts mean_bc * exposure,
-    so sorting by claim cost is sorting by exposure, which produces spuriously
-    negative Gini when short-duration policies carry higher per-unit risk.
+    Sorts by predicted target rate (predicted / exposure), not by predicted
+    target total. Sorting by totals would conflate the exposure-size effect
+    with model discrimination.
     """
 
     if len(actual) < 2:
         return float("nan")
     safe_w = np.clip(weights, 1e-12, None)
-    predicted_pp = predicted / safe_w  # rank by pure premium, not claim cost
+    predicted_pp = predicted / safe_w
     order = np.argsort(predicted_pp)
     w = weights[order]
     y = actual[order]
@@ -205,3 +227,25 @@ def _double_lift_slope(actual_pp: np.ndarray, predicted_pp: np.ndarray, weights:
     if cov[0, 0] == 0:
         return float("nan")
     return float(cov[0, 1] / cov[0, 0])
+
+
+def infer_target_mode(predictions: pd.DataFrame, requested: str | None = None) -> str:
+    if requested is not None:
+        return normalise_target_mode(requested)
+    if "target_mode" in predictions.columns:
+        modes = {str(value) for value in predictions["target_mode"].dropna().unique()}
+        if len(modes) == 1:
+            return normalise_target_mode(next(iter(modes)))
+    return BURNING_COST
+
+
+def prediction_target_columns(frame: pd.DataFrame, target_mode: str | None = None) -> tuple[str, str]:
+    spec = target_spec(target_mode or infer_target_mode(frame))
+    if "actual_target" in frame.columns and "predicted_target" in frame.columns:
+        return "actual_target", "predicted_target"
+    if spec.actual_alias in frame.columns and spec.predicted_alias in frame.columns:
+        return spec.actual_alias, spec.predicted_alias
+    raise ValueError(
+        f"Predictions are missing target columns for {spec.mode}: "
+        f"expected actual_target/predicted_target or {spec.actual_alias}/{spec.predicted_alias}"
+    )

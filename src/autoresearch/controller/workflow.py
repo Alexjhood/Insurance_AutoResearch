@@ -164,8 +164,10 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
             "decision": decision["decision"],
             "comparison_report": str(comparison_outputs.get("html_report", "")),
             "metrics_summary": {
-                "challenger_gini": round(float(comp_summary.get("challenger_mean_score") or 0), 6),
-                "champion_gini": round(float(comp_summary.get("champion_mean_score") or 0), 6),
+                "target_mode": config.target_mode,
+                "primary_metric": config.primary_metric,
+                "challenger_score": round(float(comp_summary.get("challenger_mean_score") or 0), 6),
+                "champion_score": round(float(comp_summary.get("champion_mean_score") or 0), 6),
                 "mean_lift": round(float(comp_summary.get("mean_lift") or 0), 6),
                 "win_rate": round(float(comp_summary.get("challenger_win_rate") or 0), 4),
             },
@@ -295,6 +297,7 @@ def _validate_attempt_outputs(
             tweedie_power=config.tweedie_power,
             champion_predictions=champion_predictions,
             allow_constant_predictions=model_family == "global_mean",
+            target_mode=config.target_mode,
         ),
     }
 
@@ -331,8 +334,10 @@ def _attach_failed_attempt_comparison(
         lift = report.get("lift_summary") or {}
         panel = report.get("metric_panel") or {}
         report["metrics_summary"] = {
-            "challenger_gini": round(float(panel.get("gini_weighted") or 0), 6),
-            "champion_gini": round(float(lift.get("champion_score") or 0), 6),
+            "target_mode": config.target_mode,
+            "primary_metric": config.primary_metric,
+            "challenger_score": round(float(panel.get(config.primary_metric) or 0), 6),
+            "champion_score": round(float(lift.get("champion_score") or 0), 6),
             "raw_lift": round(float(lift.get("lift") or 0), 6),
             "predicted_to_actual_ratio": round(float(panel.get("predicted_to_actual_ratio") or 0), 4),
         }

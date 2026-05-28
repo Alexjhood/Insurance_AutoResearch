@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS experiments (
     parent_experiment_id TEXT,
     model_family TEXT,
     target_strategy TEXT,
+    target_mode TEXT,
     preprocessing_summary TEXT,
     claim_cap_threshold REAL,
     config_snapshot_path TEXT,
@@ -162,6 +163,7 @@ def _migrate_experiments(con: sqlite3.Connection) -> None:
         "experiment_name": "TEXT",
         "model_family": "TEXT",
         "target_strategy": "TEXT",
+        "target_mode": "TEXT",
         "preprocessing_summary": "TEXT",
         "claim_cap_threshold": "REAL",
     }

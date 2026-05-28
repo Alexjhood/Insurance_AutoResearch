@@ -1,6 +1,6 @@
 # Insurance AutoResearch
 
-Autonomous insurance burning-cost research loop on freMTPL2, driven by an LLM agent (Claude Code or Codex).
+Autonomous insurance target-modelling research loop on freMTPL2, driven by an LLM agent (Claude Code or Codex). Burning cost is the default target; claim frequency can be selected explicitly with `--target-mode frequency` or `evaluation.target_mode = "frequency"`.
 
 [![CI](https://github.com/Alexjhood/Insurance_AutoResearch/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexjhood/Insurance_AutoResearch/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -22,7 +22,7 @@ flowchart TD
 
 **What this is:**
 
-- A reproducible local Python environment for iterative insurance burning-cost model improvement
+- A reproducible local Python environment for iterative insurance target-model improvement
 - An autonomous research loop where an LLM agent proposes, runs, and evaluates experiments
 - A rigorous actuarial evaluation harness with exposure-weighted Gini as the promotion metric
 

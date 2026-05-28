@@ -58,6 +58,7 @@ def run_experiment(
             experiment_name=exp.get("experiment_name", "unknown"),
             model_family=exp.get("model_family", "unknown"),
             target_strategy=exp.get("target_strategy", "unknown"),
+            target_mode=config.target_mode,
             preprocessing_summary={},
             claim_cap_threshold=None,
             status="failed",
@@ -80,6 +81,7 @@ def run_experiment(
             experiment_name=exp.get("experiment_name", "unknown"),
             model_family=exp.get("model_family", "unknown"),
             target_strategy=exp.get("target_strategy", "unknown"),
+            target_mode=config.target_mode,
             preprocessing_summary={},
             claim_cap_threshold=None,
             status="failed",
@@ -125,6 +127,7 @@ def run_experiment(
                 experiment_name=exp.get("experiment_name", "unknown"),
                 model_family=exp.get("model_family", "unknown"),
                 target_strategy=exp.get("target_strategy", "unknown"),
+                target_mode=config.target_mode,
                 preprocessing_summary={},
                 claim_cap_threshold=None,
                 status="failed",
@@ -145,6 +148,7 @@ def run_experiment(
                 experiment_name=exp.get("experiment_name", "unknown"),
                 model_family=exp.get("model_family", "unknown"),
                 target_strategy=exp.get("target_strategy", "unknown"),
+                target_mode=config.target_mode,
                 preprocessing_summary={},
                 claim_cap_threshold=None,
                 status="failed",
@@ -171,6 +175,7 @@ def run_experiment(
         feature_inclusions=model_cfg.get("feature_inclusions"),
         feature_exclusions=model_cfg.get("feature_exclusions") or None,
         model_script_path=model_script_path,
+        target_mode=config.target_mode,
     )
 
     metrics = evaluate_predictions(
@@ -178,11 +183,16 @@ def run_experiment(
         config.ordinary_eval_splits,
         tweedie_power=config.tweedie_power,
         primary_metric=config.primary_metric,
+        target_mode=config.target_mode,
     )
 
     # Diagnostics
     from autoresearch.evaluation.diagnostics import compute_diagnostics
-    diagnostics = compute_diagnostics(result.predictions, eval_split=config.ordinary_eval_splits[0])
+    diagnostics = compute_diagnostics(
+        result.predictions,
+        eval_split=config.ordinary_eval_splits[0],
+        target_mode=config.target_mode,
+    )
 
     config_snapshot = {
         "experiment_id": experiment_id,
@@ -199,6 +209,7 @@ def run_experiment(
         },
         "ordinary_train_split": config.ordinary_train_split,
         "ordinary_eval_splits": list(config.ordinary_eval_splits),
+        "target_mode": config.target_mode,
         "milestone_holdout_accessed": False,
     }
 
@@ -208,6 +219,7 @@ def run_experiment(
         "experiment_name": exp["experiment_name"],
         "model_family": model_family,
         "target_strategy": target_strategy,
+        "target_mode": config.target_mode,
         "preprocessing": config_snapshot["effective_preprocessing"],
         "model_notes": result.model_notes,
     }
@@ -254,6 +266,7 @@ def run_experiment(
         experiment_name=exp["experiment_name"],
         model_family=model_family,
         target_strategy=target_strategy,
+        target_mode=config.target_mode,
         preprocessing_summary=config_snapshot["effective_preprocessing"],
         claim_cap_threshold=cap_threshold if cap_enabled else None,
         status="completed",

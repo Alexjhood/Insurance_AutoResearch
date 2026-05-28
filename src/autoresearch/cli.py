@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -438,6 +439,12 @@ def build_parser() -> argparse.ArgumentParser:
             "Use this for new agent sessions; omit it to continue the latest run."
         ),
     )
+    parser.add_argument(
+        "--target-mode",
+        choices=("burning_cost", "frequency"),
+        default=None,
+        help="Override the configured evaluation target. Default is burning_cost unless the config says otherwise.",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("prepare-data", help="Build Phase 1 data artifacts.")
@@ -464,7 +471,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     champion_parser.add_argument("challenger_id")
     subparsers.add_parser("list-promotions", help="Print volatility-aware comparison and promotion decisions.")
-    init_champion = subparsers.add_parser("init-official-champion", help="Initialise official champion as direct pure premium.")
+    init_champion = subparsers.add_parser("init-official-champion", help="Initialise official champion as the global-mean baseline for the active target.")
     init_champion.add_argument("--experiment-id", default=None)
     enqueue = subparsers.add_parser("enqueue-proposal", help="Validate and enqueue a proposal JSON file.")
     enqueue.add_argument("proposal_path")
@@ -525,6 +532,8 @@ def main(argv: list[str] | None = None) -> int:
         run_id=getattr(args, "run_id", None),
         new_run=getattr(args, "new_run", False),
     )
+    if getattr(args, "target_mode", None):
+        config = replace(config, target_mode=args.target_mode)
     handler = COMMANDS.get(args.command)
     if handler is None:
         parser.error(f"Unknown command: {args.command}")

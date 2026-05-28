@@ -8,7 +8,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from autoresearch.evaluation.metrics import full_metric_panel, lower_is_better, regression_metrics
+from autoresearch.evaluation.metrics import (
+    full_metric_panel,
+    infer_target_mode,
+    lower_is_better,
+    prediction_target_columns,
+    regression_metrics,
+)
 
 
 @dataclass(frozen=True)
@@ -36,10 +42,13 @@ def repeated_scores(
     resample_fraction: float = 1.0,
     tweedie_power: float = 1.5,
     primary_metric: str = "tweedie_deviance_p15",
+    target_mode: str | None = None,
 ) -> pd.DataFrame:
     """Score one experiment across deterministic search-time resamples."""
 
     evaluation_frame = _ordinary_eval_frame(predictions, eval_split)
+    target_mode = infer_target_mode(predictions, target_mode)
+    actual_col, predicted_col = prediction_target_columns(evaluation_frame, target_mode)
     sample_size = _sample_size(len(evaluation_frame), resample_fraction)
     rng = np.random.default_rng(seed)
     rows: list[dict[str, Any]] = []
@@ -47,8 +56,9 @@ def repeated_scores(
         positions = rng.integers(0, len(evaluation_frame), size=sample_size)
         sample = evaluation_frame.iloc[positions]
         metrics = full_metric_panel(
-            sample["actual_claim_cost"], sample["predicted_claim_cost"], sample["exposure"],
+            sample[actual_col], sample[predicted_col], sample["exposure"],
             tweedie_power=tweedie_power,
+            target_mode=target_mode,
         )
         rows.append({
             "resample_id": resample_id,
@@ -72,13 +82,17 @@ def paired_comparison(
     resample_fraction: float = 1.0,
     tweedie_power: float = 1.5,
     primary_metric: str = "tweedie_deviance_p15",
+    target_mode: str | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Compare two experiments on identical search-time resamples (paired)."""
 
     champion = _ordinary_eval_frame(champion_predictions, eval_split)
     challenger = _ordinary_eval_frame(challenger_predictions, eval_split)
-    paired = champion[["record_id", "actual_claim_cost", "predicted_claim_cost", "exposure"]].merge(
-        challenger[["record_id", "predicted_claim_cost"]],
+    target_mode = infer_target_mode(challenger_predictions, target_mode)
+    actual_col, champion_predicted_col = prediction_target_columns(champion, target_mode)
+    _, challenger_predicted_col = prediction_target_columns(challenger, target_mode)
+    paired = champion[["record_id", actual_col, champion_predicted_col, "exposure"]].merge(
+        challenger[["record_id", challenger_predicted_col]],
         on="record_id",
         suffixes=("_champion", "_challenger"),
         how="inner",
@@ -88,18 +102,26 @@ def paired_comparison(
 
     sample_size = _sample_size(len(paired), resample_fraction)
     metric_lower_is_better = lower_is_better(primary_metric)
+    actual_merged_col = actual_col
+    champion_merged_col = f"{champion_predicted_col}_champion"
+    challenger_merged_col = f"{challenger_predicted_col}_challenger"
+    if champion_predicted_col != challenger_predicted_col:
+        champion_merged_col = champion_predicted_col
+        challenger_merged_col = challenger_predicted_col
     rng = np.random.default_rng(seed)
     rows: list[dict[str, Any]] = []
     for resample_id in range(n_resamples):
         positions = rng.integers(0, len(paired), size=sample_size)
         sample = paired.iloc[positions]
         champ_metrics = full_metric_panel(
-            sample["actual_claim_cost"], sample["predicted_claim_cost_champion"], sample["exposure"],
+            sample[actual_merged_col], sample[champion_merged_col], sample["exposure"],
             tweedie_power=tweedie_power,
+            target_mode=target_mode,
         )
         chal_metrics = full_metric_panel(
-            sample["actual_claim_cost"], sample["predicted_claim_cost_challenger"], sample["exposure"],
+            sample[actual_merged_col], sample[challenger_merged_col], sample["exposure"],
             tweedie_power=tweedie_power,
+            target_mode=target_mode,
         )
         champ_score = champ_metrics[primary_metric]
         chal_score = chal_metrics[primary_metric]
@@ -122,6 +144,7 @@ def paired_comparison(
         "challenger_id": challenger_id,
         "eval_split": eval_split,
         "primary_metric": primary_metric,
+        "target_mode": target_mode,
         "lower_is_better": metric_lower_is_better,
         "n_resamples": n_resamples,
         "resample_fraction": resample_fraction,
@@ -188,11 +211,12 @@ def cv_repeated_scores(
     tweedie_power: float = 1.5,
     primary_metric: str = "tweedie_deviance_p15",
     seed: int = 0,
+    target_mode: str | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """K-fold CV scores with variance decomposition.
 
-    ``model_factory(train_df, val_df)`` must return ``(predictions_df)`` containing
-    actual_claim_cost, predicted_claim_cost, exposure columns.
+    ``model_factory(train_df, val_df)`` must return ``predictions_df`` containing
+    active actual/predicted target columns and exposure.
     """
 
     data = frame.merge(fold_assignments[["record_id", "fold"]], on="record_id", how="inner")
@@ -200,6 +224,7 @@ def cv_repeated_scores(
 
     rows: list[dict[str, Any]] = []
     fold_scores: list[float] = []
+    summary_target_mode: str | None = None
 
     for repeat in range(n_repeats):
         fold_fold_scores = []
@@ -211,9 +236,13 @@ def cv_repeated_scores(
                 # Reshuffle training rows within each repeat
                 train_data = train_data.sample(frac=1.0, random_state=rng.integers(0, 2**31)).copy()
             preds = model_factory(train_data, val_data)
+            fold_target_mode = infer_target_mode(preds, target_mode)
+            summary_target_mode = fold_target_mode
+            actual_col, predicted_col = prediction_target_columns(preds, fold_target_mode)
             metrics = full_metric_panel(
-                preds["actual_claim_cost"], preds["predicted_claim_cost"], preds["exposure"],
+                preds[actual_col], preds[predicted_col], preds["exposure"],
                 tweedie_power=tweedie_power,
+                target_mode=fold_target_mode,
             )
             score = metrics[primary_metric]
             fold_fold_scores.append(score)
@@ -237,6 +266,7 @@ def cv_repeated_scores(
 
     summary = {
         "primary_metric": primary_metric,
+        "target_mode": summary_target_mode,
         "n_folds": n_folds,
         "n_repeats": n_repeats,
         "mean_score": float(cv_frame["score"].mean()),

@@ -1,4 +1,5 @@
 from dataclasses import replace
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -36,6 +37,7 @@ def _make_config(tmp_path: Path) -> ProjectConfig:
         split_ratios={"train": 0.64, "search_validation": 0.16, "milestone_holdout": 0.2},
         ordinary_train_split="train",
         ordinary_eval_splits=("search_validation",),
+        target_mode="burning_cost",
         primary_metric="tweedie_deviance_p15",
         tweedie_power=1.5,
         use_cv=False,
@@ -167,6 +169,36 @@ script_path = "{script.name}"
     assert outputs["model_script"] == script.resolve()
 
 
+def test_run_experiment_supports_frequency_target_mode(tmp_path: Path) -> None:
+    config = replace(_make_config(tmp_path), target_mode="frequency", primary_metric="poisson_deviance")
+    _write_fixtures(config)
+
+    exp_config = tmp_path / "experiment_frequency.toml"
+    exp_config.write_text(
+        """
+experiment_name = "test_frequency"
+model_family = "global_mean"
+target_strategy = "direct_pure_premium"
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    outputs = run_experiment(config, exp_config)
+    predictions = pd.read_parquet(outputs["predictions"])
+    metrics = json.loads(outputs["metrics"].read_text(encoding="utf-8"))
+
+    assert set(predictions["target_mode"]) == {"frequency"}
+    assert predictions["predicted_claim_count"].notna().all()
+    assert predictions["predicted_claim_cost"].isna().all()
+    assert metrics["target_mode"] == "frequency"
+
+
 def test_compare_experiments_writes_html_report(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     config = replace(
@@ -221,3 +253,45 @@ claim_cap_threshold = 100000
 
     assert outputs["html_report"].exists()
     assert "Validation Metrics" in outputs["html_report"].read_text(encoding="utf-8")
+
+
+def test_compare_experiments_writes_frequency_html_report(tmp_path: Path) -> None:
+    config = replace(
+        _make_config(tmp_path),
+        target_mode="frequency",
+        primary_metric="poisson_deviance",
+        min_relative_lift=0.0,
+        minimum_win_rate=0.0,
+        bootstrap_iterations=5,
+        require_diagnostics=False,
+    )
+    _write_fixtures(config)
+
+    for name in ("champion_frequency", "challenger_frequency"):
+        exp_config = tmp_path / f"{name}.toml"
+        exp_config.write_text(
+            f"""
+experiment_name = "{name}"
+model_family = "global_mean"
+target_strategy = "direct_pure_premium"
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]
+""".strip(),
+            encoding="utf-8",
+        )
+        run_experiment(config, exp_config)
+
+    rows = list_experiments(config.registry_path)
+    champion_id = next(row["experiment_id"] for row in rows if row["experiment_name"] == "champion_frequency")
+    challenger_id = next(row["experiment_id"] for row in rows if row["experiment_name"] == "challenger_frequency")
+    config = replace(config, root=PROJECT_ROOT)
+
+    outputs = compare_experiments(config, champion_id, challenger_id)
+
+    html = outputs["html_report"].read_text(encoding="utf-8")
+    assert outputs["html_report"].exists()
+    assert "frequency" in html.lower()

@@ -39,6 +39,7 @@ def _make_config(tmp_path: Path) -> ProjectConfig:
         split_ratios={"train": 0.64, "search_validation": 0.16, "milestone_holdout": 0.2},
         ordinary_train_split="train",
         ordinary_eval_splits=("search_validation",),
+        target_mode="burning_cost",
         primary_metric="gini_weighted",
         tweedie_power=1.5,
         use_cv=False,

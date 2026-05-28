@@ -18,14 +18,14 @@ OFFICIAL_BRANCH_ID = "main"
 def initialise_official_champion(config: ProjectConfig, experiment_id: str | None = None) -> dict[str, object]:
     """Initialise official champion as the no-model global-mean baseline.
 
-    Every research run starts from this flat exposure-weighted burning-cost
-    baseline; every subsequent proposal develops relative to it.
+    Every research run starts from the flat exposure-weighted mean for the
+    configured target mode; every subsequent proposal develops relative to it.
     """
 
     selected_id = experiment_id or _starting_baseline_experiment(config)
     experiment = get_experiment(config.registry_path, selected_id)
     if experiment.get("target_strategy") != "direct_pure_premium":
-        raise ValueError("Official starting champion must be a direct pure premium experiment")
+        raise ValueError("Official starting champion must be the checked-in global-mean baseline experiment")
 
     upsert_branch(
         config.registry_path,
@@ -38,8 +38,8 @@ def initialise_official_champion(config: ProjectConfig, experiment_id: str | Non
     )
     reason = (
         "Official starting champion set by product decision: the no-model global-mean "
-        "burning cost is the first iteration of every run. All later models must demonstrate "
-        "real lift over this flat rate to enter the champion lineage."
+        f"{config.target_mode} target is the first iteration of every run. All later models "
+        "must demonstrate real lift over this flat rate to enter the champion lineage."
     )
     set_official_champion(
         config.registry_path,

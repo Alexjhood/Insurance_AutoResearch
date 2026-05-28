@@ -10,6 +10,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from autoresearch.targets import BURNING_COST, FREQUENCY, normalise_target_mode, target_spec
+
 
 # Column name constants (keep consistent across all model modules)
 RECORD_ID = "record_id"
@@ -41,6 +43,7 @@ def dispatch_model(
     feature_exclusions: list[str] | None = None,
     model_script_path: Path | None = None,
     allow_holdout_split: bool = False,
+    target_mode: str = BURNING_COST,
 ) -> ModelResult:
     """Fit the requested model family and return scored predictions.
 
@@ -53,7 +56,10 @@ def dispatch_model(
     train / score partitions.
     """
 
+    target_mode = normalise_target_mode(target_mode)
+    spec = target_spec(target_mode)
     hp = dict(hyperparameters or {})
+    hp.setdefault("target_mode", target_mode)
 
     # Apply optional feature builder before splitting
     feature_builder_module = hp.pop("feature_builder_module", None)
@@ -75,7 +81,7 @@ def dispatch_model(
     if score.empty:
         raise ValueError("No rows available for scoring")
 
-    predicted_cost, notes = _call_model(
+    predicted_target, notes = _call_model(
         model_family,
         target_strategy,
         train,
@@ -85,23 +91,40 @@ def dispatch_model(
         feature_exclusions,
         model_script_path,
     )
-    predicted_cost = np.asarray(predicted_cost, dtype=float)
-    if len(predicted_cost) != len(score):
+    predicted_target = np.asarray(predicted_target, dtype=float)
+    if len(predicted_target) != len(score):
         raise ValueError(
-            f"Model returned {len(predicted_cost)} predictions for {len(score)} scored rows"
+            f"Model returned {len(predicted_target)} predictions for {len(score)} scored rows"
         )
 
+    actual_target = score[spec.source_column].astype(float).to_numpy()
+    clipped_target = np.clip(predicted_target, 0.0, None)
+    exposure = score[EXPOSURE].astype(float).to_numpy()
     predictions = pd.DataFrame({
         RECORD_ID: score[RECORD_ID].to_numpy(),
         "split": score["split"].to_numpy(),
-        "exposure": score[EXPOSURE].astype(float).to_numpy(),
+        "target_mode": target_mode,
+        "exposure": exposure,
         "actual_claim_cost": score[CLAIM_COST].astype(float).to_numpy(),
         "actual_claim_cost_uncapped": score[RAW_CLAIM_COST].astype(float).to_numpy(),
-        "predicted_claim_cost": np.clip(predicted_cost, 0.0, None),
+        "actual_claim_count": score[CLAIM_COUNT].astype(float).to_numpy(),
+        "actual_claim_event_count": score[CLAIM_EVENTS].astype(float).to_numpy(),
+        "actual_target": actual_target,
+        "predicted_target": clipped_target,
     })
     exp = predictions["exposure"].clip(lower=1e-12)
+    if target_mode == BURNING_COST:
+        predictions["predicted_claim_cost"] = clipped_target
+        predictions["predicted_claim_count"] = np.nan
+    elif target_mode == FREQUENCY:
+        predictions["predicted_claim_count"] = clipped_target
+        predictions["predicted_claim_cost"] = np.nan
+    else:  # pragma: no cover - guarded by normalise_target_mode
+        raise ValueError(f"Unsupported target_mode: {target_mode}")
     predictions["actual_pure_premium"] = predictions["actual_claim_cost"] / exp
     predictions["predicted_pure_premium"] = predictions["predicted_claim_cost"] / exp
+    predictions["actual_frequency"] = predictions["actual_claim_count"] / exp
+    predictions["predicted_frequency"] = predictions["predicted_claim_count"] / exp
     return ModelResult(predictions=predictions, model_notes=notes)
 
 

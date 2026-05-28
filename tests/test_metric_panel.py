@@ -74,6 +74,27 @@ def test_evaluate_predictions_marks_gini_higher_is_better() -> None:
     assert result["lower_is_better"] is False
 
 
+def test_evaluate_predictions_supports_frequency_target_mode() -> None:
+    preds = pd.DataFrame({
+        "split": ["search_validation"] * 10,
+        "target_mode": ["frequency"] * 10,
+        "actual_claim_count": [0, 1, 0, 2, 0, 1, 0, 0, 1, 0],
+        "predicted_claim_count": [0.1, 0.8, 0.2, 1.6, 0.1, 0.9, 0.2, 0.1, 0.7, 0.1],
+        "exposure": np.ones(10),
+    })
+    result = evaluate_predictions(
+        preds,
+        ("search_validation",),
+        primary_metric="poisson_deviance",
+        target_mode="frequency",
+    )
+    sv_metrics = [m for m in result["split_metrics"] if m["split"] == "search_validation"][0]
+    assert result["target_mode"] == "frequency"
+    assert sv_metrics["total_actual_claim_count"] == 5.0
+    assert "mean_predicted_frequency" in sv_metrics
+    assert abs(result["aggregate"]["mean_score"] - sv_metrics["poisson_deviance"]) < 1e-9
+
+
 def test_evaluate_predictions_blocks_milestone_holdout() -> None:
     preds = pd.DataFrame({
         "split": ["search_validation", "milestone_holdout"],

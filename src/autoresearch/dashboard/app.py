@@ -89,6 +89,7 @@ def render_experiments() -> None:
     visible_columns = [
         "experiment_id",
         "experiment_name",
+        "target_mode",
         "target_strategy",
         "model_family",
         "mean_score",
@@ -104,14 +105,16 @@ def render_experiments() -> None:
     scored = table.dropna(subset=["mean_score"]).copy()
     if not scored.empty:
         st.subheader("Best Point-Estimate Experiments")
-        best = scored.sort_values("mean_score", ascending=True).head(5)
+        ascending = config.primary_metric != "gini_weighted"
+        best = scored.sort_values("mean_score", ascending=ascending).head(5)
         st.dataframe(best[[column for column in visible_columns if column in best.columns]], use_container_width=True)
 
         st.subheader("Direct vs Frequency-Severity")
+        score_agg = "min" if ascending else "max"
         summary = (
             scored.groupby("target_strategy", as_index=False)
-            .agg(best_mean_score=("mean_score", "min"), runs=("experiment_id", "count"))
-            .sort_values("best_mean_score")
+            .agg(best_mean_score=("mean_score", score_agg), runs=("experiment_id", "count"))
+            .sort_values("best_mean_score", ascending=ascending)
         )
         st.dataframe(summary, use_container_width=True)
 
@@ -119,7 +122,7 @@ def render_experiments() -> None:
         stability = (
             scored.groupby(["model_family", "target_strategy"], as_index=False)
             .agg(mean_score=("mean_score", "mean"), mean_std_score=("std_score", "mean"), runs=("experiment_id", "count"))
-            .sort_values("mean_score")
+            .sort_values("mean_score", ascending=ascending)
         )
         st.dataframe(stability, use_container_width=True)
 

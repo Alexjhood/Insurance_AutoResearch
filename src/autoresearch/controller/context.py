@@ -33,11 +33,11 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
 
     return {
         "project_goal": (
-            "Improve burning-cost prediction while protecting reproducibility and holdout integrity. "
+            f"Improve {config.target_mode} prediction while protecting reproducibility and holdout integrity. "
             "Every run starts from the global-mean no-model baseline; progress through many small, "
             "well-motivated steps with a broad search before committing to any single direction. "
             "Claim cap is fixed at 100,000. exposure_term_a is an exposure offset for weights, "
-            "response denominators, and converting predicted rates to claim costs; it must not be "
+            "response denominators, and converting predicted rates to target totals; it must not be "
             "used as a predictive feature because it is unavailable at quote time."
         ),
         "official_champion": champion,
@@ -53,6 +53,7 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
             "ordinary_train_split": config.ordinary_train_split,
             "ordinary_eval_splits": list(config.ordinary_eval_splits),
             "milestone_holdout_access": "forbidden during ordinary search",
+            "target_mode": config.target_mode,
             "primary_metric": config.primary_metric,
             "lower_is_better": config.primary_metric != "gini_weighted",
             "promotion_gate": {

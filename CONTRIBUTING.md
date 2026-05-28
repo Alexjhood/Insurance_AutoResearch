@@ -57,11 +57,13 @@ expose:
 
 ```python
 def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hyperparameters):
-    return predicted_claim_cost_array, notes_dict
+    return predicted_target_array, notes_dict
 ```
 
-Predictions must be in original claim-cost space (multiply by
-`exposure_term_a` if you model pure premium). Apply
+Predictions must be target totals, not rates. In the default `burning_cost`
+mode, return predicted claim costs (multiply by `exposure_term_a` if you model
+pure premium). In `frequency` mode, return expected claim counts (multiply by
+`exposure_term_a` if you model annual claim frequency). Apply
 `autoresearch.models.calibration.apply_training_calibration` before
 returning. See `src/autoresearch/models/global_mean.py` for the reference
 shape.
