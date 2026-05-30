@@ -1026,10 +1026,10 @@ function renderHistory(){
   const promoted=HISTORY.filter(d=>d.promoted);
   const failed=HISTORY.filter(d=>!d.promoted);
 
-  // For backward compat, fall back to 'gini' key if metric not in point
   const getVal=(d)=>{
-    if(metricKey==='gini')return d.gini;
-    return d.metrics&&d.metrics[metricKey]!=null?d.metrics[metricKey]:null;
+    if(d.metrics&&d.metrics[metricKey]!=null)return d.metrics[metricKey];
+    if(metricKey==='gini_weighted')return d.gini??null;
+    return null;
   };
 
   const nonBase=HISTORY.slice(1);
@@ -1099,7 +1099,17 @@ if(metricSel){
   renderMetricExhibit();
 }
 const histMetricSel=document.getElementById('history-metric-select');
-if(histMetricSel){histMetricSel.addEventListener('change',renderHistory);}
+if(histMetricSel){
+  const _hKeys=Array.from(new Set(HISTORY.flatMap(d=>d.metrics?Object.keys(d.metrics):[])));
+  if(_hKeys.length===0)_hKeys.push('gini_weighted');
+  _hKeys.sort().forEach(k=>{
+    const o=document.createElement('option');
+    o.value=k;o.textContent=k+(k==='gini_weighted'?' (default)':'');
+    if(k==='gini_weighted')o.selected=true;
+    histMetricSel.appendChild(o);
+  });
+  histMetricSel.addEventListener('change',renderHistory);
+}
 renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
 """
     if target_mode != "burning_cost":
@@ -1328,9 +1338,7 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
     </p>
     <div class="controls">
       <label style="font-weight:600">Metric:&nbsp;
-        <select id="history-metric-select" style="min-width:220px">
-          <option value="gini" selected>gini_weighted (default)</option>
-        </select>
+        <select id="history-metric-select" style="min-width:220px"></select>
       </label>
     </div>
     <div class="chart-wrap"><div id="history-chart" style="height:360px"></div></div>
