@@ -8,7 +8,7 @@ from autoresearch.experiment_registry.experiments import (
     list_artifacts,
     record_experiment_artifacts,
 )
-from autoresearch.experiment_registry.comparisons import record_comparison, list_comparisons
+from autoresearch.experiment_registry.comparisons import record_comparison, list_comparisons, update_comparison_decision
 from autoresearch.experiment_registry.champions import (
     set_official_champion,
     get_official_champion,
@@ -40,6 +40,7 @@ __all__ = [
     "record_experiment_artifacts",
     "record_comparison",
     "list_comparisons",
+    "update_comparison_decision",
     "set_official_champion",
     "get_official_champion",
     "list_champion_history",

@@ -227,3 +227,86 @@ def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=Non
     proposal_dir = Path(record["proposal_path"]).parent
     assert record["status"] == "needs_repair"
     assert (proposal_dir / "repair_request_2.json").exists()
+
+
+def test_cycle_pauses_for_decision_then_record_decision_promotes(tmp_path: Path) -> None:
+    """A successful cycle leaves the comparison pending; record_decision finalises it."""
+    from dataclasses import replace
+    from autoresearch.config import PROJECT_ROOT
+    from autoresearch.comparison_runner import record_decision
+    from autoresearch.experiment_registry.registry import get_official_champion
+
+    # root=PROJECT_ROOT so the protected-file integrity check (run inside
+    # compare_experiments) can locate the real metrics/resampling modules.
+    config = replace(_config(tmp_path), root=PROJECT_ROOT)
+    config.search_space["requires_model_script"] = True
+    config.search_space["allow_open_model_families"] = True
+    config.processed_dir.mkdir(parents=True, exist_ok=True)
+    config.splits_dir.mkdir(parents=True, exist_ok=True)
+    _write_fixtures(config)
+    champion_config = tmp_path / "global_mean.toml"
+    champion_config.write_text(
+        """
+experiment_name = "gm_champion"
+model_family = "global_mean"
+target_strategy = "direct_pure_premium"
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]
+""".strip(),
+        encoding="utf-8",
+    )
+    champion_id = json.loads(
+        run_experiment(config, champion_config)["config_snapshot"].read_text(encoding="utf-8")
+    )["experiment_id"]
+    initialise_official_champion(config, champion_id)
+    config.metadata_dir.mkdir(parents=True, exist_ok=True)
+    (config.metadata_dir / "agent_schema.json").write_text(
+        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"},'
+        ' {"name": "vehicle_power_band_b", "role": "numeric_feature"}]}',
+        encoding="utf-8",
+    )
+
+    # Discriminative challenger: predicts in proportion to vehicle power band, so it
+    # ranks the high-claim policy above the low-claim one → positive lift vs the
+    # constant global-mean champion (passes the positive-lift validation gate).
+    config.handoff_proposal_inbox_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_proposal_inbox_dir / "power_model.py").write_text(
+        """
+import numpy as np
+
+EXPOSURE = "exposure_term_a"
+
+
+def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hp):
+    base = float(train["claim_cost_capped_active"].sum() / train[EXPOSURE].sum())
+    rate = base * score["vehicle_power_band_b"].astype(float).to_numpy() / 4.0
+    return rate * score[EXPOSURE].astype(float).to_numpy(), {"intent": "power-banded"}
+""".strip(),
+        encoding="utf-8",
+    )
+    proposal = _valid_proposal(champion_id)
+    proposal["experiment_config"]["model_family"] = "scripted_power"
+    proposal["experiment_config"]["model"] = {"script_path": "power_model.py"}
+    (config.handoff_proposal_inbox_dir / "proposal.json").write_text(json.dumps(proposal), encoding="utf-8")
+    ingest_proposals(config)
+
+    # Run the cycle — comparison must be left pending, champion unchanged.
+    result = run_next_queued_proposal(config)
+
+    assert result["decision"] == "pending_llm"
+    comparison_id = result["comparison_id"]
+    challenger_id = result["experiment_id"]
+    record = next(p for p in list_proposals(config.registry_path) if p["proposal_id"] == proposal["proposal_id"])
+    assert record["status"] == "awaiting_decision"
+    assert get_official_champion(config.registry_path)["champion_id"] == champion_id  # unchanged
+
+    # Agent records the decision — this finalises promotion + proposal status.
+    res = record_decision(config, comparison_id, decision="promote", rationale="Improves the panel.")
+    assert res["decision"] == "promote"
+    assert get_official_champion(config.registry_path)["champion_id"] == challenger_id
+    record = next(p for p in list_proposals(config.registry_path) if p["proposal_id"] == proposal["proposal_id"])
+    assert record["status"] == "promoted"

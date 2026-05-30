@@ -9,7 +9,7 @@ from pathlib import Path
 
 from autoresearch.config import ensure_project_dirs, load_config
 from autoresearch.bootstrap import bootstrap_track
-from autoresearch.comparison_runner import compare_against_current_champion, compare_experiments, run_repeated_evaluation
+from autoresearch.comparison_runner import compare_against_current_champion, compare_experiments, record_decision, run_repeated_evaluation
 from autoresearch.controller.champion import initialise_official_champion
 from autoresearch.controller.handoff import (
     export_context_bundle,
@@ -133,6 +133,21 @@ def _cmd_compare_to_champion(config, args) -> int:
     outputs = compare_against_current_champion(config, args.challenger_id)
     for name, path in outputs.items():
         print(f"{name}: {path}")
+    return 0
+
+
+def _cmd_record_decision(config, args) -> int:
+    result = record_decision(
+        config,
+        args.comparison_id,
+        decision=args.decision,
+        rationale=args.rationale,
+    )
+    print(f"Decision recorded: {result['decision']}")
+    print(f"Rationale: {result['rationale']}")
+    print(f"Decided at: {result['decided_at']}")
+    if not result.get("guardrail_result", {}).get("passed", True):
+        print(f"Guardrail failures: {result['guardrail_result']['failures']}")
     return 0
 
 
@@ -378,6 +393,7 @@ COMMANDS = {
     "run-repeated-evaluation": _cmd_run_repeated_evaluation,
     "compare-experiments": _cmd_compare_experiments,
     "compare-to-champion": _cmd_compare_to_champion,
+    "record-decision": _cmd_record_decision,
     "list-promotions": _cmd_list_promotions,
     "init-official-champion": _cmd_init_official_champion,
     "enqueue-proposal": _cmd_enqueue_proposal,
@@ -470,6 +486,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compare a challenger against the official champion when initialised.",
     )
     champion_parser.add_argument("challenger_id")
+    decision_parser = subparsers.add_parser(
+        "record-decision",
+        help="Record the LLM's promote/reject decision for a pending comparison.",
+    )
+    decision_parser.add_argument("comparison_id", help="comparison_id from compare-experiments output.")
+    decision_parser.add_argument("--decision", required=True, choices=["promote", "reject"],
+                                 help="LLM's final verdict.")
+    decision_parser.add_argument("--rationale", required=True,
+                                 help="Written justification for the decision.")
     subparsers.add_parser("list-promotions", help="Print volatility-aware comparison and promotion decisions.")
     init_champion = subparsers.add_parser("init-official-champion", help="Initialise official champion as the global-mean baseline for the active target.")
     init_champion.add_argument("--experiment-id", default=None)

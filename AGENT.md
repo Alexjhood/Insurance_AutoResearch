@@ -27,18 +27,86 @@ This applies to every cycle, including the very first proposal of a fresh run.
 
 ## What you are optimising
 
-**Primary metric**: `gini_weighted` — higher is better. This is the exposure-weighted rank discrimination/lift metric used by the promotion gate.
+**Primary KPI & gate metric**: `gini_weighted` — higher is better. The exposure-weighted Lorenz-area Gini is both the headline business KPI and the metric the `cv_bootstrap` gate ranks challengers on (win rate, lift, escalation trigger). `rank_gini_weighted` is still computed alongside it for reference (bounded-influence Somers' D), but it no longer drives the gate.
 
-**Secondary panel** (for interpretation):
-- `tweedie_deviance_p15` — exposure-weighted Tweedie deviance on pure premium
-- `double_lift_slope` — calibration linearity (want ≈ 1.0)
-- `predicted_to_actual_ratio` — aggregate calibration (want ≈ 1.0)
-- `poisson_deviance` — frequency model quality
+**The decision is yours, not a threshold.** The framework computes the full metric panel across all bootstrap×fold samples and a set of *advisory* gates, but it does not auto-promote. You review everything and call `record-decision` (see "You own the decision" below). Hard guardrails can only block clearly-broken promotions — they never promote for you.
+
+**Full metric panel** (all computed on every evaluation, all visible in the multi-metric exhibit):
+
+| Metric | Type | Notes |
+|---|---|---|
+| `gini_weighted` | Discrimination (KPI + gate) | Business KPI and the cv_bootstrap gate metric |
+| `rank_gini_weighted` | Discrimination (reference) | Bounded-influence Somers' D; robust to tail placement |
+| `asym_pricing_loss` | Pricing risk (lower=better) | Penalises under-pricing 4× over-pricing (see below) |
+| `spearman_rho` | Rank correlation | Model-agnostic; no distributional assumptions |
+| `kendall_tau` | Rank correlation | Concordant/discordant pair count |
+| `decile_lift_monotonicity` | Monotonicity | Spearman of decile-mean actual vs decile order |
+| `tweedie_deviance_p15` | Loss fit (p=1.5) | Primary deviance for burning-cost models |
+| `poisson_deviance` | Loss fit (p=1.0) | Frequency model quality |
+| `double_lift_slope` | Calibration | Regression slope of actual on predicted by decile (want ≈ 1.0) |
+| `predicted_to_actual_ratio` | Calibration | Aggregate level (want ≈ 1.0) |
+| MAE/RMSE variants | Error magnitude | Both rate and total; burning cost and frequency |
 
 In `burning_cost` mode, model scripts return predicted claim-cost totals. In
 `frequency` mode, model scripts return expected claim-count totals. Scripts
 should model rates internally if useful, then multiply by `exposure_term_a`
 before returning.
+
+---
+
+## You own the decision
+
+After every comparison, the framework writes `decision = "pending_llm"`. **You must review the metric summary and call `record-decision` before the cycle can advance.** The mechanical advisory gates are informative, not binding.
+
+### What to review before deciding
+1. **Full metric table**: check `gini_weighted`, `rank_gini_weighted`, `asym_pricing_loss`, calibration ratio.
+2. **Advisory gate panel**: did the challenger pass or fail the configured thresholds?
+3. **Guardrail status** (shown in the report banner): any hard-fail blocks promotion regardless of your choice.
+4. **Escalation**: if win rate was in the close-call band [0.40, 0.60], escalation added extra partitions — the post-escalation win rate is the one to read.
+5. **Asymmetric Pricing Loss (APL)**: lower is better. `asym_pricing_loss` penalises under-pricing 4× over-pricing. A challenger with a good Gini but high APL is writing profitable policies in the wrong segments.
+
+### How to record your decision
+```bash
+autoresearch --track <track> record-decision <comparison_id> --decision promote --rationale "Challenger improved gini_weighted by X and reduced APL by Y, indicating better rank discrimination and safer pricing."
+autoresearch --track <track> record-decision <comparison_id> --decision reject  --rationale "Win rate 0.48 in the close-call band even after escalation; insufficient evidence."
+```
+
+The comparison_id appears in the `compare-experiments` output and in `list-promotions`.
+
+On `promote`: guardrails are re-checked; hard fails block the promotion with an error message. On success, the holdout evaluation fires automatically.
+
+---
+
+## Asymmetric Pricing Loss (APL)
+
+`asym_pricing_loss` = Σ w·(4·under + 1·over) / Σ w, where under = max(actual_rate − predicted_rate, 0) and over = max(predicted_rate − actual_rate, 0). Lower is better (not in HIGHER_IS_BETTER_METRICS).
+
+The 4:1 ratio reflects the economic reality that a policy written at a loss generates claims that exceed the premium, costing ~4× more than a missed quote (which only loses margin). A model that systematically under-prices high-risk segments will have a high `asym_pricing_loss` even if its Gini looks acceptable.
+
+Diagnostic sub-metrics: `apl_under_cost` (mean exposure-weighted shortfall), `apl_over_cost` (mean excess), `apl_under_over_ratio` (realised under/over balance — close to 4 is expected at optimal pricing).
+
+---
+
+## Gate modes — how comparisons are adjudicated
+
+The comparison gate has three modes, configured via `gate_mode` in `default.toml`.
+
+### `cv_bootstrap` (default)
+
+Generates a **unique fold partition per run** (seed derived from run_id), then bootstrap-resamples each fold ×20. All (fold × bootstrap) samples contribute to the win rate and CI. Gate metric: `gini_weighted`.
+
+- Base comparison: 1 partition × 4 folds × 20 bootstrap = **80 samples**.
+- Close call (win rate in [0.40, 0.60]): escalation adds 2 extra partitions → **240 samples**.
+- Champion fold predictions are **cached** — only the challenger needs to be refit (4 fits vs old 16–32).
+- **~8× cheaper** than the old `repeated_cv` default on the common path.
+
+### `repeated_cv` (legacy)
+
+Refits both models on cv_n_repeats × cv_folds stratified partitions. Costs cv_n_repeats × cv_folds refits per comparison per model. Gate metric: `rank_gini_weighted`. Use when you need to compare against pre-cached repeated-CV results.
+
+### `single_partition` (legacy / fast)
+
+Evaluates on the fixed `search_validation` split with 30 bootstrap resamples. CI measures within-split noise only. Use for quick sanity checks or expensive-to-refit models.
 
 ---
 
@@ -72,6 +140,8 @@ autoresearch --track <codex-or-claude> --new-run bootstrap-track
 autoresearch --track <codex-or-claude> start-session main         # only needed once per run
 autoresearch --track <codex-or-claude> run-session-cycles <N>
 ```
+
+**Each cycle now pauses for your decision.** `run-session-cycles` runs a proposal through experiment + comparison and then **stops in the `awaiting_decision` state** — it does not auto-promote. You must review the metric summary and call `record-decision` (see "You own the decision") before the next cycle. So to run N experiments you loop: `run-session-cycles 1` → review → `record-decision …` → repeat. A larger N still stops after the first comparison that needs a verdict.
 
 If the user supplies a specific `--run-id` (e.g. `CC20260526_01`), pass it to every command. Otherwise use `--new-run` for fresh starts and omit `--run-id` for continues.
 

@@ -16,7 +16,19 @@ from sklearn.metrics import mean_tweedie_deviance
 from autoresearch.targets import BURNING_COST, normalise_target_mode, target_spec
 
 
-HIGHER_IS_BETTER_METRICS = {"gini_weighted"}
+HIGHER_IS_BETTER_METRICS = {
+    "gini_weighted",
+    "rank_gini_weighted",
+    "spearman_rho",
+    "kendall_tau",
+    "decile_lift_monotonicity",
+}
+
+# Asymmetric Pricing Loss penalty weights (fixed product constants).
+# Under-pricing a policy costs ~4× a missed quote: a policy written at a loss
+# triggers claims that exceed premium, whereas a miss only loses the margin.
+TAU_UNDER = 4.0
+TAU_OVER = 1.0
 
 
 def lower_is_better(metric_name: str) -> bool:
@@ -60,6 +72,21 @@ def full_metric_panel(
     # Gini coefficient (discrimination / lift)
     gini = _gini_weighted(actual, predicted, exp)
 
+    # Rank-Gini (Somers' D) — bounded-influence gate metric.
+    # Identical to gini_weighted but cumulates rank of actual loss rather than
+    # loss amounts, so one 100k claim has O(1/n) influence instead of unbounded.
+    rank_gini = _rank_gini_weighted(actual, predicted, exp)
+
+    # Rank correlations — model-agnostic, assume nothing about distribution.
+    spearman = _spearman_rho(actual_rate, predicted_rate)
+    kendall = _kendall_tau(actual_rate, predicted_rate)
+
+    # Decile lift monotonicity — Spearman of decile-mean-actual vs decile order.
+    decile_mono = _decile_lift_monotonicity(actual_rate, predicted_rate, exp)
+
+    # Asymmetric Pricing Loss — penalises under-pricing 4× over-pricing.
+    apl_metrics = _asym_pricing_loss(actual_rate, predicted_rate, exp)
+
     # Double-lift slope (regression of actual rate on predicted rate by decile)
     double_lift_slope = _double_lift_slope(actual_rate, predicted_rate, exp)
 
@@ -78,6 +105,14 @@ def full_metric_panel(
         "weighted_mae_target": weighted_mae,
         "weighted_rmse_target": weighted_rmse,
         "gini_weighted": gini,
+        "rank_gini_weighted": rank_gini,
+        "spearman_rho": spearman,
+        "kendall_tau": kendall,
+        "decile_lift_monotonicity": decile_mono,
+        "asym_pricing_loss": apl_metrics["asym_pricing_loss"],
+        "apl_under_cost": apl_metrics["apl_under_cost"],
+        "apl_over_cost": apl_metrics["apl_over_cost"],
+        "apl_under_over_ratio": apl_metrics["apl_under_over_ratio"],
         "double_lift_slope": double_lift_slope,
         "mean_actual_rate": float(np.average(actual_rate, weights=exp)),
         "mean_predicted_rate": float(np.average(predicted_rate, weights=exp)),
@@ -171,6 +206,201 @@ def _tweedie_deviance(actual_pp: np.ndarray, predicted_pp: np.ndarray, weights: 
         return float(mean_tweedie_deviance(actual_pp, predicted_pp, sample_weight=weights, power=power))
     except Exception:
         return float("nan")
+
+
+def _asym_pricing_loss(
+    actual_rate: np.ndarray,
+    predicted_rate: np.ndarray,
+    weights: np.ndarray,
+) -> dict[str, float]:
+    """Exposure-weighted Asymmetric Pricing Loss (lower is better).
+
+    Penalises under-pricing TAU_UNDER× and over-pricing TAU_OVER×.
+    Equivalent to a pinball loss at τ = TAU_UNDER / (TAU_UNDER + TAU_OVER) = 0.8,
+    rewarding prudent upward loading.
+
+    u > 0 means we wrote at a loss (actual rate > predicted rate = under-priced).
+    """
+
+    safe_w = np.clip(weights, 1e-12, None)
+    w_sum = float(safe_w.sum())
+    if w_sum < 1e-12:
+        return {
+            "asym_pricing_loss": float("nan"),
+            "apl_under_cost": float("nan"),
+            "apl_over_cost": float("nan"),
+            "apl_under_over_ratio": float("nan"),
+        }
+
+    u = actual_rate - predicted_rate
+    under = np.maximum(u, 0.0)
+    over = np.maximum(-u, 0.0)
+
+    apl_under = float(np.sum(safe_w * under) / w_sum)
+    apl_over = float(np.sum(safe_w * over) / w_sum)
+    apl = TAU_UNDER * apl_under + TAU_OVER * apl_over
+    ratio = apl_under / max(apl_over, 1e-12)
+
+    return {
+        "asym_pricing_loss": float(apl),
+        "apl_under_cost": apl_under,
+        "apl_over_cost": apl_over,
+        "apl_under_over_ratio": float(ratio),
+    }
+
+
+def _rank_gini_weighted(actual: np.ndarray, predicted: np.ndarray, weights: np.ndarray) -> float:
+    """Rank-Gini (Somers' D) — bounded-influence discrimination metric.
+
+    Identical structure to _gini_weighted but the Lorenz y-axis cumulates
+    exposure-weighted *ranks* of actual loss rather than loss amounts.
+    A single extreme claim contributes O(1/n) to this statistic instead of
+    O(claim_size / total_claims), making it robust to right-tail volatility.
+
+    Interpretation: the fraction of concordant pairs minus discordant pairs
+    (probability that a randomly chosen higher-predicted policy has higher
+    actual loss than a randomly chosen lower-predicted policy).
+    Range [-1, 1]; higher is better; 0 = random ordering.
+    """
+
+    if len(actual) < 2:
+        return float("nan")
+    safe_w = np.clip(weights, 1e-12, None)
+    predicted_pp = predicted / safe_w
+    actual_rate = actual / safe_w
+
+    # Sort by predicted rate ascending (same orientation as gini_weighted)
+    order = np.argsort(predicted_pp)
+    w = safe_w[order]
+    actual_rate_ordered = actual_rate[order]
+
+    # Replace loss amounts with exposure-weighted ranks of actual loss: each
+    # policy's rank value is the midpoint of its exposure band in actual-rate
+    # order, so one extreme claim contributes O(1/n) rather than
+    # O(claim / total).  Vectorised equivalent of a cumulative-midpoint loop.
+    rank_order = np.argsort(actual_rate_ordered, kind="stable")
+    w_in_rank_order = w[rank_order]
+    midpoints = np.cumsum(w_in_rank_order) - 0.5 * w_in_rank_order
+    rank_values = np.empty(len(w))
+    rank_values[rank_order] = midpoints
+
+    cum_w = np.cumsum(w) / w.sum()
+    total_rank = rank_values.sum()
+    if total_rank < 1e-12:
+        return float("nan")
+    cum_rank = np.cumsum(rank_values) / total_rank
+
+    cum_w = np.concatenate([[0.0], cum_w])
+    cum_rank = np.concatenate([[0.0], cum_rank])
+    _trapz = getattr(np, "trapezoid", None) or getattr(np, "trapz")
+    lorenz_area = float(_trapz(cum_rank, cum_w))
+    return float(1.0 - 2.0 * lorenz_area)
+
+
+def _spearman_rho(actual_rate: np.ndarray, predicted_rate: np.ndarray) -> float:
+    """Spearman rank correlation of predicted rate vs actual loss rate.
+
+    Pure rank correlation — makes no distributional assumptions and is
+    invariant to monotone transforms of either series.
+    Range [-1, 1]; higher is better; 1 = perfect rank agreement.
+    """
+
+    n = len(actual_rate)
+    if n < 4:
+        return float("nan")
+    # A constant series has no rank ordering — correlation is undefined.
+    # Guard explicitly to avoid scipy's ConstantInputWarning on flat predictions
+    # (e.g. the global-mean baseline predicts an identical rate for every policy).
+    if np.ptp(predicted_rate) == 0 or np.ptp(actual_rate) == 0:
+        return float("nan")
+    try:
+        from scipy.stats import spearmanr
+        result = spearmanr(predicted_rate, actual_rate)
+        return float(result.statistic if hasattr(result, "statistic") else result.correlation)
+    except Exception:
+        return float("nan")
+
+
+def _kendall_tau(actual_rate: np.ndarray, predicted_rate: np.ndarray) -> float:
+    """Kendall's τ-b between predicted rate and actual loss rate.
+
+    Counts concordant minus discordant pairs, normalised by the geometric
+    mean of pairs that are not tied on each variable separately.
+    Range [-1, 1]; higher is better.
+
+    For large datasets (n > 5000) a 5k stratified subsample is used to keep
+    runtime practical; the estimator is unbiased for the population τ.
+    """
+
+    n = len(actual_rate)
+    if n < 4:
+        return float("nan")
+    try:
+        from scipy.stats import kendalltau
+        if n > 5000:
+            # Subsample deterministically for speed (O(n²) naive implementation in scipy)
+            rng = np.random.default_rng(seed=42)
+            idx = rng.choice(n, size=5000, replace=False)
+            x, y = predicted_rate[idx], actual_rate[idx]
+        else:
+            x, y = predicted_rate, actual_rate
+        result = kendalltau(x, y)
+        return float(result.statistic if hasattr(result, "statistic") else result.correlation)
+    except Exception:
+        return float("nan")
+
+
+def _decile_lift_monotonicity(
+    actual_rate: np.ndarray,
+    predicted_rate: np.ndarray,
+    weights: np.ndarray,
+) -> float:
+    """Spearman correlation of per-decile mean actual rate vs decile order.
+
+    Bins policies into 10 equal-exposure deciles ordered by predicted rate.
+    Computes mean actual rate per decile, then Spearman of those 10 means
+    vs decile rank (1–10).  A perfectly calibrated monotone model → 1.0.
+    Aggregation within deciles averages out within-bucket claim noise,
+    making this metric more stable than policy-level rank statistics.
+    """
+
+    n = len(actual_rate)
+    if n < 20:
+        return float("nan")
+    safe_w = np.clip(weights, 1e-12, None)
+    order = np.argsort(predicted_rate)
+    w_s = safe_w[order]
+    a_s = actual_rate[order]
+
+    n_bins = 10
+    cum_w = np.cumsum(w_s)
+    total_w = cum_w[-1]
+    if total_w < 1e-12:
+        return float("nan")
+
+    # Equal-exposure bin edges
+    edges = [total_w * i / n_bins for i in range(1, n_bins)]
+    bin_ids = np.searchsorted(cum_w, edges, side="left")
+    bin_ids = np.clip(bin_ids, 0, n - 1)
+
+    boundaries = [0] + list(bin_ids) + [n]
+    decile_means: list[float] = []
+    for i in range(n_bins):
+        lo, hi = boundaries[i], boundaries[i + 1]
+        if lo >= hi:
+            continue
+        w_bin = w_s[lo:hi]
+        a_bin = a_s[lo:hi]
+        w_sum = w_bin.sum()
+        if w_sum < 1e-12:
+            continue
+        decile_means.append(float(np.average(a_bin, weights=w_bin)))
+
+    if len(decile_means) < 4:
+        return float("nan")
+    ranks = np.arange(1, len(decile_means) + 1, dtype=float)
+    means = np.array(decile_means, dtype=float)
+    return _spearman_rho(means, ranks)
 
 
 def _gini_weighted(actual: np.ndarray, predicted: np.ndarray, weights: np.ndarray) -> float:

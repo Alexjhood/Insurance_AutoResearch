@@ -146,6 +146,7 @@ def init_registry(path: Path) -> Path:
     with sqlite3.connect(path) as con:
         con.executescript(SCHEMA)
         _migrate_experiments(con)
+        _migrate_comparisons(con)
 
     from autoresearch.config import PROJECT_ROOT
     from autoresearch.utils.integrity import write_integrity_manifest
@@ -170,6 +171,22 @@ def _migrate_experiments(con: sqlite3.Connection) -> None:
     for column, definition in columns.items():
         if column not in existing:
             con.execute(f"ALTER TABLE experiments ADD COLUMN {column} {definition}")
+
+
+def _migrate_comparisons(con: sqlite3.Connection) -> None:
+    """Add LLM-decision columns to comparisons table for existing registries."""
+
+    existing = {row[1] for row in con.execute("PRAGMA table_info(comparisons)").fetchall()}
+    columns = {
+        "decision": "TEXT",
+        "decision_rationale": "TEXT",
+        "decided_by": "TEXT",
+        "decided_at": "TEXT",
+        "guardrail_status": "TEXT",
+    }
+    for column, definition in columns.items():
+        if column not in existing:
+            con.execute(f"ALTER TABLE comparisons ADD COLUMN {column} {definition}")
 
 
 def registry_counts(path: Path) -> dict[str, int]:

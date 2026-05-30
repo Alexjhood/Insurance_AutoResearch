@@ -44,6 +44,13 @@ class ProjectConfig:
     use_cv: bool
     cv_folds: int
     cv_n_repeats: int
+    cv_seed: int
+    gate_mode: str          # "cv_bootstrap" | "repeated_cv" | "single_partition"
+    gate_primary_metric: str
+    bootstrap_per_fold: int
+    escalation_win_rate_low: float
+    escalation_win_rate_high: float
+    escalation_partitions: int
     repeated_resamples: int
     bootstrap_iterations: int
     resample_fraction: float
@@ -166,8 +173,15 @@ def load_config(
         primary_metric=str(evaluation.get("primary_metric", "tweedie_deviance_p15")),
         tweedie_power=float(evaluation.get("tweedie_power", 1.5)),
         use_cv=bool(evaluation.get("use_cv", False)),
-        cv_folds=int(evaluation.get("cv_folds", 5)),
+        cv_folds=int(evaluation.get("cv_folds", 4)),
         cv_n_repeats=int(evaluation.get("cv_n_repeats", 1)),
+        cv_seed=int(evaluation.get("cv_seed", int(data["random_seed"]))),
+        gate_mode=str(evaluation.get("gate_mode", "cv_bootstrap")),
+        gate_primary_metric=str(evaluation.get("gate_primary_metric", "gini_weighted")),
+        bootstrap_per_fold=int(resampling.get("bootstrap_per_fold", 20)),
+        escalation_win_rate_low=float(resampling.get("escalation_win_rate_low", 0.40)),
+        escalation_win_rate_high=float(resampling.get("escalation_win_rate_high", 0.60)),
+        escalation_partitions=int(resampling.get("escalation_partitions", 2)),
         repeated_resamples=int(resampling["repeated_resamples"]),
         bootstrap_iterations=int(resampling["bootstrap_iterations"]),
         resample_fraction=float(resampling["resample_fraction"]),

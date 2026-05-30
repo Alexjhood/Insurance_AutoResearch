@@ -128,6 +128,98 @@ def dispatch_model(
     return ModelResult(predictions=predictions, model_notes=notes)
 
 
+def dispatch_model_on_explicit_frames(
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    *,
+    model_family: str,
+    target_strategy: str,
+    hyperparameters: dict[str, Any] | None = None,
+    feature_inclusions: list[str] | None = None,
+    feature_exclusions: list[str] | None = None,
+    model_script_path: Path | None = None,
+    target_mode: str = BURNING_COST,
+) -> ModelResult:
+    """Fit and score using explicit train/val DataFrames instead of split names.
+
+    Intended for k-fold CV comparisons where fold boundaries are managed by the
+    caller rather than by split-pack labels.  Semantics are identical to
+    ``dispatch_model`` except the caller supplies ``train_df`` and ``val_df``
+    directly; a synthetic 'split' column is added before dispatch.
+
+    The returned predictions contain only val rows (split == 'val').
+    """
+
+    target_mode = normalise_target_mode(target_mode)
+    spec = target_spec(target_mode)
+    hp = dict(hyperparameters or {})
+    hp.setdefault("target_mode", target_mode)
+
+    # Apply optional feature builder to both frames before model dispatch
+    feature_builder_module = hp.pop("feature_builder_module", None)
+    if feature_builder_module:
+        import importlib
+        builder = importlib.import_module(feature_builder_module)
+        train_df = builder.build_features(train_df)
+        val_df = builder.build_features(val_df)
+
+    # Tag with synthetic split labels; score frame includes both so fit_predict
+    # receives the same (train, score) structure as the standard runner.
+    _train = train_df.copy()
+    _train["split"] = "_cv_train"
+    _val = val_df.copy()
+    _val["split"] = "_cv_val"
+    score = pd.concat([_train, _val], ignore_index=True)
+
+    predicted_target, notes = _call_model(
+        model_family,
+        target_strategy,
+        _train,
+        score,
+        hp,
+        feature_inclusions,
+        feature_exclusions,
+        model_script_path,
+    )
+    predicted_target = np.asarray(predicted_target, dtype=float)
+    if len(predicted_target) != len(score):
+        raise ValueError(
+            f"Model returned {len(predicted_target)} predictions for {len(score)} scored rows"
+        )
+
+    # Filter to val rows only for evaluation
+    val_mask = score["split"].to_numpy() == "_cv_val"
+    score_val = score[val_mask].copy()
+    pred_val = predicted_target[val_mask]
+
+    actual_target = score_val[spec.source_column].astype(float).to_numpy()
+    clipped_target = np.clip(pred_val, 0.0, None)
+    exposure = score_val[EXPOSURE].astype(float).to_numpy()
+
+    predictions = pd.DataFrame({
+        RECORD_ID: score_val[RECORD_ID].to_numpy(),
+        "split": "val",
+        "target_mode": target_mode,
+        "exposure": exposure,
+        "actual_claim_cost": score_val[CLAIM_COST].astype(float).to_numpy(),
+        "actual_claim_count": score_val[CLAIM_COUNT].astype(float).to_numpy(),
+        "actual_target": actual_target,
+        "predicted_target": clipped_target,
+    })
+    exp = predictions["exposure"].clip(lower=1e-12)
+    if target_mode == BURNING_COST:
+        predictions["predicted_claim_cost"] = clipped_target
+        predictions["predicted_claim_count"] = np.nan
+    else:
+        predictions["predicted_claim_count"] = clipped_target
+        predictions["predicted_claim_cost"] = np.nan
+    predictions["actual_pure_premium"] = predictions["actual_claim_cost"] / exp
+    predictions["predicted_pure_premium"] = predictions["predicted_claim_cost"] / exp
+    predictions["actual_frequency"] = predictions["actual_claim_count"] / exp
+    predictions["predicted_frequency"] = predictions["predicted_claim_count"] / exp
+    return ModelResult(predictions=predictions, model_notes=notes)
+
+
 def _call_model(
     model_family: str,
     target_strategy: str,

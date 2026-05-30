@@ -12,7 +12,6 @@ from autoresearch.controller.handoff import (
     export_context_bundle,
     inbox_status,
     ingest_proposals,
-    write_nonpromotion_summary,
 )
 from autoresearch.controller.workflow import ExperimentNeedsRepair, run_next_queued_proposal
 from autoresearch.experiment_registry.registry import (
@@ -33,6 +32,7 @@ SESSION_STATES = {
     "ingesting",
     "evaluating",
     "comparing",
+    "awaiting_decision",
     "promoted",
     "rejected",
     "inconclusive",
@@ -169,24 +169,22 @@ def run_session_cycle(config: ProjectConfig, session_id: str | None = None) -> d
     state["current_cycle"] += 1
     state["latest_cycle_result"] = result
     state["latest_ingest_summary"] = ingest_summary
-    state["state"] = "promoted" if result.get("decision") == "promote" else "inconclusive"
-    if result.get("decision") != "promote":
-        write_nonpromotion_summary(
-            config,
-            proposal_id=result["proposal_id"],
-            outcome_type=state["state"],
-            reason="Proposal did not satisfy volatility-aware promotion thresholds.",
-            quantitative_signal={"comparison_id": result.get("comparison_id")},
-        )
 
+    # The experiment + comparison have run, but the decision belongs to the LLM.
+    # The cycle pauses in "awaiting_decision"; the agent reviews the metrics and
+    # calls `record-decision`, which finalises promotion/rejection bookkeeping.
+    state["state"] = "awaiting_decision"
     _persist_state(
         config,
         state,
-        event_type="cycle_completed",
+        event_type="awaiting_decision",
         proposal_id=result.get("proposal_id"),
         experiment_id=result.get("experiment_id"),
         comparison_id=result.get("comparison_id"),
-        message=f"Cycle completed with decision {result.get('decision')}.",
+        message=(
+            f"Experiment evaluated — awaiting LLM decision for comparison "
+            f"{result.get('comparison_id')}. Call `record-decision`."
+        ),
         details=result,
     )
     _write_latest_cycle_summary(config, state)
@@ -213,7 +211,10 @@ def run_session_cycles(config: ProjectConfig, count: int, session_id: str | None
     for _ in range(count):
         state = run_session_cycle(config, session_id)
         states.append(state)
-        if state["state"] in {"waiting_for_proposal", "waiting_for_repair", "paused", "failed", "completed"}:
+        if state["state"] in {
+            "awaiting_decision", "waiting_for_proposal", "waiting_for_repair",
+            "paused", "failed", "completed",
+        }:
             break
     return states
 

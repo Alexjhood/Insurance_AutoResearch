@@ -22,8 +22,9 @@ def record_comparison(
     promotion_decision: str,
     promotion_rationale: str,
     artifacts: dict[str, Path],
+    guardrail_status: dict[str, Any] | None = None,
 ) -> None:
-    """Insert or replace a volatility-aware comparison record."""
+    """Insert or replace a comparison record (initial state: pending_llm)."""
 
     init_registry(path)
     with sqlite3.connect(path) as con:
@@ -41,9 +42,10 @@ def record_comparison(
                 paired_scores_path,
                 bootstrap_summary_path,
                 promotion_decision_path,
-                report_path
+                report_path,
+                guardrail_status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 comparison_id,
@@ -58,8 +60,46 @@ def record_comparison(
                 str(artifacts.get("bootstrap_summary", "")),
                 str(artifacts.get("promotion_decision", "")),
                 str(artifacts.get("html_report") or artifacts.get("promotion_report", "")),
+                dumps(guardrail_status) if guardrail_status is not None else None,
             ),
         )
+
+
+def update_comparison_decision(
+    path: Path,
+    comparison_id: str,
+    *,
+    decision: str,
+    rationale: str,
+    decided_by: str = "llm",
+    decided_at: str,
+    guardrail_status: dict[str, Any] | None = None,
+) -> None:
+    """Record the LLM's final promote/reject verdict on a pending comparison."""
+
+    init_registry(path)
+    with sqlite3.connect(path) as con:
+        con.execute(
+            """
+            UPDATE comparisons
+            SET decision = ?,
+                decision_rationale = ?,
+                decided_by = ?,
+                decided_at = ?,
+                guardrail_status = COALESCE(?, guardrail_status)
+            WHERE comparison_id = ?
+            """,
+            (
+                decision,
+                rationale,
+                decided_by,
+                decided_at,
+                dumps(guardrail_status) if guardrail_status is not None else None,
+                comparison_id,
+            ),
+        )
+        if con.execute("SELECT changes()").fetchone()[0] == 0:
+            raise ValueError(f"Comparison {comparison_id!r} not found in registry")
 
 
 def list_comparisons(path: Path) -> list[dict[str, Any]]:

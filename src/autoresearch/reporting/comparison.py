@@ -23,19 +23,34 @@ from autoresearch.utils.io import read_json
 
 
 METRIC_KEYS = [
+    # ── Gate metric (rank-based, bounded influence) ──────────────────────────
+    "rank_gini_weighted",
+    # ── KPI metric (reported discrimination) ────────────────────────────────
     "gini_weighted",
+    # ── Additional rank-based metrics ───────────────────────────────────────
+    "spearman_rho",
+    "kendall_tau",
+    "decile_lift_monotonicity",
+    # ── Asymmetric Pricing Loss (lower is better, 4:1 under:over penalty) ───
+    "asym_pricing_loss",
+    "apl_under_cost",
+    "apl_over_cost",
+    "apl_under_over_ratio",
+    # ── Calibration & fit ───────────────────────────────────────────────────
+    "predicted_to_actual_ratio",
+    "double_lift_slope",
     "tweedie_deviance_p15",
     "poisson_deviance",
-    "predicted_to_actual_ratio",
+    # ── Error metrics (burning cost) ─────────────────────────────────────────
     "weighted_mae_claim_cost",
     "weighted_rmse_claim_cost",
     "rmse_pure_premium",
     "mae_pure_premium",
-    "double_lift_slope",
     "mean_actual_pure_premium",
     "mean_predicted_pure_premium",
     "total_actual_claim_cost",
     "total_predicted_claim_cost",
+    # ── Error metrics (frequency) ────────────────────────────────────────────
     "total_actual_claim_count",
     "total_predicted_claim_count",
     "weighted_mae_claim_count",
@@ -68,6 +83,8 @@ def write_comparison_html_report(
     comparison_summary: dict[str, Any],
     bootstrap_summary: dict[str, Any],
     decision: dict[str, Any],
+    metric_lift_table: list[dict[str, Any]] | None = None,
+    per_partition: Any = None,
     output_path: Path,
 ) -> Path:
     """Write a self-contained interactive comparison report and return its path."""
@@ -121,10 +138,15 @@ def write_comparison_html_report(
     champion_details = _experiment_details(config, champion_id)
     challenger_details = _experiment_details(config, challenger_id)
 
+    gate_metric = getattr(config, "gate_primary_metric", "rank_gini_weighted")
+    gate_mode = comparison_summary.get("gate_mode", "single_partition")
+
     html = _render_html(
         comparison_id=comparison_id,
         eval_split=eval_split,
         primary_metric=config.primary_metric,
+        gate_primary_metric=gate_metric,
+        gate_mode=gate_mode,
         target_mode=target_mode,
         rate_label=spec.rate_label,
         decision=decision,
@@ -142,6 +164,7 @@ def write_comparison_html_report(
         pred_hist_data=pred_hist_data,
         diff_data=diff_data,
         history_points=history_points,
+        metric_lift_table=metric_lift_table or [],
     )
     output_path.write_text(html, encoding="utf-8")
     return output_path
@@ -234,11 +257,15 @@ def _all_experiment_history_points(
             if split_m is None:
                 continue
             gini = float(split_m["gini_weighted"])
+            # Carry all float metrics for the progression dropdown
+            all_metrics = {k: round(float(v), 6) for k, v in split_m.items()
+                          if isinstance(v, (int, float)) and k not in ("row_count",)}
         except Exception:
             continue
         points.append({
             "step": len(points) + 1,
             "gini": round(gini, 6),
+            "metrics": all_metrics,
             "label": exp.get("experiment_name") or eid[:32],
             "promoted": eid in promoted_ids,
             "experiment_id": eid,
@@ -545,6 +572,8 @@ def _render_html(
     comparison_id: str,
     eval_split: str,
     primary_metric: str,
+    gate_primary_metric: str = "rank_gini_weighted",
+    gate_mode: str = "single_partition",
     target_mode: str,
     rate_label: str,
     decision: dict[str, Any],
@@ -562,18 +591,35 @@ def _render_html(
     pred_hist_data: dict,
     diff_data: dict,
     history_points: list,
+    metric_lift_table: list[dict[str, Any]] | None = None,
 ) -> str:
     decision_str = decision.get("decision", "?")
-    decision_color = (
-        "#0a5c2e" if decision_str == "promoted"
-        else "#7a1a1a" if decision_str == "rejected"
-        else "#5a4500"
-    )
-    decision_bg = (
-        "#e8f5e9" if decision_str == "promoted"
-        else "#fce8e8" if decision_str == "rejected"
-        else "#fffde7"
-    )
+    # pending_llm → amber; promote/promoted → green; reject/rejected → red
+    if decision_str in ("promote", "promoted"):
+        decision_color, decision_bg = "#0a5c2e", "#e8f5e9"
+    elif decision_str in ("reject", "rejected"):
+        decision_color, decision_bg = "#7a1a1a", "#fce8e8"
+    elif decision_str == "pending_llm":
+        decision_color, decision_bg = "#5a3a00", "#fff8e1"
+    else:
+        decision_color, decision_bg = "#5a4500", "#fffde7"
+
+    # Human-readable decision label
+    decision_label = {
+        "pending_llm": "AWAITING LLM DECISION",
+        "promote": "PROMOTED",
+        "promoted": "PROMOTED",
+        "reject": "REJECTED",
+        "rejected": "REJECTED",
+        "inconclusive": "INCONCLUSIVE",
+    }.get(decision_str, decision_str.upper())
+
+    # Guardrail status
+    guardrail_passed = decision.get("guardrail_passed", True)
+    guardrail_failures = decision.get("guardrail_failures", [])
+    advisory_str = decision.get("advisory_decision", "")
+    decided_by = decision.get("decided_by", "")
+    decided_at = decision.get("decided_at", "")
 
     champ_gini = gini_data["champion"]["gini"]
     chall_gini = gini_data["challenger"]["gini"]
@@ -582,6 +628,27 @@ def _render_html(
     lift_color = "#0a5c2e" if mean_lift > 0 else "#7a1a1a"
     win_color = "#0a5c2e" if win_rate >= 0.6 else "#7a1a1a"
 
+    # Label for how many partitions / samples the lift distribution is drawn from
+    if gate_mode == "cv_bootstrap":
+        n_parts = int(comparison_summary.get("n_partitions", 1))
+        n_folds_cv = int(comparison_summary.get("n_folds", 4))
+        bpf = int(comparison_summary.get("bootstrap_per_fold", 20))
+        n_total = int(comparison_summary.get("n_samples", n_parts * n_folds_cv * bpf))
+        escalated = comparison_summary.get("escalated", False)
+        esc_label = " (escalated)" if escalated else ""
+        n_partitions_label = (
+            f"{n_parts} partition{'s' if n_parts > 1 else ''}{esc_label} × "
+            f"{n_folds_cv} folds × {bpf} bootstrap = {n_total} samples"
+        )
+    elif gate_mode == "repeated_cv":
+        n_folds = int(comparison_summary.get("n_folds", 4))
+        n_repeats = int(comparison_summary.get("n_repeats", 4))
+        n_partitions_label = f"{n_folds}×{n_repeats} = {n_folds * n_repeats} CV partitions"
+    else:
+        n_resamples = int(comparison_summary.get("n_resamples", 30))
+        n_partitions_label = f"{n_resamples} bootstrap resamples"
+
+    _metric_table = metric_lift_table or []
     data_script = (
         "const LIFT=" + json.dumps(lift_data, separators=(",", ":")) + ";"
         "const DL=" + json.dumps(double_lift_data, separators=(",", ":")) + ";"
@@ -589,6 +656,9 @@ def _render_html(
         "const HIST=" + json.dumps(pred_hist_data, separators=(",", ":")) + ";"
         "const DIFF=" + json.dumps(diff_data, separators=(",", ":")) + ";"
         "const HISTORY=" + json.dumps(history_points, separators=(",", ":")) + ";"
+        "const METRIC_TABLE=" + json.dumps(_metric_table, separators=(",", ":")) + ";"
+        f"const GATE_METRIC={json.dumps(gate_primary_metric)};"
+        f"const GATE_MODE={json.dumps(gate_mode)};"
     )
 
     band_options = "\n".join(
@@ -878,47 +948,131 @@ function renderHist(){
   }
 }
 
-/* ── Champion history ────────────────────────────────────────────────── */
+/* ── Multi-metric exhibit ────────────────────────────────────────────── */
+function renderMetricExhibit(){
+  const sel=document.getElementById('metric-select');
+  if(!sel||METRIC_TABLE.length===0){
+    if(document.getElementById('metric-exhibit-chart'))
+      Plotly.react('metric-exhibit-chart',[],{title:{text:'No metric data available'}},{});
+    return;
+  }
+  const chosen=sel.value;
+  const row=METRIC_TABLE.find(r=>r.metric===chosen);
+  if(!row){return;}
+
+  const hib=row.higher_is_better;
+  const liftSign=row.mean_lift>0?'▲':'▼';
+  const liftColor=row.mean_lift>0?'#0a5c2e':'#7a1a1a';
+  document.getElementById('metric-lift-display').innerHTML=
+    `<span style="color:${liftColor};font-weight:700">${liftSign} ${row.mean_lift>0?'+':''}${row.mean_lift.toFixed(4)}</span>`+
+    (row.lift_std!=null?` <span style="color:#6c757d;font-size:12px">(σ ${row.lift_std.toFixed(4)})</span>`:'');
+
+  const traces=[];
+
+  // ── Left subplot: champion vs challenger score bars ───────────────────
+  const scores=[
+    {label:'Champion',val:row.champion_score,color:CHAMP_COLOR},
+    {label:'Challenger',val:row.challenger_score,color:CHALL_COLOR},
+  ];
+  traces.push({
+    x:scores.map(d=>d.label),y:scores.map(d=>d.val),
+    type:'bar',marker:{color:scores.map(d=>d.color)},
+    xaxis:'x',yaxis:'y',name:'Score',
+    hovertemplate:'%{x}: %{y:.5g}<extra></extra>',showlegend:false,
+  });
+
+  // ── Right subplot: lift distribution (box + strip if partitions available) ──
+  const lifts=row.per_partition_lifts||[];
+  if(lifts.length>0){
+    traces.push({
+      x:lifts.map(()=>'Lift across<br>partitions'),
+      y:lifts,
+      type:'box',
+      boxpoints:'all',jitter:0.4,pointpos:0,
+      marker:{color:liftColor,size:5,opacity:0.6},
+      line:{color:liftColor},
+      fillcolor:liftColor.replace(')',',0.15)').replace('rgb','rgba'),
+      xaxis:'x2',yaxis:'y2',
+      name:'Lift distribution',showlegend:false,
+      hovertemplate:'Lift: %{y:.5g}<extra></extra>',
+    });
+    // Zero reference line
+    traces.push({
+      x:['Lift across<br>partitions','Lift across<br>partitions'],
+      y:[0,0],type:'scatter',mode:'lines',
+      line:{color:'#868e96',width:1.5,dash:'dot'},
+      xaxis:'x2',yaxis:'y2',hoverinfo:'skip',showlegend:false,name:'',
+    });
+  }
+
+  const dirLabel=hib?'↑ higher is better':'↓ lower is better';
+  const layout=Object.assign({},BASE_LAYOUT,{
+    title:{text:`<b>${chosen}</b>  <span style="font-size:11px;color:#6c757d">${dirLabel}</span>`,font:{size:13}},
+    grid:{rows:1,columns:lifts.length>0?2:1,pattern:'independent'},
+    xaxis:{domain:[0,lifts.length>0?0.44:1],title:'Model'},
+    yaxis:{title:chosen,gridcolor:'#f0f0f0'},
+    xaxis2:{domain:[0.56,1]},
+    yaxis2:{title:'Lift (challenger − champion)',gridcolor:'#f0f0f0',zeroline:true,zerolinecolor:'#aaa'},
+    margin:{l:68,r:40,t:60,b:68},
+    showlegend:false,
+  });
+  Plotly.react('metric-exhibit-chart',traces,layout,CFG);
+}
+
+/* ── Champion metric progression ─────────────────────────────────────── */
 function renderHistory(){
+  const metricKey=document.getElementById('history-metric-select')
+    ?document.getElementById('history-metric-select').value:'gini';
   const promoted=HISTORY.filter(d=>d.promoted);
   const failed=HISTORY.filter(d=>!d.promoted);
 
-  // Y-axis: skip step 1 (baseline), floor at 90% of lowest promoted non-baseline
+  // For backward compat, fall back to 'gini' key if metric not in point
+  const getVal=(d)=>{
+    if(metricKey==='gini')return d.gini;
+    return d.metrics&&d.metrics[metricKey]!=null?d.metrics[metricKey]:null;
+  };
+
   const nonBase=HISTORY.slice(1);
   if(nonBase.length===0){
-    Plotly.react('history-chart',[],mkLayout({title:{text:'Champion Gini Progression'}}),CFG);
+    Plotly.react('history-chart',[],mkLayout({title:{text:'Champion Metric Progression'}}),CFG);
     return;
   }
-  const allG=nonBase.map(d=>d.gini);
-  const promG=promoted.filter(d=>d.step>1).map(d=>d.gini);
-  const lowestProm=promG.length>0?Math.min(...promG):Math.min(...allG);
+  const allVals=nonBase.map(getVal).filter(v=>v!=null);
+  if(allVals.length===0){
+    Plotly.react('history-chart',[],mkLayout({title:{text:'No data for '+metricKey}}),CFG);
+    return;
+  }
+  const promVals=promoted.filter(d=>d.step>1).map(getVal).filter(v=>v!=null);
+  const lowestProm=promVals.length>0?Math.min(...promVals):Math.min(...allVals);
   const yFloor=lowestProm*0.9;
-  const yMin=Math.max(Math.min(...allG),yFloor);
-  const yMax=Math.max(...allG,lowestProm)+(Math.max(...allG)-yMin)*0.12;
+  const yMin=Math.max(Math.min(...allVals),yFloor);
+  const yMax=Math.max(...allVals,lowestProm)+(Math.max(...allVals)-yMin)*0.12;
 
+  const prom_=promoted.filter(d=>getVal(d)!=null);
+  const fail_=failed.filter(d=>getVal(d)!=null);
   const traces=[
     {name:'Promoted champion',
-     x:promoted.map(d=>d.step),y:promoted.map(d=>d.gini),
+     x:prom_.map(d=>d.step),y:prom_.map(getVal),
      mode:'lines+markers+text',
-     text:promoted.map(d=>d.label),
+     text:prom_.map(d=>d.label),
      textposition:'top center',
      textfont:{size:9,color:PROMO_COLOR},
      line:{color:PROMO_COLOR,width:2.5},
      marker:{size:9,color:PROMO_COLOR},
-     hovertemplate:'Step %{x}<br>Gini: %{y:.4f}<br>%{text}<extra>Promoted</extra>'},
+     hovertemplate:'Step %{x}<br>'+metricKey+': %{y:.4f}<br>%{text}<extra>Promoted</extra>'},
     {name:'Not promoted',
-     x:failed.map(d=>d.step),y:failed.map(d=>d.gini),
+     x:fail_.map(d=>d.step),y:fail_.map(getVal),
      mode:'markers+text',
-     text:failed.map(d=>d.label),
+     text:fail_.map(d=>d.label),
      textposition:'top center',
      textfont:{size:9,color:FAILED_COLOR},
      marker:{size:8,color:FAILED_COLOR,symbol:'circle-open',opacity:0.8},
-     hovertemplate:'Step %{x}<br>Gini: %{y:.4f}<br>%{text}<extra>Not promoted</extra>'},
+     hovertemplate:'Step %{x}<br>'+metricKey+': %{y:.4f}<br>%{text}<extra>Not promoted</extra>'},
   ];
   Plotly.react('history-chart',traces,mkLayout({
-    title:{text:'Champion Gini Progression on Validation Split',font:{size:14}},
+    title:{text:'Champion Metric Progression — '+metricKey,font:{size:14}},
     xaxis:{title:'Experiment Step',dtick:1},
-    yaxis:{title:'Validation Gini  (higher = better discrimination)',range:[yMin,yMax]},
+    yaxis:{title:metricKey,range:[yMin,yMax]},
   }),CFG);
 }
 
@@ -930,6 +1084,22 @@ document.querySelectorAll('input[name="dl-mode"]').forEach(r=>r.addEventListener
 document.getElementById('dl-rescale').addEventListener('change',renderDoubleLift);
 document.querySelectorAll('input[name="hist-view"]').forEach(r=>r.addEventListener('change',renderHist));
 document.querySelectorAll('input[name="scatter-pct"]').forEach(r=>r.addEventListener('change',renderHist));
+const metricSel=document.getElementById('metric-select');
+if(metricSel){
+  // Populate options from METRIC_TABLE
+  METRIC_TABLE.forEach(row=>{
+    const opt=document.createElement('option');
+    opt.value=row.metric;
+    const badge=row.is_gate_metric?' 🔒 gate':row.is_kpi_metric?' ★ KPI':'';
+    opt.text=row.metric+badge;
+    if(row.is_gate_metric)opt.selected=true;
+    metricSel.appendChild(opt);
+  });
+  metricSel.addEventListener('change',renderMetricExhibit);
+  renderMetricExhibit();
+}
+const histMetricSel=document.getElementById('history-metric-select');
+if(histMetricSel){histMetricSel.addEventListener('change',renderHistory);}
 renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
 """
     if target_mode != "burning_cost":
@@ -1002,8 +1172,10 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
   </p>
 
   <div class="banner">
-    <strong>{escape(decision_str.upper())}</strong>
+    <strong>{escape(decision_label)}</strong>
     <span>{escape(decision.get("rationale", ""))}</span>
+    {f'<br><span style="font-size:12px">Advisory: {escape(advisory_str)} · Decided by: {escape(decided_by)} at {escape(decided_at)}</span>' if decided_by else ''}
+    {f'<br><span style="font-size:12px;color:#7a1a1a">⚠ Guardrail failures: {escape(", ".join(guardrail_failures))}</span>' if not guardrail_passed else ''}
   </div>
 
   <div class="kpi-grid">
@@ -1030,8 +1202,8 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
   </div>
 
   <div class="section">
-    <h2>Promotion Gates</h2>
-    <p class="chart-note">All gates must pass for promotion. Challenger values are computed on the search-validation split.</p>
+    <h2>Advisory Gates (non-binding)</h2>
+    <p class="chart-note">Advisory gates inform but do not enforce promotion. Hard guardrails (discrimination, calibration, validity) are shown in the decision banner. The LLM reviews all metrics and records the final decision.</p>
     <div class="card" style="padding:12px">{gate_html}</div>
   </div>
 
@@ -1126,16 +1298,41 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
     <div class="chart-wrap"><div id="hist-chart" style="height:380px"></div></div>
   </div>
 
+  <!-- ── MULTI-METRIC EXHIBIT ── -->
+  <div class="section">
+    <h2>Multi-Metric Comparison</h2>
+    <p class="chart-note">
+      Select any metric from the panel to compare champion vs challenger.
+      <strong>🔒 gate</strong> = the primary gate metric (<code>{escape(gate_primary_metric)}</code>).
+      <strong>★ KPI</strong> = the reported business KPI (<code>gini_weighted</code>).
+      <strong>asym_pricing_loss</strong> penalises under-pricing 4× over-pricing (lower is better).
+      Left panel: score bars. Right panel: lift distribution across
+      {escape(n_partitions_label)} — box shows median/IQR, dots show individual samples.
+      A metric that consistently favours the challenger is more reliable than one that varies widely.
+    </p>
+    <div class="controls">
+      <label style="font-weight:600">Metric:&nbsp;<select id="metric-select" style="min-width:280px"></select></label>
+      <span id="metric-lift-display" style="margin-left:16px;font-size:14px"></span>
+    </div>
+    <div class="chart-wrap"><div id="metric-exhibit-chart" style="height:400px"></div></div>
+  </div>
+
   <!-- ── CHAMPION HISTORY ── -->
   <div class="section">
-    <h2>Champion Gini Progression</h2>
+    <h2>Champion Metric Progression</h2>
     <p class="chart-note">
-      Validation Gini for every experiment in this run.
+      Selected metric for every experiment in this run.
       <span style="color:#0a5c2e;font-weight:600">Green filled = promoted</span>;
       <span style="color:#d62728;font-weight:600">red open = not promoted</span>.
-      The connected line traces only the champion lineage. Y-axis excludes the global-mean baseline
-      to show resolution on later experiments; lower bound is at most 10% relative below the lowest promoted Gini.
+      The connected line traces only the champion lineage.
     </p>
+    <div class="controls">
+      <label style="font-weight:600">Metric:&nbsp;
+        <select id="history-metric-select" style="min-width:220px">
+          <option value="gini" selected>gini_weighted (default)</option>
+        </select>
+      </label>
+    </div>
     <div class="chart-wrap"><div id="history-chart" style="height:360px"></div></div>
   </div>
 
@@ -1201,10 +1398,21 @@ def _gate_table(
             f"<td class='{cls}'>{icon}</td></tr>"
         )
 
+    gate_mode_str = comparison_summary.get("gate_mode", "single_partition")
+    gate_metric_str = comparison_summary.get("gate_primary_metric") or comparison_summary.get("primary_metric", "gini_weighted")
+    n_partitions = comparison_summary.get("n_partitions") or comparison_summary.get("n_resamples", 30)
+    if gate_mode_str == "repeated_cv":
+        context_label = f"repeated CV ({comparison_summary.get('n_folds', 4)}×{comparison_summary.get('n_repeats', 4)} partitions)"
+    else:
+        context_label = f"single partition ({n_partitions} bootstrap resamples)"
+
     rows = [
         "<table>",
+        f"<tr><th colspan='4' style='background:#f0f4ff;color:#2c3e50;font-size:12px'>"
+        f"Gate mode: <strong>{escape(context_label)}</strong> — "
+        f"decision metric: <strong>{escape(gate_metric_str)}</strong></th></tr>",
         "<tr><th>Gate</th><th>Threshold</th><th>Challenger value</th><th>Result</th></tr>",
-        _row("Win rate (30 resamples)", f"≥ {min_win:.0f}%", f"{win_rate*100:.1f}%",
+        _row(f"Win rate across {n_partitions} partitions/resamples", f"≥ {min_win:.0f}%", f"{win_rate*100:.1f}%",
              checks.get("challenger_win_rate")),
         _row("Mean lift > 0", "> 0.0000", f"{mean_lift:+.5f}",
              checks.get("mean_lift_positive")),
@@ -1221,8 +1429,16 @@ def _gate_table(
         _row("Diagnostics present", "required",
              "present" if checks.get("diagnostics_present") else "absent",
              checks.get("diagnostics_present")),
-        "</table>",
     ]
+    if "sign_agreement_kpi" in checks:
+        kpi_lift = float(comparison_summary.get("mean_kpi_lift", 0) or 0)
+        rows.append(_row(
+            "Sign agreement (rank_gini ↑ and gini_weighted ↑)",
+            "both positive",
+            f"gini_weighted lift {kpi_lift:+.4f}",
+            checks.get("sign_agreement_kpi"),
+        ))
+    rows.append("</table>")
     return "\n".join(rows)
 
 

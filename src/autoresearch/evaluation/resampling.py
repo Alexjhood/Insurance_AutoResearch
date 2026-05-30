@@ -13,7 +13,7 @@ from autoresearch.evaluation.metrics import (
     infer_target_mode,
     lower_is_better,
     prediction_target_columns,
-    regression_metrics,
+    regression_metrics,  # noqa: F401 — re-exported for external callers
 )
 
 
@@ -31,6 +31,7 @@ class PromotionRules:
     max_predicted_to_actual_drift: float  # reject if calibration worsens > this
     require_diagnostics: bool
     bonferroni_lookback: int          # number of prior comparisons to adjust for
+    require_sign_agreement: bool = True   # rank_gini and gini_weighted must agree
 
 
 def repeated_scores(
@@ -157,6 +158,368 @@ def paired_comparison(
         "challenger_mean_score": float(per_resample["challenger_score"].mean()),
     }
     return per_resample, summary
+
+
+def paired_cv_comparison(
+    frame: pd.DataFrame,
+    fold_assignments: pd.DataFrame,
+    *,
+    champion_factory,
+    challenger_factory,
+    champion_id: str,
+    challenger_id: str,
+    n_folds: int,
+    n_repeats: int,
+    tweedie_power: float = 1.5,
+    gate_primary_metric: str = "rank_gini_weighted",
+    seed: int = 0,
+    target_mode: str | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Paired comparison via repeated k-fold CV — the honest partition-noise gate.
+
+    Both models are refit on *identical* (repeat, fold) partitions (common
+    random numbers).  The per-partition lift distribution therefore reflects
+    true partition variance, not within-split bootstrap noise.
+
+    ``champion_factory`` and ``challenger_factory`` are callables with signature
+    ``factory(train_df, val_df) -> predictions_df`` where predictions_df contains
+    at least ``actual_target``, ``predicted_target``, ``exposure``, and
+    ``target_mode`` columns.
+
+    Returns (per_partition_df, summary_dict).  The summary dict is API-compatible
+    with ``paired_comparison`` so ``promotion_decision`` can consume it directly.
+    """
+
+    data = frame.merge(fold_assignments[["record_id", "fold"]], on="record_id", how="inner")
+    if data.empty:
+        raise ValueError("No rows after merging frame with fold_assignments")
+
+    metric_lower = lower_is_better(gate_primary_metric)
+    rng = np.random.default_rng(seed)
+
+    rows: list[dict[str, Any]] = []
+    for repeat in range(n_repeats):
+        for fold in range(1, n_folds + 1):
+            val_mask = data["fold"] == fold
+            train_data = data[~val_mask].copy()
+            val_data = data[val_mask].copy()
+
+            if n_repeats > 1:
+                # Reshuffle training rows across repeats (different row order = different
+                # mini-batch ordering for gradient methods; same folds).
+                train_data = train_data.sample(
+                    frac=1.0, random_state=int(rng.integers(0, 2**31))
+                ).copy()
+
+            champ_preds = champion_factory(train_data, val_data)
+            chal_preds = challenger_factory(train_data, val_data)
+
+            fold_target_mode = infer_target_mode(chal_preds, target_mode)
+            actual_col, champ_pred_col = prediction_target_columns(champ_preds, fold_target_mode)
+            _, chal_pred_col = prediction_target_columns(chal_preds, fold_target_mode)
+
+            # Merge on record_id with explicit suffixes to handle identical column names
+            paired = champ_preds[["record_id", actual_col, champ_pred_col, "exposure"]].merge(
+                chal_preds[["record_id", chal_pred_col]],
+                on="record_id",
+                suffixes=("_champ", "_chal"),
+                how="inner",
+            )
+            if paired.empty:
+                continue
+
+            # Resolve column names after merge (suffix applied when names collide)
+            if champ_pred_col == chal_pred_col:
+                merged_champ_col = f"{champ_pred_col}_champ"
+                merged_chal_col = f"{chal_pred_col}_chal"
+            else:
+                merged_champ_col = champ_pred_col
+                merged_chal_col = chal_pred_col
+            actual_merged_col = actual_col  # not suffixed (only in champ frame)
+
+            actual = paired[actual_merged_col]
+            champ_pred = paired[merged_champ_col]
+            chal_pred = paired[merged_chal_col]
+            exp = paired["exposure"]
+
+            champ_metrics = full_metric_panel(
+                actual, champ_pred, exp,
+                tweedie_power=tweedie_power,
+                target_mode=fold_target_mode,
+            )
+            chal_metrics = full_metric_panel(
+                actual, chal_pred, exp,
+                tweedie_power=tweedie_power,
+                target_mode=fold_target_mode,
+            )
+
+            champ_gate = champ_metrics[gate_primary_metric]
+            chal_gate = chal_metrics[gate_primary_metric]
+            gate_lift = champ_gate - chal_gate if metric_lower else chal_gate - champ_gate
+
+            # Also track KPI (gini_weighted) lift for sign-agreement check
+            champ_kpi = champ_metrics.get("gini_weighted", float("nan"))
+            chal_kpi = chal_metrics.get("gini_weighted", float("nan"))
+            kpi_lift = chal_kpi - champ_kpi  # gini_weighted is always higher-is-better
+
+            row: dict[str, Any] = {
+                "repeat": repeat,
+                "fold": fold,
+                "n_val": len(paired),
+                "champion_id": champion_id,
+                "challenger_id": challenger_id,
+                "champion_gate_score": champ_gate,
+                "challenger_gate_score": chal_gate,
+                "lift": gate_lift,
+                "challenger_won": bool(gate_lift > 0),
+                "champion_kpi_score": champ_kpi,
+                "challenger_kpi_score": chal_kpi,
+                "kpi_lift": kpi_lift,
+            }
+            # Include all metric lifts for the report exhibit
+            for metric_name in champ_metrics:
+                if isinstance(champ_metrics[metric_name], float):
+                    c_val = champ_metrics[metric_name]
+                    h_val = chal_metrics.get(metric_name, float("nan"))
+                    row[f"champ_{metric_name}"] = c_val
+                    row[f"chal_{metric_name}"] = h_val
+            rows.append(row)
+
+    if not rows:
+        raise ValueError("No fold results produced — check that frame and fold_assignments overlap")
+
+    per_partition = pd.DataFrame(rows)
+    n_partitions = len(per_partition)
+
+    mean_lift = float(per_partition["lift"].mean())
+    between_partition_std = float(per_partition["lift"].std(ddof=0))
+    win_rate = float(per_partition["challenger_won"].mean())
+    champion_mean_score = float(per_partition["champion_gate_score"].mean())
+    challenger_mean_score = float(per_partition["challenger_gate_score"].mean())
+    mean_kpi_lift = float(per_partition["kpi_lift"].mean())
+
+    summary: dict[str, Any] = {
+        "gate_mode": "repeated_cv",
+        "gate_primary_metric": gate_primary_metric,
+        "champion_id": champion_id,
+        "challenger_id": challenger_id,
+        "target_mode": target_mode,
+        "lower_is_better": metric_lower,
+        "n_folds": n_folds,
+        "n_repeats": n_repeats,
+        "n_partitions": n_partitions,
+        "seed": seed,
+        # API-compatible aliases used by promotion_decision and reporting
+        "primary_metric": gate_primary_metric,
+        "eval_split": "cv_folds",
+        "n_resamples": n_partitions,
+        "mean_lift": mean_lift,
+        "median_lift": float(per_partition["lift"].median()),
+        "std_lift": between_partition_std,
+        "between_partition_std": between_partition_std,
+        "challenger_win_rate": win_rate,
+        "champion_mean_score": champion_mean_score,
+        "challenger_mean_score": challenger_mean_score,
+        # KPI tracking
+        "mean_kpi_lift": mean_kpi_lift,
+        "kpi_lift_positive": bool(mean_kpi_lift > 0),
+        "kpi_metric": "gini_weighted",
+    }
+    return per_partition, summary
+
+
+def cv_bootstrap_comparison(
+    *,
+    champion_fold_predictions: dict[int, list[pd.DataFrame]],
+    challenger_fold_predictions: dict[int, list[pd.DataFrame]],
+    gate_primary_metric: str = "gini_weighted",
+    bootstrap_per_fold: int = 20,
+    tweedie_power: float = 1.5,
+    seed: int = 0,
+    target_mode: str | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Bootstrap-within-fold paired comparison using pre-computed fold predictions.
+
+    ``champion_fold_predictions[partition_idx]`` is a list of DataFrames, one per
+    fold, each containing validation-set predictions with columns ``record_id``,
+    ``actual_target`` (or alias), ``predicted_target`` (or alias), ``exposure``.
+
+    For each (partition, fold): inner-joins champion and challenger on record_id,
+    draws ``bootstrap_per_fold`` bootstrap index sets with replacement (same indices
+    applied to both models — common random numbers seeded by (seed, partition, fold)),
+    then evaluates the full metric panel on each bootstrap sample.
+
+    Returns ``(per_sample_df, summary_dict)`` where per_sample_df has one row per
+    (partition × fold × bootstrap) sample and summary_dict is API-compatible with
+    ``promotion_decision`` and ``bootstrap_lift_summary``.
+    """
+
+    metric_lower = lower_is_better(gate_primary_metric)
+    partition_indices = sorted(champion_fold_predictions.keys())
+
+    rows: list[dict[str, Any]] = []
+    inferred_target_mode: str | None = None
+
+    for p_idx in partition_indices:
+        champ_folds = champion_fold_predictions[p_idx]
+        chal_folds = challenger_fold_predictions[p_idx]
+        for f_idx, (champ_preds, chal_preds) in enumerate(zip(champ_folds, chal_folds)):
+            fold_target_mode = infer_target_mode(chal_preds, target_mode)
+            if inferred_target_mode is None:
+                inferred_target_mode = fold_target_mode
+
+            actual_col, champ_pred_col = prediction_target_columns(champ_preds, fold_target_mode)
+            _, chal_pred_col = prediction_target_columns(chal_preds, fold_target_mode)
+
+            paired = champ_preds[["record_id", actual_col, champ_pred_col, "exposure"]].merge(
+                chal_preds[["record_id", chal_pred_col]],
+                on="record_id",
+                suffixes=("_champ", "_chal"),
+                how="inner",
+            )
+            if paired.empty:
+                continue
+
+            if champ_pred_col == chal_pred_col:
+                merged_champ_col = f"{champ_pred_col}_champ"
+                merged_chal_col = f"{chal_pred_col}_chal"
+            else:
+                merged_champ_col = champ_pred_col
+                merged_chal_col = chal_pred_col
+
+            n_rows = len(paired)
+            rng = np.random.default_rng([seed, p_idx, f_idx])
+
+            for b_idx in range(bootstrap_per_fold):
+                idx = rng.integers(0, n_rows, size=n_rows)
+                sample = paired.iloc[idx]
+
+                champ_metrics = full_metric_panel(
+                    sample[actual_col], sample[merged_champ_col], sample["exposure"],
+                    tweedie_power=tweedie_power,
+                    target_mode=fold_target_mode,
+                )
+                chal_metrics = full_metric_panel(
+                    sample[actual_col], sample[merged_chal_col], sample["exposure"],
+                    tweedie_power=tweedie_power,
+                    target_mode=fold_target_mode,
+                )
+
+                champ_gate = champ_metrics[gate_primary_metric]
+                chal_gate = chal_metrics[gate_primary_metric]
+                gate_lift = champ_gate - chal_gate if metric_lower else chal_gate - champ_gate
+
+                row: dict[str, Any] = {
+                    "partition_idx": p_idx,
+                    "fold_idx": f_idx,
+                    "bootstrap_idx": b_idx,
+                    "lift": gate_lift,
+                    "challenger_won": bool(gate_lift > 0),
+                }
+                for metric_name, c_val in champ_metrics.items():
+                    if isinstance(c_val, float):
+                        row[f"champ_{metric_name}"] = c_val
+                        row[f"chal_{metric_name}"] = chal_metrics.get(metric_name, float("nan"))
+                rows.append(row)
+
+    if not rows:
+        raise ValueError("cv_bootstrap_comparison produced no samples — check that fold predictions overlap")
+
+    per_sample = pd.DataFrame(rows)
+    n_samples = len(per_sample)
+    n_partitions = len(partition_indices)
+    max_folds = max(len(v) for v in champion_fold_predictions.values())
+
+    mean_lift = float(per_sample["lift"].mean())
+    std_lift = float(per_sample["lift"].std(ddof=0))
+    win_rate = float(per_sample["challenger_won"].mean())
+    champ_gate_col = f"champ_{gate_primary_metric}"
+    chal_gate_col = f"chal_{gate_primary_metric}"
+    champion_mean_score = float(per_sample[champ_gate_col].mean()) if champ_gate_col in per_sample else float("nan")
+    challenger_mean_score = float(per_sample[chal_gate_col].mean()) if chal_gate_col in per_sample else float("nan")
+
+    summary: dict[str, Any] = {
+        "gate_mode": "cv_bootstrap",
+        "gate_primary_metric": gate_primary_metric,
+        "target_mode": inferred_target_mode,
+        "lower_is_better": metric_lower,
+        "n_partitions": n_partitions,
+        "n_folds": max_folds,
+        "bootstrap_per_fold": bootstrap_per_fold,
+        "n_samples": n_samples,
+        # promotion_decision / bootstrap_lift_summary compatibility aliases
+        "primary_metric": gate_primary_metric,
+        "eval_split": "cv_bootstrap_folds",
+        "n_resamples": n_samples,
+        "mean_lift": mean_lift,
+        "median_lift": float(per_sample["lift"].median()),
+        "std_lift": std_lift,
+        "between_partition_std": std_lift,
+        "challenger_win_rate": win_rate,
+        "champion_mean_score": champion_mean_score,
+        "challenger_mean_score": challenger_mean_score,
+    }
+    return per_sample, summary
+
+
+def evaluate_guardrails(
+    challenger_metrics: dict[str, Any],
+    comparison_summary: dict[str, Any],
+    *,
+    min_gini: float = 0.0,
+    pred_to_actual_lo: float = 0.5,
+    pred_to_actual_hi: float = 2.0,
+) -> dict[str, Any]:
+    """Evaluate hard guardrails that block a promotion regardless of LLM decision.
+
+    Returns ``{"passed": bool, "failures": [str], "checks": {name: bool}}``.
+
+    Hard fails (each blocks promotion):
+    - No discrimination: challenger gini_weighted ≤ min_gini or NaN.
+    - Gross miscalibration: predicted_to_actual_ratio outside [pred_to_actual_lo, pred_to_actual_hi].
+    - Invalid predictions: any NaN or negative predicted target (detected via total_predicted_target).
+    - Clearly worse: gate-metric bootstrap CI lies entirely below zero (requires
+      ``comparison_summary`` to contain ``bootstrap_ci_lower`` or the per_sample lift vector).
+    """
+
+    checks: dict[str, bool] = {}
+
+    # 1. Discrimination floor
+    gini = challenger_metrics.get("gini_weighted")
+    checks["gini_above_zero"] = (
+        gini is not None and not (isinstance(gini, float) and np.isnan(gini)) and float(gini) > min_gini
+    )
+
+    # 2. Calibration sanity
+    ratio = challenger_metrics.get("predicted_to_actual_ratio")
+    if ratio is not None and not (isinstance(ratio, float) and np.isnan(ratio)):
+        checks["calibration_sane"] = pred_to_actual_lo <= float(ratio) <= pred_to_actual_hi
+    else:
+        checks["calibration_sane"] = False
+
+    # 3. Valid predictions (no NaN / negative totals)
+    total_pred = challenger_metrics.get("total_predicted_target")
+    if total_pred is None:
+        total_pred = challenger_metrics.get("total_predicted_claim_cost") or challenger_metrics.get("total_predicted_claim_count")
+    if total_pred is not None and not (isinstance(total_pred, float) and np.isnan(total_pred)):
+        checks["predictions_valid"] = float(total_pred) >= 0.0
+    else:
+        checks["predictions_valid"] = False
+
+    # 4. Clearly worse: the gate-metric lift CI lies *entirely below zero*, i.e.
+    #    even the optimistic (upper) bound is negative ⇒ challenger is significantly
+    #    worse, not merely inconclusive. Blocks only this unambiguous case.
+    ci_upper = comparison_summary.get("lift_ci_upper")
+    if ci_upper is None:
+        ci_upper = comparison_summary.get("bootstrap_ci_upper")
+    if ci_upper is not None and not (isinstance(ci_upper, float) and np.isnan(ci_upper)):
+        checks["not_clearly_worse"] = float(ci_upper) >= 0.0
+    else:
+        checks["not_clearly_worse"] = True  # cannot determine — pass by default
+
+    passed = all(checks.values())
+    failures = [name for name, ok in checks.items() if not ok]
+    return {"passed": passed, "failures": failures, "checks": checks}
 
 
 def bootstrap_lift_summary(
@@ -320,6 +683,23 @@ def promotion_decision(
         "bootstrap_lower_bound": boot_lower >= rules.bootstrap_lower_bound,
         "bootstrap_lower_bound_relative": boot_lower_relative >= rules.bootstrap_lower_bound_relative,
     }
+
+    # Sign-agreement: gate metric (rank_gini) and KPI (gini_weighted) must both
+    # point in the same direction.  Prevents promoting a model that improves on
+    # the robust gate but regresses on the business KPI.
+    if rules.require_sign_agreement:
+        kpi_lift_positive = comparison_summary.get("kpi_lift_positive")
+        if kpi_lift_positive is None:
+            # Single-partition mode: derive from champion/challenger mean scores
+            # stored in comparison_summary (gini_weighted is always in the panel)
+            champ_kpi = comparison_summary.get("champion_kpi_score")
+            chal_kpi = comparison_summary.get("challenger_kpi_score")
+            if champ_kpi is not None and chal_kpi is not None:
+                kpi_lift_positive = bool(float(chal_kpi) > float(champ_kpi))
+            else:
+                kpi_lift_positive = None  # cannot determine — skip check
+        if kpi_lift_positive is not None:
+            checks["sign_agreement_kpi"] = bool(kpi_lift_positive)
 
     # Calibration check
     calibration_ok = True

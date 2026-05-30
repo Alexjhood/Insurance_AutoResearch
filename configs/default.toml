@@ -33,14 +33,29 @@ target_mode = "burning_cost"
 primary_metric = "gini_weighted"
 tweedie_power = 1.5
 use_cv = true
-cv_folds = 5
+cv_folds = 4
 cv_n_repeats = 1
+cv_seed = 20260524
+# Gate mode controls how champion/challenger comparisons are adjudicated.
+# "cv_bootstrap"     — default; unique fold partition per run, bootstrap ×20
+#                      within each fold, gates on gini_weighted lift across all
+#                      (fold × bootstrap) samples. ~8× cheaper than repeated_cv.
+# "repeated_cv"      — legacy; refits both models on 4×cv_n_repeats folds,
+#                      gates on rank_gini_weighted. Use when refit cost is acceptable.
+# "single_partition" — legacy; evaluates on the fixed search_validation split
+#                      with within-split bootstrap resampling.
+gate_mode = "cv_bootstrap"
+gate_primary_metric = "gini_weighted"
 
 [resampling]
 repeated_resamples = 30
 bootstrap_iterations = 1000
 resample_fraction = 1.0
 random_seed = 20260524
+bootstrap_per_fold = 20
+escalation_win_rate_low = 0.40
+escalation_win_rate_high = 0.60
+escalation_partitions = 2
 
 [promotion]
 minimum_mean_lift = 0.0

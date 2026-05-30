@@ -117,55 +117,36 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
         )
         report = read_json(comparison_outputs["promotion_report"])
         comparison_id = report["comparison_id"]
-        decision = report["promotion_decision"]
-        if decision["decision"] == "promote":
-            set_official_champion(
-                config.registry_path,
-                champion_id=experiment_id,
-                branch_id=proposal["branch_id"],
-                reason=decision["rationale"],
-                action="promoted",
-                comparison_id=comparison_id,
-                proposal_id=proposal_id,
-            )
-            update_proposal_status(
-                config.registry_path,
-                proposal_id,
-                "promoted",
-                comparison_id=comparison_id,
-                notes=decision["rationale"],
-            )
-            # Auto-fire holdout evaluation on every promotion
-            evaluate_on_holdout(config, experiment_id, comparison_id)
-        else:
-            set_official_champion(
-                config.registry_path,
-                champion_id=champion["champion_id"],
-                branch_id=champion["branch_id"],
-                reason=decision["rationale"],
-                action="retained",
-                comparison_id=comparison_id,
-                proposal_id=proposal_id,
-            )
-            update_proposal_status(
-                config.registry_path,
-                proposal_id,
-                "inconclusive",
-                comparison_id=comparison_id,
-                notes=decision["rationale"],
-            )
-        # Include key metrics in the return so callers can surface them without
-        # requiring additional file reads of the comparison report.
+        # The comparison is written as decision=pending_llm. The framework does NOT
+        # decide here — the agent reviews the metrics and calls `record-decision`,
+        # which performs the champion/proposal/holdout bookkeeping and re-renders
+        # the report. We only link the proposal to the comparison and pause.
+        update_proposal_status(
+            config.registry_path,
+            proposal_id,
+            "awaiting_decision",
+            experiment_id=experiment_id,
+            comparison_id=comparison_id,
+            notes="Awaiting LLM decision (call record-decision).",
+        )
+        # Include key metrics in the return so the agent can assess without
+        # additional file reads of the comparison report.
         comp_summary = report.get("comparison_summary") or {}
+        guardrail = report.get("guardrail_result") or {}
         return {
             "proposal_id": proposal_id,
             "experiment_id": experiment_id,
             "comparison_id": comparison_id,
-            "decision": decision["decision"],
+            "decision": "pending_llm",
+            "advisory_decision": (report.get("advisory_promotion_decision") or {}).get("decision"),
+            "guardrail_passed": guardrail.get("passed"),
+            "guardrail_failures": guardrail.get("failures", []),
+            "escalated": report.get("escalated", False),
             "comparison_report": str(comparison_outputs.get("html_report", "")),
             "metrics_summary": {
                 "target_mode": config.target_mode,
                 "primary_metric": config.primary_metric,
+                "gate_primary_metric": comp_summary.get("gate_primary_metric"),
                 "challenger_score": round(float(comp_summary.get("challenger_mean_score") or 0), 6),
                 "champion_score": round(float(comp_summary.get("champion_mean_score") or 0), 6),
                 "mean_lift": round(float(comp_summary.get("mean_lift") or 0), 6),

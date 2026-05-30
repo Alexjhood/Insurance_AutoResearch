@@ -44,13 +44,36 @@ def assign_split(unit_value: float, ratios: dict[str, float]) -> str:
     return SPLIT_ORDER[-1]
 
 
+def fold_seed_from_run_id(run_id: str, partition_index: int = 0) -> int:
+    """Return a deterministic integer seed for a given run_id and partition_index.
+
+    Partition 0 is the base partition used for every run; escalation partitions
+    use indices 1, 2, ... Each run gets a unique seed derived from its run_id so
+    that different runs always use different fold assignments, while remaining
+    fully reproducible within a run.
+    """
+
+    digest = hashlib.sha256(f"fold_seed|{run_id}|{partition_index}".encode("utf-8")).hexdigest()
+    # Use the first 15 hex digits to stay within numpy int64 range
+    return int(digest[:15], 16)
+
+
 def generate_fold_assignments(
     frame: pd.DataFrame,
     id_column: str,
     n_folds: int,
     seed: int,
+    *,
+    partition_index: int = 0,
 ) -> pd.DataFrame:
-    """Assign deterministic k-fold labels (1..n_folds) to each row."""
+    """Assign deterministic stratified k-fold labels (1..n_folds) to each row.
+
+    Stratification mirrors the split-pack logic: rows are grouped into
+    claim-band × exposure-quintile strata (via ``_split_strata``) and folds
+    are assigned proportionally within each stratum so that every fold has a
+    representative share of large claims.  Falls back to unstratified
+    hash-mod assignment when the required columns are absent.
+    """
 
     if id_column not in frame.columns:
         raise ValueError(f"Fold id column {id_column!r} is not present")
@@ -58,10 +81,24 @@ def generate_fold_assignments(
         raise ValueError("n_folds must be at least 2")
 
     fold_frame = pd.DataFrame({"record_id": frame[id_column]})
-    fold_frame["fold_unit"] = fold_frame["record_id"].map(lambda v: stable_unit(v, seed + 1))
-    fold_frame = fold_frame.sort_values("fold_unit").reset_index(drop=True)
-    n = len(fold_frame)
-    fold_frame["fold"] = [i % n_folds + 1 for i in range(n)]
+    effective_seed = seed + partition_index
+    fold_frame["fold_unit"] = fold_frame["record_id"].map(lambda v: stable_unit(v, effective_seed + 1))
+
+    strata = _split_strata(frame)
+    if strata is not None:
+        fold_frame["stratum"] = strata.to_numpy()
+        assigned_folds = np.empty(len(fold_frame), dtype=int)
+        for _, group in fold_frame.groupby("stratum", sort=True):
+            ordered = group.sort_values(["fold_unit", "record_id"])
+            n_grp = len(ordered)
+            folds_grp = [i % n_folds + 1 for i in range(n_grp)]
+            assigned_folds[ordered.index] = folds_grp
+        fold_frame["fold"] = assigned_folds
+    else:
+        fold_frame = fold_frame.sort_values("fold_unit").reset_index(drop=True)
+        n = len(fold_frame)
+        fold_frame["fold"] = [i % n_folds + 1 for i in range(n)]
+
     return fold_frame[["record_id", "fold"]].sort_values("record_id").reset_index(drop=True)
 
 

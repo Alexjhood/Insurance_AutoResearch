@@ -15,6 +15,7 @@ from autoresearch.experiment_registry import (  # noqa: F401
     record_experiment_artifacts,
     record_comparison,
     list_comparisons,
+    update_comparison_decision,
     set_official_champion,
     get_official_champion,
     list_champion_history,
