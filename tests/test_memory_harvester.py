@@ -281,6 +281,113 @@ def test_metrics_read_skips_holdout_split(tmp_path: Path) -> None:
     assert abs(result["gini_weighted"] - 0.35) < 1e-9
 
 
+def test_metrics_read_excludes_train_and_holdout(tmp_path: Path) -> None:
+    """Train split and holdout must both be excluded; only search_validation counts.
+
+    Regression test for the A1 bug: gini was (0.343 + 0.457) / 2 = 0.400
+    instead of the true search gini 0.343.
+    """
+    from autoresearch.memory.harvester import _read_metrics
+
+    mf = tmp_path / "metrics.json"
+    payload = {
+        "aggregate": {"mean_score": 0.20, "std_score": 0.01, "split_count": 3},
+        "ordinary_eval_splits": ["search_validation"],
+        "primary_metric": "gini_weighted",
+        "split_metrics": [
+            {"split": "search_validation", "gini_weighted": 0.343},
+            {"split": "train", "gini_weighted": 0.457},
+            {"split": "milestone_holdout", "gini_weighted": 0.500},
+        ],
+    }
+    mf.write_text(json.dumps(payload), encoding="utf-8")
+    result = _read_metrics(str(mf))
+    # Must equal exactly the search_validation value, not an average with train or holdout.
+    assert abs(result["gini_weighted"] - 0.343) < 1e-9, (
+        f"Expected 0.343 (search_validation only), got {result['gini_weighted']}"
+    )
+
+
+def test_metrics_read_returns_none_gini_when_no_search_splits(tmp_path: Path) -> None:
+    """When no eligible search-split gini exists, gini_weighted must be None.
+
+    Regression test for the A2 bug: the fallback was mean_score (Tweedie deviance),
+    which is wrong scale and polarity.
+    """
+    from autoresearch.memory.harvester import _read_metrics
+
+    mf = tmp_path / "metrics.json"
+    payload = {
+        "aggregate": {"mean_score": 1.23, "std_score": 0.05, "split_count": 0},
+        "primary_metric": "gini_weighted",
+        "split_metrics": [],
+    }
+    mf.write_text(json.dumps(payload), encoding="utf-8")
+    result = _read_metrics(str(mf))
+    assert result["gini_weighted"] is None, (
+        f"Expected None when no search splits exist, got {result['gini_weighted']}"
+    )
+
+
+def test_metrics_read_fallback_excludes_train_when_no_ordinary_eval_splits(tmp_path: Path) -> None:
+    """Without ordinary_eval_splits, the name-based fallback must also exclude train."""
+    from autoresearch.memory.harvester import _read_metrics
+
+    mf = tmp_path / "metrics.json"
+    payload = {
+        "aggregate": {"mean_score": 0.30, "std_score": 0.0},
+        # No ordinary_eval_splits key — exercises the name-based fallback path
+        "split_metrics": [
+            {"split": "search_validation", "gini_weighted": 0.35},
+            {"split": "train", "gini_weighted": 0.90},
+        ],
+    }
+    mf.write_text(json.dumps(payload), encoding="utf-8")
+    result = _read_metrics(str(mf))
+    assert abs(result["gini_weighted"] - 0.35) < 1e-9
+
+
+def test_peak_gini_ignores_failed_experiments(tmp_path: Path) -> None:
+    """peak_gini must only consider completed experiments."""
+    from autoresearch.memory.harvester import harvest_run
+
+    memory = tmp_path / "memory.sqlite"
+    registry = tmp_path / "registry.sqlite"
+    m_good = tmp_path / "good.json"
+    m_failed = tmp_path / "failed.json"
+
+    # Good completed experiment with gini 0.35
+    m_good.write_text(json.dumps({
+        "aggregate": {"mean_score": 0.35, "std_score": 0.0},
+        "ordinary_eval_splits": ["search_validation"],
+        "split_metrics": [{"split": "search_validation", "gini_weighted": 0.35}],
+    }), encoding="utf-8")
+
+    # Failed experiment with a stray, higher partial gini — must not top the board
+    m_failed.write_text(json.dumps({
+        "aggregate": {"mean_score": 0.99, "std_score": 0.0},
+        "ordinary_eval_splits": ["search_validation"],
+        "split_metrics": [{"split": "search_validation", "gini_weighted": 0.99}],
+    }), encoding="utf-8")
+
+    _make_registry(
+        registry,
+        [
+            {"experiment_id": "e_completed", "status": "completed", "metrics_path": str(m_good)},
+            {"experiment_id": "e_failed", "status": "failed", "metrics_path": str(m_failed)},
+        ],
+    )
+    identity = {"provider": "x", "name": "y"}
+    harvest_run(memory, registry, identity, track_id="t", run_id="r")
+
+    with sqlite3.connect(memory) as con:
+        row = con.execute("SELECT peak_gini FROM runs WHERE run_uid='t/r'").fetchone()
+    assert row is not None
+    assert abs(row[0] - 0.35) < 1e-9, (
+        f"Expected peak_gini=0.35 (completed only), got {row[0]}"
+    )
+
+
 def test_harvest_all_skips_runs_without_identity(tmp_path: Path) -> None:
     tracks = tmp_path / "tracks" / "mytrack" / "runs" / "run1"
     tracks.mkdir(parents=True)

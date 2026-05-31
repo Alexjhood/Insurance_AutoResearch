@@ -49,17 +49,24 @@ def _read_metrics(metrics_path: str | None) -> dict[str, Any]:
     mean_score = agg.get("mean_score")
     std_score = agg.get("std_score")
 
-    # Derive gini_weighted: average over search splits only (exclude holdout/milestone).
+    # Derive gini_weighted: restrict to ordinary_eval_splits (search-split metrics only).
+    # If ordinary_eval_splits is absent, fall back to excluding known non-search splits
+    # (holdout, milestone_holdout, train) by name.
     split_metrics = data.get("split_metrics", [])
+    eval_splits = set(data.get("ordinary_eval_splits") or [])
     search_ginis = [
         sm["gini_weighted"]
         for sm in split_metrics
-        if sm.get("split") not in ("milestone_holdout", "holdout")
-        and "gini_weighted" in sm
+        if "gini_weighted" in sm
+        and (
+            sm.get("split") in eval_splits
+            if eval_splits
+            else sm.get("split") not in ("milestone_holdout", "holdout", "train")
+        )
     ]
-    gini_weighted = (
-        sum(search_ginis) / len(search_ginis) if search_ginis else mean_score
-    )
+    # Return None when no eligible search-split gini exists.
+    # Do NOT substitute mean_score (which is a Tweedie deviance, wrong scale/polarity).
+    gini_weighted = sum(search_ginis) / len(search_ginis) if search_ginis else None
 
     return {
         "mean_score": mean_score,
@@ -135,15 +142,23 @@ def harvest_run(
         # Build experiment rows with cycle_index (order by created_at)
         exp_rows = _build_experiment_rows(experiments_raw, run_uid)
         n_experiments = len(exp_rows)
+        # n_promotions counts comparison rows with decision='promote'.
+        # Note: reverted promotions may inflate this count; a more precise proxy
+        # would count distinct new_champion_id entries in champion_history, but
+        # that requires a separate query and this proxy is acceptable for the leaderboard.
         n_promotions = sum(
             1 for c in comparisons_raw
             if (c.get("decision") or c.get("promotion_decision") or "").lower() == "promote"
         )
-        peak_gini = (
-            max(
-                (r["gini_weighted"] for r in exp_rows if r["gini_weighted"] is not None),
-                default=None,
-            )
+        # Only completed experiments can represent a true search-split peak.
+        # Failed/timed-out experiments with a stray partial metric must not top the board.
+        peak_gini = max(
+            (
+                r["gini_weighted"]
+                for r in exp_rows
+                if r["gini_weighted"] is not None and r.get("status") == "completed"
+            ),
+            default=None,
         )
 
         # Upsert run

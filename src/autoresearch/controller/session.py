@@ -170,6 +170,10 @@ def run_session_cycle(config: ProjectConfig, session_id: str | None = None) -> d
     state["latest_cycle_result"] = result
     state["latest_ingest_summary"] = ingest_summary
 
+    if state["current_cycle"] % 5 == 0:
+        from autoresearch.memory import maybe_memory_checkpoint
+        maybe_memory_checkpoint(config, state)
+
     if result.get("decision") == "auto_reject":
         state["state"] = "rejected"
         _persist_state(
