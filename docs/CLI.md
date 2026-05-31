@@ -426,3 +426,25 @@ Example output:
   }
 }
 ```
+
+### Dashboard: Memory & Leaderboard page
+
+The Streamlit dashboard (`autoresearch dashboard`) includes a **Memory & Leaderboard** page that reads from `artifacts/memory/memory.sqlite`. It shows:
+
+- **Score-trace chart** — running peak `gini_weighted` per `model_id` across cycles (toggle models on/off).
+- **Peak Quality** tab — `max(gini_weighted)` per model across all its runs.
+- **Efficiency** tab — `peak_gini / n_experiments` (how quickly each model improves).
+- **Time-to-Structural-Insight** tab — first cycle where the running peak crossed the structural threshold (configurable in `[memory] structural_gini_threshold`, default 0.37).
+- **Decision Quality** tab — sub-noise thrash rate: fraction of comparisons where `|mean_lift| < 2 * std_lift`.
+
+The page is operator-facing (no access gate). Populate it first with `autoresearch memory harvest --all`.
+
+#### Config: `[memory]` section in `configs/default.toml`
+
+```toml
+[memory]
+memory_store_relpath = "artifacts/memory/memory.sqlite"
+structural_gini_threshold = 0.37
+```
+
+`structural_gini_threshold` controls the Time-to-Structural-Insight leaderboard threshold. It is also available on `ProjectConfig.structural_gini_threshold`.

@@ -102,6 +102,9 @@ class ProjectConfig:
     model_name: str | None = None
     model_version: str | None = None
     model_harness: str | None = None
+    # cross-run memory
+    memory_store_relpath: str = "artifacts/memory/memory.sqlite"
+    structural_gini_threshold: float = 0.37
 
 
 def _resolve(root: Path, value: str) -> Path:
@@ -141,6 +144,7 @@ def load_config(
     compute_cfg = raw.get("compute", {})
     repair_cfg = raw.get("repair", {})
     screening_cfg = raw.get("screening", {})
+    memory_cfg = raw.get("memory", {})
 
     resolved_track = track_id or "default"
 
@@ -242,6 +246,8 @@ def load_config(
         screening_min_absolute_lift=float(screening_cfg.get("min_absolute_lift", -0.001)),
         screening_min_relative_lift=float(screening_cfg.get("min_relative_lift", -0.002)),
         running_stale_minutes=int(raw.get("handoff", {}).get("running_stale_minutes", 30)),
+        memory_store_relpath=str(memory_cfg.get("memory_store_relpath", "artifacts/memory/memory.sqlite")),
+        structural_gini_threshold=float(memory_cfg.get("structural_gini_threshold", 0.37)),
     )
 
 

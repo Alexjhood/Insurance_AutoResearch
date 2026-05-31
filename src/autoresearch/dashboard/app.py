@@ -308,6 +308,176 @@ def render_sessions() -> None:
         st.write("No proposals recorded.")
 
 
+def render_memory() -> None:
+    """Memory & Leaderboard page — reads from artifacts/memory/memory.sqlite."""
+    import sqlite3
+
+    config = load_config()
+    memory_path = config.root / config.memory_store_relpath
+    threshold = config.structural_gini_threshold
+
+    st.title("Memory & Leaderboard")
+    if not memory_path.exists():
+        st.info(
+            "No memory store found. Run `autoresearch memory harvest --all` to build it."
+        )
+        return
+
+    try:
+        with sqlite3.connect(memory_path) as con:
+            exp_df = pd.read_sql_query(
+                "SELECT e.run_uid, e.cycle_index, e.gini_weighted, e.status,"
+                "       r.model_id, m.provider"
+                " FROM experiments e"
+                " JOIN runs r ON r.run_uid = e.run_uid"
+                " JOIN models m ON m.model_id = r.model_id"
+                " WHERE e.status = 'completed' AND e.gini_weighted IS NOT NULL",
+                con,
+            )
+            runs_df = pd.read_sql_query(
+                "SELECT r.run_uid, r.model_id, r.n_experiments, r.n_promotions,"
+                "       r.peak_gini, r.final_champion_id, m.provider"
+                " FROM runs r JOIN models m ON m.model_id = r.model_id",
+                con,
+            )
+            cmp_df = pd.read_sql_query(
+                "SELECT c.run_uid, c.decision, c.mean_lift, c.std_lift, r.model_id"
+                " FROM comparisons c JOIN runs r ON r.run_uid = c.run_uid",
+                con,
+            )
+    except Exception as exc:
+        st.error(f"Error reading memory store: {exc}")
+        return
+
+    if exp_df.empty:
+        st.info("Memory store is empty. Run `autoresearch memory harvest --all`.")
+        return
+
+    # ---- Score-trace chart: running-max gini_weighted per model_id ----
+    st.subheader("Score-trace (running peak gini per model)")
+    trace_df = (
+        exp_df.sort_values(["model_id", "run_uid", "cycle_index"])
+        .groupby(["model_id", "cycle_index"], as_index=False)["gini_weighted"]
+        .max()
+    )
+    trace_df = trace_df.sort_values(["model_id", "cycle_index"])
+    trace_df["running_max"] = trace_df.groupby("model_id")["gini_weighted"].cummax()
+
+    model_ids = sorted(trace_df["model_id"].unique())
+    selected_models = st.multiselect("Models to display", model_ids, default=model_ids)
+    filtered_trace = trace_df[trace_df["model_id"].isin(selected_models)]
+
+    if not filtered_trace.empty:
+        pivot = (
+            filtered_trace.pivot_table(
+                index="cycle_index", columns="model_id", values="running_max", aggfunc="max"
+            )
+            .sort_index()
+            .ffill()
+        )
+        st.line_chart(pivot)
+        st.caption(f"Threshold line (structural insight): {threshold:.3f}")
+
+    st.markdown("---")
+
+    # ---- Leaderboard tables ----
+    if runs_df.empty:
+        st.info("No run data yet.")
+        return
+
+    # Aggregate per model
+    model_agg = (
+        runs_df.groupby(["model_id", "provider"], as_index=False)
+        .agg(
+            n_runs=("run_uid", "nunique"),
+            n_experiments=("n_experiments", "sum"),
+            peak_gini=("peak_gini", "max"),
+            total_fit_seconds=("n_experiments", "sum"),  # placeholder; replaced below
+        )
+    )
+
+    # Efficiency: peak_gini / n_experiments
+    model_agg["efficiency_per_exp"] = model_agg["peak_gini"] / model_agg["n_experiments"].replace(0, float("nan"))
+
+    # Time-to-structural-insight: first cycle_index where running_max >= threshold, per model
+    crossed = (
+        trace_df[trace_df["running_max"] >= threshold]
+        .groupby("model_id", as_index=False)["cycle_index"]
+        .min()
+        .rename(columns={"cycle_index": "first_threshold_cycle"})
+    )
+    model_agg = model_agg.merge(crossed, on="model_id", how="left")
+    model_agg["first_threshold_cycle"] = model_agg["first_threshold_cycle"].fillna(float("inf"))
+
+    # Decision quality: fraction of promotions not later reverted (champion_history not
+    # available in aggregator; proxy via comparing n_promotions rows).
+    # Sub-noise thrash: comparisons where abs(mean_lift) < 2*std_lift
+    if not cmp_df.empty and "std_lift" in cmp_df.columns:
+        thrash = cmp_df.dropna(subset=["mean_lift", "std_lift"])
+        thrash = thrash.copy()
+        thrash["is_thrash"] = thrash["mean_lift"].abs() < 2 * thrash["std_lift"]
+        thrash_rate = (
+            thrash.groupby("model_id", as_index=False)
+            .agg(total_cmps=("is_thrash", "count"), thrash_cmps=("is_thrash", "sum"))
+        )
+        thrash_rate["thrash_rate"] = thrash_rate["thrash_cmps"] / thrash_rate["total_cmps"].replace(0, float("nan"))
+        model_agg = model_agg.merge(thrash_rate[["model_id", "thrash_rate"]], on="model_id", how="left")
+    else:
+        model_agg["thrash_rate"] = float("nan")
+
+    tab_quality, tab_efficiency, tab_insight, tab_decision = st.tabs(
+        ["Peak Quality", "Efficiency", "Time-to-Insight", "Decision Quality"]
+    )
+
+    with tab_quality:
+        st.subheader("Peak Quality — max gini_weighted per model")
+        board = (
+            model_agg[["model_id", "provider", "n_runs", "n_experiments", "peak_gini"]]
+            .sort_values("peak_gini", ascending=False)
+            .reset_index(drop=True)
+        )
+        board.index += 1
+        st.dataframe(board, use_container_width=True)
+
+    with tab_efficiency:
+        st.subheader("Efficiency — peak gini per experiment")
+        board = (
+            model_agg[["model_id", "provider", "n_runs", "n_experiments", "peak_gini", "efficiency_per_exp"]]
+            .sort_values("efficiency_per_exp", ascending=False)
+            .reset_index(drop=True)
+        )
+        board.index += 1
+        st.dataframe(board, use_container_width=True)
+
+    with tab_insight:
+        st.subheader(f"Time-to-Structural-Insight — first cycle to reach gini >= {threshold:.3f}")
+        board = (
+            model_agg[["model_id", "provider", "n_runs", "n_experiments", "first_threshold_cycle"]]
+            .sort_values("first_threshold_cycle", ascending=True)
+            .reset_index(drop=True)
+        )
+        board["first_threshold_cycle"] = board["first_threshold_cycle"].replace(
+            float("inf"), "never"
+        )
+        board.index += 1
+        st.dataframe(board, use_container_width=True)
+
+    with tab_decision:
+        st.subheader("Decision Quality — sub-noise thrash rate (lower is better)")
+        cols_show = ["model_id", "provider", "n_runs", "n_experiments", "thrash_rate"]
+        board = (
+            model_agg[cols_show]
+            .sort_values("thrash_rate", ascending=True)
+            .reset_index(drop=True)
+        )
+        board.index += 1
+        st.dataframe(board, use_container_width=True)
+        st.caption(
+            "Thrash rate = fraction of comparisons where |mean_lift| < 2 * std_lift. "
+            "Lower means the model made fewer sub-noise promotion attempts."
+        )
+
+
 def render_comparisons() -> None:
     config = load_config()
     st.title("Promotion Comparisons")
@@ -353,7 +523,10 @@ def render_comparisons() -> None:
 
 page = st.sidebar.radio(
     "Page",
-    ["Home", "Champion", "Data Profile", "Experiments", "Comparisons", "Auto Research", "File Handoff", "Sessions"],
+    [
+        "Home", "Champion", "Data Profile", "Experiments", "Comparisons",
+        "Auto Research", "File Handoff", "Sessions", "Memory & Leaderboard",
+    ],
 )
 if page == "Home":
     render_home()
@@ -365,6 +538,8 @@ elif page == "Experiments":
     render_experiments()
 elif page == "Comparisons":
     render_comparisons()
+elif page == "Memory & Leaderboard":
+    render_memory()
 else:
     if page == "Auto Research":
         render_auto_research()

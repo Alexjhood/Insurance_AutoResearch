@@ -116,6 +116,13 @@ enabled = true
 min_absolute_lift = -0.001
 min_relative_lift = -0.002
 
+[memory]
+# Relative path from PROJECT_ROOT to the cross-run memory aggregator.
+memory_store_relpath = "artifacts/memory/memory.sqlite"
+# Gini threshold that defines "escaped the rate-Tweedie plateau".
+# Time-to-structural-insight leaderboard counts the first cycle that crosses this.
+structural_gini_threshold = 0.37
+
 [search_space.preprocessing]
 # Claim cap is fixed at 100,000 by product decision and applied uniformly to
 # training and testing data.  The only allowed value is the default — agents
