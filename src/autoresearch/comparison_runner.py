@@ -126,10 +126,13 @@ def compare_experiments(
     # Load challenger diagnostics for calibration gate check
     challenger_diagnostics = _load_diagnostics(config, challenger_id)
 
-    # Count prior comparisons against this champion for Bonferroni adjustment
+    # Bonferroni family size = prior comparisons against this champion plus the
+    # current one (capped by the configured lookback).  Including the current
+    # comparison is what makes the correction account for every attempt to beat
+    # this champion; counting only priors left it one comparison too lenient.
     all_comparisons = list_comparisons(config.registry_path)
     n_prior = sum(1 for c in all_comparisons if c.get("champion_id") == champion_id)
-    bonferroni_count = min(n_prior, config.bonferroni_lookback)
+    bonferroni_count = min(n_prior + 1, config.bonferroni_lookback)
 
     promotion_rules = PromotionRules(
         minimum_mean_lift=config.minimum_mean_lift,

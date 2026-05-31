@@ -47,7 +47,8 @@ def test_search_dataset_contains_no_holdout_record_ids(tmp_path) -> None:
     )
 
 
-def test_search_and_holdout_are_disjoint(tmp_path) -> None:
+def test_search_and_holdout_are_disjoint(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AUTORESEARCH_MILESTONE_TOKEN", "milestone")
     full = _make_full_dataset(n=100)
     search = full[full["split"] != "milestone_holdout"].reset_index(drop=True)
     holdout = full[full["split"] == "milestone_holdout"].reset_index(drop=True)
@@ -62,7 +63,8 @@ def test_search_and_holdout_are_disjoint(tmp_path) -> None:
     assert len(search_ids) + len(holdout_ids) == 100
 
 
-def test_holdout_row_counts_are_correct(tmp_path) -> None:
+def test_holdout_row_counts_are_correct(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AUTORESEARCH_MILESTONE_TOKEN", "milestone")
     full = _make_full_dataset(n=100)
     search = full[full["split"] != "milestone_holdout"].reset_index(drop=True)
     holdout = full[full["split"] == "milestone_holdout"].reset_index(drop=True)
@@ -75,7 +77,8 @@ def test_holdout_row_counts_are_correct(tmp_path) -> None:
     assert len(loaded_holdout) == 20
 
 
-def test_wrong_token_raises_permission_error(tmp_path) -> None:
+def test_wrong_token_raises_permission_error(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AUTORESEARCH_MILESTONE_TOKEN", "milestone")
     full = _make_full_dataset()
     search = full[full["split"] != "milestone_holdout"].reset_index(drop=True)
     holdout = full[full["split"] == "milestone_holdout"].reset_index(drop=True)
@@ -84,6 +87,20 @@ def test_wrong_token_raises_permission_error(tmp_path) -> None:
 
     with pytest.raises(PermissionError):
         load_holdout_dataset(tmp_path / "vault", milestone_token="wrong_token")
+
+
+def test_missing_token_env_fails_closed(tmp_path, monkeypatch) -> None:
+    """With no token configured, holdout access is refused (no default fallback)."""
+    monkeypatch.delenv("AUTORESEARCH_MILESTONE_TOKEN", raising=False)
+    full = _make_full_dataset()
+    search = full[full["split"] != "milestone_holdout"].reset_index(drop=True)
+    holdout = full[full["split"] == "milestone_holdout"].reset_index(drop=True)
+
+    write_vault(search, holdout, tmp_path / "processed", tmp_path / "vault")
+
+    # Even though the holdout file exists, access fails without a configured token.
+    with pytest.raises(PermissionError, match="AUTORESEARCH_MILESTONE_TOKEN"):
+        load_holdout_dataset(tmp_path / "vault")
 
 
 def test_load_search_dataset_missing_raises(tmp_path) -> None:

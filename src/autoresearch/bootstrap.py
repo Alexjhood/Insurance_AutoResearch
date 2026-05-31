@@ -139,11 +139,17 @@ def bootstrap_track(
 
 
 def _required_prepared_data_paths(config: ProjectConfig) -> tuple[Path, ...]:
+    # The holdout parquet and capping diagnostics are part of a complete
+    # prepare-data run.  Omitting them let a data plane that is missing the
+    # holdout (so milestone evaluation would later fail) look "already prepared"
+    # and skip re-preparation.
     return (
         config.processed_dir / f"{config.agent_dataset_name}.parquet",
         config.processed_dir / "agent_dataset_search.parquet",
+        config.holdout_vault_dir / "agent_dataset_holdout.parquet",
         config.metadata_dir / "agent_schema.json",
         config.metadata_dir / "dataset_profile.json",
+        config.metadata_dir / "capping_diagnostics.json",
         config.splits_dir / "split_pack.csv",
         config.splits_dir / "split_pack_manifest.json",
         config.splits_dir / "split_pack_folds.parquet",

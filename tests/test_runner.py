@@ -518,6 +518,20 @@ claim_cap_threshold = 100000
     assert artifacts2["html_report"].exists()
 
 
+def test_bonferroni_family_includes_current_comparison(tmp_path: Path) -> None:
+    """The Bonferroni family size counts prior comparisons plus the current one,
+    so a second comparison against the same champion uses n=2 (not n=1)."""
+    config, champ_id, chal_id = _setup_two_experiments(tmp_path, "bonf")
+
+    first = compare_experiments(config, champ_id, chal_id)
+    first_boot = json.loads(first["bootstrap_summary"].read_text())
+    assert first_boot["n_comparisons_bonferroni"] == 1
+
+    second = compare_experiments(config, champ_id, chal_id)
+    second_boot = json.loads(second["bootstrap_summary"].read_text())
+    assert second_boot["n_comparisons_bonferroni"] == 2
+
+
 def test_record_decision_promote_updates_champion(tmp_path: Path) -> None:
     """record_decision('promote') with passing guardrails updates the official champion."""
     from autoresearch.comparison_runner import record_decision

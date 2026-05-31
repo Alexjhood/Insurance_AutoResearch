@@ -232,11 +232,29 @@ def scan_for_holdout_access(root: Path) -> list[str]:
 
 # ── Protected-file manifest ───────────────────────────────────────────────────
 
+# Files that define the evaluation metrics, the promotion gate, and the
+# holdout boundary.  These are the modules an LLM could silently edit to make a
+# weak challenger look promotable (reward hacking), so any change blocks
+# comparisons until explicitly accepted via `update-integrity-manifest`.
+#
+# Note: we hash the *real* implementation modules, not the
+# `experiment_registry/registry.py` re-export shim — editing a submodule such as
+# `comparisons.py` does not change the shim's bytes and would otherwise slip
+# through unprotected.
 PROTECTED_RELATIVE_PATHS = [
+    # Metrics and resampling/promotion-decision logic
     "src/autoresearch/evaluation/metrics.py",
     "src/autoresearch/evaluation/resampling.py",
+    "src/autoresearch/evaluation/diagnostics.py",
+    "src/autoresearch/evaluation/validation.py",
+    # Comparison orchestration and the Bonferroni / integrity gate itself
+    "src/autoresearch/comparison_runner.py",
+    # Holdout boundary and milestone evaluation
     "src/autoresearch/data/holdout_vault.py",
-    "src/autoresearch/experiment_registry/registry.py",
+    "src/autoresearch/milestone.py",
+    # Registry submodules that record comparisons and set the official champion
+    "src/autoresearch/experiment_registry/comparisons.py",
+    "src/autoresearch/experiment_registry/champions.py",
 ]
 
 _MANIFEST_FILENAME = "integrity_manifest.json"

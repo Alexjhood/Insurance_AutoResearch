@@ -20,7 +20,6 @@ _SENTINEL_FILENAME = ".locked"
 _HOLDOUT_FILENAME = "agent_dataset_holdout.parquet"
 _SEARCH_FILENAME = "agent_dataset_search.parquet"
 _TOKEN_ENV_VAR = "AUTORESEARCH_MILESTONE_TOKEN"
-_DEFAULT_TOKEN = "milestone"  # used only in tests; production should override via env
 
 
 def write_vault(
@@ -65,11 +64,24 @@ def load_search_dataset(processed_dir: Path, agent_dataset_name: str = "agent_da
 
 
 def load_holdout_dataset(holdout_vault_dir: Path, *, milestone_token: str | None = None) -> pd.DataFrame:
-    """Load the holdout dataset.  Requires the correct milestone token."""
+    """Load the holdout dataset.  Requires the milestone token to be configured.
 
-    token = milestone_token or os.environ.get(_TOKEN_ENV_VAR) or _DEFAULT_TOKEN
-    expected = os.environ.get(_TOKEN_ENV_VAR) or _DEFAULT_TOKEN
-    if token != expected:
+    Access fails closed: there is no default token.  ``AUTORESEARCH_MILESTONE_TOKEN``
+    must be set in the environment (a deliberate, human-only step), otherwise the
+    read is refused.  This is what makes accidental holdout contamination fail
+    loudly rather than silently.  An explicit ``milestone_token`` may be supplied
+    but must match the configured environment token.
+    """
+
+    configured = os.environ.get(_TOKEN_ENV_VAR)
+    if not configured:
+        raise PermissionError(
+            f"Holdout access requires the {_TOKEN_ENV_VAR} environment variable to be set. "
+            "Refusing to read the milestone vault with no configured token — this is a "
+            "deliberate, human-only operation."
+        )
+    token = milestone_token if milestone_token is not None else configured
+    if token != configured:
         raise PermissionError(
             "Incorrect milestone token. Set AUTORESEARCH_MILESTONE_TOKEN to access the holdout vault."
         )

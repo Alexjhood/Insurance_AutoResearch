@@ -13,8 +13,10 @@ def _write_prepared_data_markers(config) -> None:
     for path in (
         config.processed_dir / f"{config.agent_dataset_name}.parquet",
         config.processed_dir / "agent_dataset_search.parquet",
+        config.holdout_vault_dir / "agent_dataset_holdout.parquet",
         config.metadata_dir / "agent_schema.json",
         config.metadata_dir / "dataset_profile.json",
+        config.metadata_dir / "capping_diagnostics.json",
         config.splits_dir / "split_pack.csv",
         config.splits_dir / "split_pack_manifest.json",
         config.splits_dir / "split_pack_folds.parquet",
@@ -44,6 +46,29 @@ def test_bootstrap_track_reuses_existing_baseline_and_exports_context(tmp_path: 
     ]
     assert result["steps"][0]["status"] == "skipped"
     assert result["steps"][2]["status"] == "skipped"
+
+
+def test_bootstrap_reruns_prepare_data_when_holdout_missing(tmp_path: Path, monkeypatch) -> None:
+    """A complete-looking data plane that is missing the holdout must not be
+    treated as ready — prepare-data has to re-run."""
+    config = _config(tmp_path)
+    _write_prepared_data_markers(config)
+    _record_direct(config)
+    # Remove just the holdout parquet, leaving every other artifact in place.
+    (config.holdout_vault_dir / "agent_dataset_holdout.parquet").unlink()
+
+    calls: list[bool] = []
+
+    def fake_prepare_data(cfg):
+        calls.append(True)
+        return {"holdout_dataset": cfg.holdout_vault_dir / "agent_dataset_holdout.parquet"}
+
+    monkeypatch.setattr("autoresearch.bootstrap.prepare_data", fake_prepare_data)
+
+    result = bootstrap_track(config)
+
+    assert calls, "prepare-data should have re-run because the holdout was missing"
+    assert result["steps"][0]["status"] == "ran"
 
 
 def test_bootstrap_track_keeps_successful_baseline_when_another_fails(tmp_path: Path, monkeypatch) -> None:

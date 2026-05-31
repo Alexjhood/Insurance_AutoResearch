@@ -53,6 +53,11 @@ autoresearch --track demo --run-id quickstart run-session-cycles 1
 
 You should see a comparison report under `artifacts/tracks/demo/runs/quickstart/iterations/`.
 
+> **Supported installation mode:** editable install from a source checkout
+> (`pip install -e`). The runtime resolves `configs/`, `docs/`, and data/artifact
+> directories relative to the repository root, so wheel-based installs outside a
+> checkout are not supported. This is a local research tool, not a hosted service.
+
 To inspect results in a browser:
 
 ```bash

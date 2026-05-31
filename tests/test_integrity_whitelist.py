@@ -7,7 +7,14 @@ from pathlib import Path
 import pytest
 
 from autoresearch.utils import integrity
-from autoresearch.utils.integrity import scan_file_for_holdout_access, scan_file_for_non_predictive_feature_use
+from autoresearch.utils.integrity import (
+    PROTECTED_RELATIVE_PATHS,
+    check_integrity,
+    compute_protected_hashes,
+    scan_file_for_holdout_access,
+    scan_file_for_non_predictive_feature_use,
+    write_integrity_manifest,
+)
 
 _MARKER_SOURCE = "milestone_holdout = 'bad'"
 
@@ -47,6 +54,46 @@ def test_model_script_outside_src_always_scanned(tmp_path: Path) -> None:
     script.write_text(_MARKER_SOURCE, encoding="utf-8")
     violations = scan_file_for_holdout_access(script)
     assert violations, "Model script outside src/autoresearch/ must be scanned regardless of name"
+
+
+def test_manifest_protects_real_promotion_logic_not_the_shim() -> None:
+    """The manifest must hash the real promotion-critical modules, and must NOT
+    rely on the experiment_registry/registry.py re-export shim."""
+    protected = set(PROTECTED_RELATIVE_PATHS)
+    for rel in (
+        "src/autoresearch/comparison_runner.py",
+        "src/autoresearch/experiment_registry/comparisons.py",
+        "src/autoresearch/experiment_registry/champions.py",
+        "src/autoresearch/evaluation/diagnostics.py",
+    ):
+        assert rel in protected, f"{rel} should be integrity-protected"
+    assert "src/autoresearch/experiment_registry/registry.py" not in protected, (
+        "registry.py is a re-export shim; protecting it does not detect edits to "
+        "the real submodules"
+    )
+
+
+def test_check_integrity_detects_edit_to_comparison_runner(tmp_path: Path) -> None:
+    """Editing a protected promotion module is flagged by check_integrity."""
+    rel = "src/autoresearch/comparison_runner.py"
+    target = tmp_path / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("ORIGINAL = 1\n", encoding="utf-8")
+    # Create the remaining protected files so the manifest is comprehensive.
+    for other in PROTECTED_RELATIVE_PATHS:
+        p = tmp_path / other
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if not p.exists():
+            p.write_text("PLACEHOLDER = 0\n", encoding="utf-8")
+
+    artifacts_dir = tmp_path / "artifacts"
+    write_integrity_manifest(tmp_path, artifacts_dir)
+    assert check_integrity(tmp_path, artifacts_dir) == []
+
+    # Simulate an LLM silently editing the promotion gate.
+    target.write_text("ORIGINAL = 999  # tampered\n", encoding="utf-8")
+    violations = check_integrity(tmp_path, artifacts_dir)
+    assert any("comparison_runner.py" in v for v in violations), violations
 
 
 def test_exposure_in_predictor_list_is_rejected(tmp_path: Path) -> None:

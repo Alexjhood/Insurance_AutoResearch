@@ -37,10 +37,12 @@ src/autoresearch/
 
 ```
 prepare-data
-  → load freMTPL2 → anonymise → cap claims → create split pack (train/sv/holdout)
-  → write agent_dataset_search.parquet (no holdout rows)
+  → load freMTPL2 → anonymise → compute capping diagnostics → create split pack (train/sv/holdout)
+  → write agent_dataset_search.parquet (no holdout rows; raw uncapped target)
   → write holdout_vault/agent_dataset_holdout.parquet (token-gated)
   → write split_pack_folds.parquet (5-fold CV assignments)
+  (the fixed claim cap is applied uniformly at scoring time, not baked into the
+   persisted artifacts, so search/holdout stay a single canonical source)
 
 run-baseline / run-next-proposal
   → load_search_dataset()  ← only train + search_validation rows visible
@@ -119,7 +121,7 @@ The CI is Bonferroni-adjusted using `bonferroni_lookback` to account for multipl
 
 ## Reproducibility
 
-Every experiment artifacts folder includes `environment_manifest.json` capturing: Python version, platform, git SHA, git dirty flag, pip freeze output, key dependency versions (numpy, pandas, sklearn, pyarrow), and SHA256 hashes of the input data files. This makes any result exactly reproducible from git history.
+Every experiment artifacts folder includes `environment_manifest.json` capturing: Python version, platform, git SHA, git dirty flag, pip freeze output, key dependency versions (numpy, pandas, sklearn, pyarrow), and SHA256 hashes of the input data files. This makes any result reproducible given the captured environment — the manifest records the exact resolved versions even though `pyproject.toml` only lower-bounds them (there is no lockfile), so a faithful rerun means recreating the environment the manifest describes.
 
 ## K-Fold CV
 

@@ -169,7 +169,8 @@ def _artifact_path_side_effect(config, champion_id, artifact_type, *, snapshot_p
 # ── Positive test ──────────────────────────────────────────────────────────────
 
 
-def test_scripted_champion_produces_completed_report(tmp_path: Path) -> None:
+def test_scripted_champion_produces_completed_report(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AUTORESEARCH_MILESTONE_TOKEN", "milestone")
     config = _make_config(tmp_path)
     script_path = tmp_path / "model_stub.py"
     _write_stub_script(script_path)
@@ -192,7 +193,10 @@ def test_scripted_champion_produces_completed_report(tmp_path: Path) -> None:
 # ── Negative test: missing script ─────────────────────────────────────────────
 
 
-def test_missing_script_raises_and_report_status_not_completed(tmp_path: Path) -> None:
+def test_missing_script_raises_and_report_status_not_completed(tmp_path: Path, monkeypatch) -> None:
+    # Token must be set so evaluation gets past the holdout gate and reaches the
+    # missing-script error path under test (rather than skipping as vault-absent).
+    monkeypatch.setenv("AUTORESEARCH_MILESTONE_TOKEN", "milestone")
     config = _make_config(tmp_path)
     # Point to a script that does not exist
     missing_script = tmp_path / "nonexistent_model.py"
