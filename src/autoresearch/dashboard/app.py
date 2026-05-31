@@ -309,11 +309,13 @@ def render_sessions() -> None:
 
 
 def render_memory() -> None:
-    """Memory & Leaderboard page — reads from artifacts/memory/memory.sqlite."""
+    """Memory & Leaderboard page — reads from the cross-run aggregator (default_memory_store_path)."""
     import sqlite3
 
     config = load_config()
-    memory_path = config.root / config.memory_store_relpath
+    from autoresearch.memory.store import default_memory_store_path
+
+    memory_path = default_memory_store_path()
     threshold = config.structural_gini_threshold
 
     st.title("Memory & Leaderboard")

@@ -283,12 +283,12 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
     }, indent=2)
 
     from autoresearch.memory import resolve_memory_access
-    import autoresearch.config as _cfg_module
+    from autoresearch.memory.store import default_playbook_dir
 
     _memory_access = resolve_memory_access(config)
     _playbook_link_lines: list[str] = []
     if _memory_access in ("own", "all"):
-        _playbook_base = _cfg_module.PROJECT_ROOT / "artifacts" / "memory" / "playbook"
+        _playbook_base = default_playbook_dir()
         _suffix = ""
         if _memory_access == "own":
             manifest_path = config.artifacts_dir / "run_manifest.json"

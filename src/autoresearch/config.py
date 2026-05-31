@@ -103,7 +103,6 @@ class ProjectConfig:
     model_version: str | None = None
     model_harness: str | None = None
     # cross-run memory
-    memory_store_relpath: str = "artifacts/memory/memory.sqlite"
     structural_gini_threshold: float = 0.37
 
 
@@ -246,7 +245,6 @@ def load_config(
         screening_min_absolute_lift=float(screening_cfg.get("min_absolute_lift", -0.001)),
         screening_min_relative_lift=float(screening_cfg.get("min_relative_lift", -0.002)),
         running_stale_minutes=int(raw.get("handoff", {}).get("running_stale_minutes", 30)),
-        memory_store_relpath=str(memory_cfg.get("memory_store_relpath", "artifacts/memory/memory.sqlite")),
         structural_gini_threshold=float(memory_cfg.get("structural_gini_threshold", 0.37)),
     )
 

@@ -373,11 +373,10 @@ def _cmd_compare_tracks(config, args) -> int:
 
 def _cmd_memory(config, args) -> int:
     """Dispatch memory sub-commands."""
-    from autoresearch.config import PROJECT_ROOT
     from autoresearch.memory.harvester import harvest_all, harvest_run
-    from autoresearch.memory.store import init_memory_store, memory_store_counts
+    from autoresearch.memory.store import default_memory_store_path, init_memory_store, memory_store_counts
 
-    memory_path = PROJECT_ROOT / "artifacts" / "memory" / "memory.sqlite"
+    memory_path = default_memory_store_path()
     sub = getattr(args, "memory_subcommand", None)
 
     if sub == "harvest":
@@ -908,7 +907,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     mem_build_playbook = memory_subs.add_parser(
         "build-playbook",
-        help="Compile verified insights into artifacts/memory/playbook/latest.md.",
+        help="Compile verified insights into the cross-run playbook (under the out-of-tree memory dir; override with AUTORESEARCH_MEMORY_DIR).",
     )
     mem_build_playbook.add_argument(
         "--model-filter",

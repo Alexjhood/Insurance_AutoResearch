@@ -118,3 +118,26 @@ def test_schema_has_no_holdout_columns_by_default(tmp_path: Path) -> None:
                 assert "milestone" not in col.lower() or col == "model_id", (
                     f"Milestone column {col!r} found in table {table}"
                 )
+
+
+def test_memory_root_default_is_outside_working_tree() -> None:
+    """The aggregator must default to a location outside the repo working tree."""
+    from autoresearch.config import PROJECT_ROOT
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("AUTORESEARCH_MEMORY_DIR", None)
+        root = memory_root()
+        store = default_memory_store_path()
+    assert not str(root).startswith(str(PROJECT_ROOT)), (
+        f"memory store leaked into the working tree: {root}"
+    )
+    assert store == root / "memory.sqlite"
+    assert default_playbook_dir() == root / "playbook"
+
+
+def test_memory_dir_env_override(tmp_path: Path) -> None:
+    """AUTORESEARCH_MEMORY_DIR overrides the default location."""
+    with patch.dict(os.environ, {"AUTORESEARCH_MEMORY_DIR": str(tmp_path)}, clear=False):
+        assert memory_root() == tmp_path
+        assert default_memory_store_path() == tmp_path / "memory.sqlite"
+        assert default_playbook_dir() == tmp_path / "playbook"

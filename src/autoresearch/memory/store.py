@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -124,3 +125,32 @@ def assert_no_holdout_columns(path: Path) -> None:
             leaks = cols & _HOLDOUT_COLUMN_NAMES
             if leaks:
                 raise AssertionError(f"Holdout-derived columns found in {table}: {leaks}")
+
+
+def memory_root() -> Path:
+    """Resolve the cross-run memory directory.
+
+    By default this lives OUTSIDE the repository working tree, so per-run agents
+    operating within the project do not stumble onto other runs' results via the
+    filesystem. The access gate protects the query tool and context/handoff
+    injection, not raw file reads, so keeping the store out of the working tree
+    raises the bar against accidental cross-run contamination. Override with the
+    ``AUTORESEARCH_MEMORY_DIR`` environment variable (operator-only).
+    """
+    env = os.environ.get("AUTORESEARCH_MEMORY_DIR", "").strip()
+    if env:
+        return Path(env).expanduser()
+    from autoresearch.config import PROJECT_ROOT
+
+    project_name = PROJECT_ROOT.name or "default"
+    return Path.home() / ".autoresearch" / project_name / "memory"
+
+
+def default_memory_store_path() -> Path:
+    """Default path to the cross-run aggregator database (outside the working tree)."""
+    return memory_root() / "memory.sqlite"
+
+
+def default_playbook_dir() -> Path:
+    """Default directory for the regenerated playbook (outside the working tree)."""
+    return memory_root() / "playbook"

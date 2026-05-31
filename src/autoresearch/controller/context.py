@@ -109,8 +109,8 @@ def _build_memory_access_block(access: str) -> dict[str, Any]:
             ),
         },
         "playbook_hint": (
-            "A dynamic playbook may be available at artifacts/memory/playbook/latest.md "
-            "if memory build-playbook has been run."
+            "If a dynamic playbook has been generated, the handoff links it directly; "
+            "otherwise it can be produced with `autoresearch memory build-playbook`."
         ),
     }
 
