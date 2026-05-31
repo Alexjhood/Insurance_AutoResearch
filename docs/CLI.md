@@ -443,7 +443,8 @@ The page is operator-facing (no access gate). Populate it first with `autoresear
 
 ```toml
 [memory]
-memory_store_relpath = "artifacts/memory/memory.sqlite"
+# The aggregator lives outside the repo working tree by default
+# (~/.autoresearch/<project>/memory); override with AUTORESEARCH_MEMORY_DIR.
 structural_gini_threshold = 0.37
 ```
 

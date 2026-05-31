@@ -1,8 +1,9 @@
 """Dynamic playbook generator for the cross-run memory aggregator.
 
-Compiles verified insights + leaderboard-derived facts into:
-  artifacts/memory/playbook/latest.md
-  artifacts/memory/playbook/<timestamp>.md (timestamped copy)
+Compiles verified insights + leaderboard-derived facts into (under the out-of-tree
+memory dir; override with AUTORESEARCH_MEMORY_DIR):
+  <memory_dir>/playbook/latest.md
+  <memory_dir>/playbook/<timestamp>.md (timestamped copy)
 
 Only verified=1 insights are included. Every bullet cites evidence IDs and
 the source model_id (full attribution, per the locked decision).
@@ -131,7 +132,7 @@ def build_playbook(
 ) -> Path | None:
     """Compile verified insights + facts into a playbook markdown file.
 
-    Returns the path to `artifacts/memory/playbook/latest.md`, or None if
+    Returns the path to the playbook `latest.md`, or None if
     there are no verified insights.
 
     Parameters

@@ -69,15 +69,15 @@ compare-experiments / compare-to-champion
 
 ## Cross-Run Memory Aggregator
 
-A separate read-only harvesting layer accumulates search-split experiment results across runs into `artifacts/memory/memory.sqlite`. Per-run registries are never written to; the harvester opens them `mode=ro`.
+A separate read-only harvesting layer accumulates search-split experiment results across runs into a cross-run aggregator that lives **outside the repo working tree** (default `~/.autoresearch/<project>/memory/memory.sqlite`, overridable with `AUTORESEARCH_MEMORY_DIR`). Keeping it out of the working tree means per-run agents cannot reach other runs' results by raw filesystem reads — the access gate protects the query tool and context/handoff injection, not arbitrary file reads. Per-run registries are never written to; the harvester opens them `mode=ro`.
 
 ```
-artifacts/tracks/<track>/runs/<run-id>/registry.sqlite   (per-run, isolated)
+artifacts/tracks/<track>/runs/<run-id>/registry.sqlite   (per-run, isolated, in repo)
         | read-only harvest (every 5 cycles + autoresearch memory harvest)
         v
-artifacts/memory/memory.sqlite    (aggregator: models, runs, experiments,
-                                   comparisons, insights)
-artifacts/memory/playbook/latest.md   (compiled verified insights)
+~/.autoresearch/<project>/memory/memory.sqlite    (aggregator, OUTSIDE the repo:
+                                   models, runs, experiments, comparisons, insights)
+~/.autoresearch/<project>/memory/playbook/latest.md   (compiled verified insights)
 ```
 
 **Key invariants:**
