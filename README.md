@@ -46,7 +46,8 @@ cd Insurance_AutoResearch
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 python scripts/generate_synthetic_data.py
-autoresearch --track demo --run-id quickstart bootstrap-track
+autoresearch --track demo --run-id quickstart bootstrap-track \
+  --model-provider demo --model-name local
 autoresearch --track demo --run-id quickstart start-session quickstart
 autoresearch --track demo --run-id quickstart run-session-cycles 1
 ```
@@ -63,6 +64,8 @@ To inspect results in a browser:
 ```bash
 streamlit run src/autoresearch/dashboard/app.py
 ```
+
+The dashboard includes a **Memory & Leaderboard** page (score-trace chart, four ranked leaderboard tabs). Populate it first with `autoresearch memory harvest --all`.
 
 ## Run with an Agent
 
@@ -107,6 +110,8 @@ flowchart LR
 ```text
 Insurance_AutoResearch/
 ├── artifacts/
+│   ├── tracks/<track>/runs/<run-id>/   # per-run isolated artifacts
+│   └── memory/                         # cross-run aggregator (memory.sqlite, playbook/)
 ├── configs/
 ├── data/
 │   ├── processed/

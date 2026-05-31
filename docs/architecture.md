@@ -26,11 +26,20 @@ src/autoresearch/
 │   ├── proposer.py            # FileProposer (file-handoff inbox)
 │   ├── workflow.py            # enqueue_proposal_from_file(), run_next_queued_proposal()
 │   ├── champion.py            # initialise_official_champion()
+│   ├── context.py             # build_llm_context() — gated memory_access block
+│   ├── session.py             # run_session_cycle() — every-5-cycle checkpoint hook
 │   └── handoff.py             # export_context(), write_proposal_template()
+├── memory/
+│   ├── __init__.py            # maybe_memory_checkpoint(), resolve_memory_access()
+│   ├── store.py               # init_memory_store(), assert_no_holdout_columns()
+│   ├── harvester.py           # harvest_run(), harvest_all() — read-only, search splits only
+│   ├── insights.py            # validate_insight(), record_insight(), list_insights()
+│   ├── query.py               # query_insights(), run_analysis() — access-gated
+│   └── playbook.py            # build_playbook() — verified insights → latest.md
 ├── utils/
 │   └── environment.py         # capture_environment() — git SHA, pip freeze, SHA256s
 └── dashboard/
-    └── app.py                 # Streamlit dashboard
+    └── app.py                 # Streamlit dashboard (incl. Memory & Leaderboard page)
 ```
 
 ## High-Level Flow
@@ -57,6 +66,25 @@ compare-experiments / compare-to-champion
   → promotion_decision()   ← 8-check gate: relative lift, calibration, win rate, …
   → set_official_champion() if promoted
 ```
+
+## Cross-Run Memory Aggregator
+
+A separate read-only harvesting layer accumulates search-split experiment results across runs into `artifacts/memory/memory.sqlite`. Per-run registries are never written to; the harvester opens them `mode=ro`.
+
+```
+artifacts/tracks/<track>/runs/<run-id>/registry.sqlite   (per-run, isolated)
+        | read-only harvest (every 5 cycles + autoresearch memory harvest)
+        v
+artifacts/memory/memory.sqlite    (aggregator: models, runs, experiments,
+                                   comparisons, insights)
+artifacts/memory/playbook/latest.md   (compiled verified insights)
+```
+
+**Key invariants:**
+- Only `ordinary_eval_splits` (search-split) metrics are stored — train and holdout splits are excluded at harvest time.
+- `AUTORESEARCH_MEMORY_ACCESS` (env var) controls agent access: `none` (default, context unchanged), `own` (filtered to own model), `all` (all models, attributed). The agent cannot set this itself.
+- Model identity (`--model-provider`, `--model-name`) is required at `bootstrap-track` so results are attributed to a model in the aggregator.
+- The every-5-cycle checkpoint also writes `pending_reflection.md` to prompt the agent to record evidence-bound insights, and regenerates the playbook when new verified insights land.
 
 ## Holdout Vault
 

@@ -197,9 +197,12 @@ For a **new run**, always pass `--new-run`; this creates a fresh timestamped fol
 | "Continue and run Y" | Read handoff, run Y cycles (skip bootstrap) |
 | "Bootstrap only" | Bootstrap and read handoff, then stop |
 
-**Bootstrap** — run once at the start of every fresh conversation:
+**Bootstrap** — run once at the start of every fresh conversation. Model identity is required so results can be attributed in the cross-run memory aggregator:
 ```bash
-autoresearch --track <codex-or-claude> --new-run bootstrap-track
+autoresearch --track <codex-or-claude> --new-run bootstrap-track \
+  --model-provider <provider> --model-name <model-name>
+# e.g. --model-provider anthropic --model-name claude-sonnet-4-6
+# e.g. --model-provider openai   --model-name codex-mini-latest
 ```
 
 **Read handoff** — always do this after bootstrap or at the start of a continuing session:
@@ -569,6 +572,39 @@ autoresearch update-integrity-manifest    # accept intentional protected-file ch
 pytest --tb=short -q                      # run test suite
 ```
 
+### Cross-run memory commands
+
+These commands are available to you when `AUTORESEARCH_MEMORY_ACCESS` is set (see below). The memory store contains **search-split metrics only** — no holdout data.
+
+```bash
+# Query cross-run insights and experiments (requires AUTORESEARCH_MEMORY_ACCESS=own or all)
+autoresearch memory query --insights                  # verified insights (own model, or all if access=all)
+autoresearch memory query --analysis peak-gini-by-framing
+autoresearch memory query --analysis plateau-families
+autoresearch memory query --analysis biggest-single-jumps
+autoresearch memory query --analysis efficiency-by-model
+
+# Record an evidence-bound insight (cite real experiment/comparison IDs from this run)
+autoresearch memory record-insight --file /path/to/insight.json
+
+# List insights stored for this run
+autoresearch memory list-insights                     # verified only
+autoresearch memory list-insights --include-unverified
+```
+
+### Memory access gate (`AUTORESEARCH_MEMORY_ACCESS`)
+
+By default this is `none` and your context bundle is unchanged from the isolated per-run view. When the operator sets it:
+
+- `own` — you can query this model's own cross-run history (filtered to your `model_id`).
+- `all` — you can query all models' history, fully attributed.
+
+You cannot set this yourself. If the handoff mentions a playbook at `artifacts/memory/playbook/latest.md` or includes a `memory_access` block in the context, that means the operator has granted access — use the query commands above before forming new hypotheses.
+
+### Reflection prompts at the 5-cycle checkpoint
+
+Every 5 cycles, the framework writes `pending_reflection.md` to the handoffs directory and harvests your current run into the cross-run memory store. If you see this file, you may optionally record 0–3 evidence-bound insights. Each insight must cite real `experiment_ids` or `comparison_ids` from this run — fabricated evidence is stored but flagged `verified=0` and excluded from the playbook. Recording good insights is entirely optional; skip it if there is nothing genuinely new to say.
+
 ---
 
 ## Research tracks — isolation between agents
@@ -581,8 +617,9 @@ experiments, champion history, or metrics of any other track.
 ### Starting a track session
 
 ```bash
-# One-command setup for a new isolated run
-autoresearch --track <codex-or-claude> --new-run bootstrap-track
+# One-command setup for a new isolated run (model identity flags required)
+autoresearch --track <codex-or-claude> --new-run bootstrap-track \
+  --model-provider <provider> --model-name <model-name>
 
 # Replace 'claude' with the agent identifier for your session
 autoresearch --track <codex-or-claude> init-registry
