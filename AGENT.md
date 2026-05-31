@@ -59,6 +59,8 @@ Everything you build develops relative to this. The first real model you propose
 The research loop rewards **many small, well-motivated improvements** over a few large jumps. When you choose what to try next:
 
 - **Bias toward breadth over depth.** Try a range of different ideas before doubling down on any one direction. A run that explores many distinct hypotheses in a session is better than one that iterates narrowly.
+- **Prioritise variety of approach, not just variety of dial.** Small steps are fine and similar space is fine to revisit — but the *priority* is covering genuinely different modelling paradigms: different model families (linear/GLM, single trees, bagged trees, boosted trees, GAMs, nearest-neighbour, neural), different target framings (direct pure-premium vs frequency–severity vs two-stage, rate-target vs total-target), and different feature representations (raw, binned, interacted, encoded). Re-tuning one estimator's hyperparameters is the *lowest-information* move available — reach for it only when a distinct approach has been ruled out, not as the default next step. Past runs have stalled by submitting ~10 near-identical boosted-tree variants in a row; do not repeat that pattern.
+- **Analyse the problem before tuning it.** Before proposing, spend a little effort understanding *why* the champion misses: look at calibration residuals by segment (region, age band, vehicle type, exposure), check where the largest errors concentrate, and check what signal a simple model is and isn't capturing. A targeted diagnostic that tells you *where* the model is wrong is worth more than a blind hyperparameter sweep. This is especially important at a plateau (see routine D) — a plateau is a signal to *investigate*, not to tune harder.
 - **One change at a time.** Every experiment should be readable as "X relative to the current champion". If you change multiple things at once, the next cycle has no clean signal to learn from.
 - **Prefer lower-cost approaches before higher-cost ones.** Cheap, fast experiments tell you what the data can support before you commit compute to expensive methods.
 - **Use the research log.** Log what each step taught you, not just whether it promoted. A non-promotion that taught you something about a segment is valuable.
@@ -288,9 +290,22 @@ Rule of thumb: if you have 2 consecutive same-axis experiments at the plateau, t
 
 `proposal_inbox/champion_template.py` is a parameterised version of the current champion. New proposals should import or copy-then-diff from it rather than restating ~100 lines of identical scaffolding. Each verbatim re-write of the champion costs ~3K output tokens for zero information gain.
 
-### G. Axis rotation
+### G. Axis rotation & approach diversity
 
 Track which **axis** each experiment changes (hyperparameter / preprocessing / target / features / family). After 2 same-axis experiments — promoted or not — rotate to a different axis. This prevents the failure mode where 3+ consecutive experiments all tune the same dial.
+
+**Stronger rule for model family / paradigm (the most common waste):** maintain a short ledger in your research log of which *distinct approaches* you have tried, along these axes:
+
+- **Model family** — linear/GLM · single tree · bagged trees (RF/ExtraTrees) · boosted trees (LightGBM/XGBoost/CatBoost/HistGBR) · GAM · k-NN · neural · ensemble/stack
+- **Target framing** — direct pure-premium · frequency–severity · two-stage · rate-target vs total-target
+- **Feature representation** — raw · binned · interactions · target/one-hot encoding
+
+Rules:
+- **Cap same-family tuning at 3 experiments.** After 3 experiments within one model family (whether you promoted or not), you must try a *different family* before returning to it. Submitting a 4th near-identical variant of the same estimator is not allowed unless you can name a specific, evidence-backed reason from a diagnostic.
+- **Prefer the unexplored cell.** When choosing the next experiment, favour a (family × framing) cell you have not yet tried over one you have. Breadth of paradigm beats depth of tuning, especially before a champion is well established.
+- **A plateau forces a paradigm change, not a tuning change.** If the champion has held for 2+ cycles, the next experiment must change model family *or* target framing — re-tuning the current family at a plateau is provably below the noise floor (routine D).
+
+Reason: runs have plateaued ~6 Gini points below what the data supports by committing to one paradigm (e.g. rate-target boosted trees) and exhausting the budget on hyperparameter and ensembling variants within it, while a different family on the same data scored materially higher. Diversity of approach is the highest-leverage habit in this loop.
 
 ---
 
@@ -306,7 +321,9 @@ Read the research log and recent experiment metrics. Ask, in roughly this order:
 - Is the current champion's calibration breaking down on a specific segment (by region, age band, vehicle type)?
 - Have I exhausted the cheap interpretable ideas before reaching for higher-capacity approaches?
 
-Quick data investigations on the training set can be valuable for forming and sharpening hypotheses before committing to an experiment.
+Quick data investigations on the training set can be valuable for forming and sharpening hypotheses before committing to an experiment. When progress stalls, *analysis beats more experiments*: run a targeted diagnostic (segment residuals, error concentration, decile calibration) to locate where the champion is wrong, and let that finding drive the next proposal rather than guessing.
+
+Also ask: **which distinct approaches have I not yet tried?** Check your approach ledger (routine G) — if the last few experiments clustered in one model family or target framing, deliberately pick an unexplored (family × framing) cell next.
 
 Prefer the smallest change that would credibly improve on the current champion. If you have not yet seen what a simple model with a few features does, do that before reaching for something more complex. If you have not yet looked at calibration residuals, do that before adding more capacity.
 
