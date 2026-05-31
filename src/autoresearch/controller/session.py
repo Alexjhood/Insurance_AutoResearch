@@ -170,23 +170,36 @@ def run_session_cycle(config: ProjectConfig, session_id: str | None = None) -> d
     state["latest_cycle_result"] = result
     state["latest_ingest_summary"] = ingest_summary
 
-    # The experiment + comparison have run, but the decision belongs to the LLM.
-    # The cycle pauses in "awaiting_decision"; the agent reviews the metrics and
-    # calls `record-decision`, which finalises promotion/rejection bookkeeping.
-    state["state"] = "awaiting_decision"
-    _persist_state(
-        config,
-        state,
-        event_type="awaiting_decision",
-        proposal_id=result.get("proposal_id"),
-        experiment_id=result.get("experiment_id"),
-        comparison_id=result.get("comparison_id"),
-        message=(
-            f"Experiment evaluated — awaiting LLM decision for comparison "
-            f"{result.get('comparison_id')}. Call `record-decision`."
-        ),
-        details=result,
-    )
+    if result.get("decision") == "auto_reject":
+        state["state"] = "rejected"
+        _persist_state(
+            config,
+            state,
+            event_type="auto_rejected",
+            proposal_id=result.get("proposal_id"),
+            experiment_id=result.get("experiment_id"),
+            comparison_id=result.get("comparison_id"),
+            message=f"Proposal auto-rejected: {result.get('auto_reject_reason')}",
+            details=result,
+        )
+    else:
+        # The experiment + comparison have run, but the decision belongs to the LLM.
+        # The cycle pauses in "awaiting_decision"; the agent reviews the metrics and
+        # calls `record-decision`, which finalises promotion/rejection bookkeeping.
+        state["state"] = "awaiting_decision"
+        _persist_state(
+            config,
+            state,
+            event_type="awaiting_decision",
+            proposal_id=result.get("proposal_id"),
+            experiment_id=result.get("experiment_id"),
+            comparison_id=result.get("comparison_id"),
+            message=(
+                f"Experiment evaluated — awaiting LLM decision for comparison "
+                f"{result.get('comparison_id')}. Call `record-decision`."
+            ),
+            details=result,
+        )
     _write_latest_cycle_summary(config, state)
 
     if state.get("max_cycles") is not None and state["current_cycle"] >= state["max_cycles"]:

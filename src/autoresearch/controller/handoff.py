@@ -46,6 +46,7 @@ def write_proposal_template(config: ProjectConfig) -> dict[str, Path]:
         "proposal_id": "short_unique_id",
         "parent_experiment_id": champion.get("champion_id", "OFFICIAL_CHAMPION_ID"),
         "parent_branch_id": champion.get("branch_id", "main"),
+        "research_parent_node_id": None,
         "branch_action": "new_branch",
         "experiment_name": "concise_experiment_name",
         "rationale": "Why this change is worth trying.",
@@ -193,7 +194,7 @@ def run_latest_proposal_cycle(config: ProjectConfig) -> dict[str, Any]:
     }
     write_json(config.handoff_results_dir / "latest_cycle_result.json", summary)
     (config.handoff_results_dir / "latest_cycle_result.md").write_text(render_cycle_summary(summary), encoding="utf-8")
-    if result.get("decision") != "promote":
+    if result.get("decision") not in {"promote", "auto_reject"}:
         write_nonpromotion_summary(
             config,
             proposal_id=result.get("proposal_id", "unknown"),
@@ -257,11 +258,14 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         else "Return claim costs (not rates): if predicting pure premium, multiply by `score['exposure_term_a']`"
     )
     feature_list = ", ".join(f"`{f}`" for f in features)
+    tree = context.get("research_tree") or {}
+    node_lines = _render_tree_node_lines(tree.get("recent_nodes") or [])
 
     template_json = json.dumps({
         "proposal_id": "<short_unique_id>",
         "parent_experiment_id": champion_id,
         "parent_branch_id": branch_id,
+        "research_parent_node_id": None,
         "branch_action": "new_branch",
         "experiment_name": "<concise_name>",
         "rationale": "<why this change is worth trying>",
@@ -310,6 +314,15 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "- **Always apply** `apply_training_calibration` from `autoresearch.models.calibration` before returning",
         "- **Never reference** `milestone_holdout`, `holdout_vault`, or `AUTORESEARCH_MILESTONE_TOKEN`",
         "",
+        "## Exploration tree",
+        "",
+        "- Scope: active run only. Do not use results from other runs as proposal evidence.",
+        "- Choose `research_parent_node_id` from this tree when the next idea builds on a prior hypothesis; use `null` for a genuinely new line of attack.",
+        "- Prefer genuine exploration over repetitive small retunes. A useful child idea should change the hypothesis, representation, target framing, or error mode it addresses.",
+        "- Clear failures and auto-rejections are evidence. Reflect on them, then branch only when the child idea is materially different.",
+        "",
+        *node_lines,
+        "",
         "## Context JSON (full detail)",
         "",
         f"`{config.handoff_context_dir / 'latest_context.json'}`",
@@ -341,10 +354,29 @@ def proposal_schema_document(config: ProjectConfig, context: dict[str, Any]) -> 
             "experiment_config.parent_experiment_id must equal parent_experiment_id.",
             "experiment_config.model.script_path is required for non-global_mean autonomous experiments.",
             "Do not use exposure_term_a as a predictive feature; it is reserved for weights and response calculations.",
+            "research_parent_node_id is optional and may only point to a node from this active run's research_tree.",
             f"Active target_mode is {config.target_mode}; use frequency only when the run was explicitly configured for it.",
             "Do not reference milestone_holdout.",
         ],
     }
+
+
+def _render_tree_node_lines(nodes: list[dict[str, Any]]) -> list[str]:
+    if not nodes:
+        return ["No research-tree nodes yet. Start with a small, well-motivated first hypothesis."]
+    lines = ["Recent active-run nodes:"]
+    for node in nodes[:8]:
+        metrics = node.get("metrics") or {}
+        lift = metrics.get("lift") if "lift" in metrics else metrics.get("mean_lift")
+        lift_text = f", lift={lift}" if lift is not None else ""
+        summary = node.get("change_summary") or node.get("expected_benefit") or ""
+        if len(summary) > 120:
+            summary = summary[:120] + "..."
+        lines.append(
+            f"- `{node.get('node_id')}` status={node.get('status')}"
+            f", outcome={node.get('outcome_type')}{lift_text}: {summary}"
+        )
+    return lines
 
 
 def render_cycle_summary(summary: dict[str, Any]) -> str:

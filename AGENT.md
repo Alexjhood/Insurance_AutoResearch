@@ -58,6 +58,7 @@ Everything you build develops relative to this. The first real model you propose
 
 The research loop rewards **many small, well-motivated improvements** over a few large jumps. When you choose what to try next:
 
+- **Use the active run's research tree.** The handoff context contains a `research_tree` for this run only. Choose a `research_parent_node_id` when a new idea builds on a prior hypothesis, near-miss, auto-rejection, or informative failure. Use `null` for a genuinely new line of attack. Do not use other runs as proposal evidence unless the user explicitly asks for cross-run analysis.
 - **Bias toward breadth over depth.** Try a range of different ideas before doubling down on any one direction. A run that explores many distinct hypotheses in a session is better than one that iterates narrowly.
 - **Prioritise variety of approach, not just variety of dial.** Small steps are fine and similar space is fine to revisit — but the *priority* is covering genuinely different modelling paradigms: different model families (linear/GLM, single trees, bagged trees, boosted trees, GAMs, nearest-neighbour, neural), different target framings (direct pure-premium vs frequency–severity vs two-stage, rate-target vs total-target), and different feature representations (raw, binned, interacted, encoded). Re-tuning one estimator's hyperparameters is the *lowest-information* move available — reach for it only when a distinct approach has been ruled out, not as the default next step. Past runs have stalled by submitting ~10 near-identical boosted-tree variants in a row; do not repeat that pattern.
 - **Analyse the problem before tuning it.** Before proposing, spend a little effort understanding *why* the champion misses: look at calibration residuals by segment (region, age band, vehicle type, exposure), check where the largest errors concentrate, and check what signal a simple model is and isn't capturing. A targeted diagnostic that tells you *where* the model is wrong is worth more than a blind hyperparameter sweep. This is especially important at a plateau (see routine D) — a plateau is a signal to *investigate*, not to tune harder.
@@ -175,6 +176,10 @@ Refits both models on cv_n_repeats × cv_folds stratified partitions. Costs cv_n
 ### `single_partition` (legacy / fast)
 
 Evaluates on the fixed `search_validation` split with 30 bootstrap resamples. CI measures within-split noise only. Use for quick sanity checks or expensive-to-refit models.
+
+### Single-split screening
+
+Before the expensive CV/bootstrap comparison, every valid challenger is screened once on the full `search_validation` split. This is a low hurdle, not a promotion gate: clearly worse challengers are auto-rejected, while similar or better challengers proceed to full comparison and LLM decision. Auto-rejections are still written to the research tree and non-promotion summaries; read them as evidence for the next proposal.
 
 ---
 

@@ -13,6 +13,7 @@ _EXPECTED_TOP_KEYS = {
     "recent_experiments",
     "recent_comparisons",
     "recent_proposals",
+    "research_tree",
     "proposal_count",
     "latest_cycle_result",
     "latest_nonpromotion_summary",

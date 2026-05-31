@@ -31,4 +31,7 @@ from autoresearch.experiment_registry import (  # noqa: F401
     list_sessions,
     get_session,
     list_session_events,
+    upsert_research_node,
+    list_research_nodes,
+    find_research_node_by_experiment,
 )

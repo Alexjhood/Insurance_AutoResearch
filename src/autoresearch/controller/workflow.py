@@ -11,7 +11,7 @@ import hashlib
 import traceback as _tb_module
 from typing import Any
 
-from autoresearch.comparison_runner import compare_experiments
+from autoresearch.comparison_runner import compare_experiments, screen_challenger_single_split
 from autoresearch.config import ProjectConfig, ensure_project_dirs
 from autoresearch.milestone import evaluate_on_holdout
 from autoresearch.controller.context import build_llm_context
@@ -20,15 +20,17 @@ from autoresearch.controller.proposal_schema import allowed_search_space, normal
 from autoresearch.experiment_registry.registry import (
     get_official_champion,
     list_artifacts,
+    list_research_nodes,
     next_queued_proposal,
     record_proposal,
     record_experiment_artifacts,
     set_official_champion,
+    upsert_research_node,
     update_proposal_status,
     upsert_branch,
 )
 from autoresearch.experiment_runner import ComputeBudgetExceeded, PreflightFailed, run_experiment
-from autoresearch.evaluation.validation import validate_experiment_outputs
+from autoresearch.evaluation.validation import ValidationRules, validate_experiment_outputs
 from autoresearch.run_artifacts import next_iteration_dir, proposal_iteration_dir
 from autoresearch.utils.io import read_json, write_json
 
@@ -70,6 +72,7 @@ def enqueue_proposal_from_file(config: ProjectConfig, proposal_path: Path) -> di
             proposal_path=proposal_path,
             notes=f"Duplicate: proposal_id {parsed['proposal_id']!r} already exists in registry.",
         )
+        _upsert_proposal_node(config, parsed, status="duplicate", outcome_type="duplicate")
         return {"proposal_id": parsed["proposal_id"], "status": "duplicate", "validation_errors": []}
     iteration_dir = next_iteration_dir(config, parsed["proposal_id"])
     out_dir = iteration_dir / "proposal"
@@ -101,6 +104,12 @@ def enqueue_proposal_from_file(config: ProjectConfig, proposal_path: Path) -> di
         response_path=None,
         proposal_path=stored_path,
         notes="Manual proposal enqueued." if not errors else "Manual proposal failed validation.",
+    )
+    _upsert_proposal_node(
+        config,
+        proposal,
+        status=status,
+        outcome_type=None if not errors else "invalid",
     )
     return {"proposal_id": proposal["proposal_id"], "status": status, "validation_errors": errors}
 
@@ -154,6 +163,7 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
 
     proposal_id = proposal["proposal_id"]
     update_proposal_status(config.registry_path, proposal_id, "running", notes="Deterministic execution started.")
+    _upsert_proposal_node(config, proposal, status="running")
     iteration_dir = proposal_iteration_dir(config, proposal)
     proposal_dir = iteration_dir / "proposal"
     proposal_dir.mkdir(parents=True, exist_ok=True)
@@ -170,6 +180,7 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
         )
         experiment_id = read_json(outputs["config_snapshot"])["experiment_id"]
         update_proposal_status(config.registry_path, proposal_id, "completed", experiment_id=experiment_id)
+        _upsert_proposal_node(config, proposal, status="completed", experiment_id=experiment_id)
         upsert_branch(
             config.registry_path,
             branch_id=proposal["branch_id"],
@@ -179,6 +190,66 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
             status="active",
             description=proposal.get("change_summary"),
         )
+
+        screening: dict[str, Any] | None = None
+        if getattr(config, "screening_enabled", True):
+            screening = screen_challenger_single_split(config, champion["champion_id"], experiment_id)
+            screening_path = iteration_dir / "comparison" / "single_split_screening.json"
+            screening_path.parent.mkdir(parents=True, exist_ok=True)
+            write_json(screening_path, screening)
+            record_experiment_artifacts(
+                config.registry_path,
+                experiment_id,
+                {"single_split_screening": screening_path},
+            )
+            _upsert_proposal_node(
+                config,
+                proposal,
+                status="screened",
+                experiment_id=experiment_id,
+                screening=screening,
+                metrics=_screening_metrics_summary(screening),
+            )
+            if not screening.get("passed", False):
+                reason = screening.get("reason", "Failed single-split screen.")
+                update_proposal_status(
+                    config.registry_path,
+                    proposal_id,
+                    "rejected",
+                    experiment_id=experiment_id,
+                    notes=f"Auto-rejected by single-split screen: {reason}",
+                )
+                _upsert_proposal_node(
+                    config,
+                    proposal,
+                    status="rejected",
+                    outcome_type="clear_loser",
+                    experiment_id=experiment_id,
+                    screening=screening,
+                    metrics=_screening_metrics_summary(screening),
+                    guidance=(
+                        "Treat this as evidence about the hypothesis, not just a failed run. "
+                        "Use the screening metrics and diagnostics to decide whether a materially "
+                        "different child idea is warranted."
+                    ),
+                )
+                _write_nonpromotion_summary(
+                    config,
+                    proposal_id=proposal_id,
+                    outcome_type="clear_loser",
+                    reason=f"Auto-rejected by single-split screen: {reason}",
+                    quantitative_signal=screening,
+                )
+                return {
+                    "proposal_id": proposal_id,
+                    "experiment_id": experiment_id,
+                    "comparison_id": None,
+                    "decision": "auto_reject",
+                    "auto_rejected": True,
+                    "auto_reject_reason": reason,
+                    "screening_report": str(screening_path),
+                    "metrics_summary": _screening_metrics_summary(screening),
+                }
 
         comparison_outputs = compare_experiments(
             config,
@@ -204,6 +275,24 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
         # additional file reads of the comparison report.
         comp_summary = report.get("comparison_summary") or {}
         guardrail = report.get("guardrail_result") or {}
+        metrics_summary = {
+            "target_mode": config.target_mode,
+            "primary_metric": config.primary_metric,
+            "gate_primary_metric": comp_summary.get("gate_primary_metric"),
+            "challenger_score": round(float(comp_summary.get("challenger_mean_score") or 0), 6),
+            "champion_score": round(float(comp_summary.get("champion_mean_score") or 0), 6),
+            "mean_lift": round(float(comp_summary.get("mean_lift") or 0), 6),
+            "win_rate": round(float(comp_summary.get("challenger_win_rate") or 0), 4),
+        }
+        _upsert_proposal_node(
+            config,
+            proposal,
+            status="awaiting_decision",
+            experiment_id=experiment_id,
+            comparison_id=comparison_id,
+            screening=screening,
+            metrics={**_screening_metrics_summary(screening or {}), **metrics_summary},
+        )
         return {
             "proposal_id": proposal_id,
             "experiment_id": experiment_id,
@@ -214,22 +303,46 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
             "guardrail_failures": guardrail.get("failures", []),
             "escalated": report.get("escalated", False),
             "comparison_report": str(comparison_outputs.get("html_report", "")),
-            "metrics_summary": {
-                "target_mode": config.target_mode,
-                "primary_metric": config.primary_metric,
-                "gate_primary_metric": comp_summary.get("gate_primary_metric"),
-                "challenger_score": round(float(comp_summary.get("challenger_mean_score") or 0), 6),
-                "champion_score": round(float(comp_summary.get("champion_mean_score") or 0), 6),
-                "mean_lift": round(float(comp_summary.get("mean_lift") or 0), 6),
-                "win_rate": round(float(comp_summary.get("challenger_win_rate") or 0), 4),
-            },
+            "screening": screening,
+            "metrics_summary": metrics_summary,
         }
     except ExperimentNeedsRepair as exc:
         update_proposal_status(config.registry_path, proposal_id, "needs_repair", notes=str(exc))
+        _upsert_proposal_node(config, proposal, status="needs_repair", outcome_type="needs_repair", guidance=str(exc))
         raise
     except Exception as exc:
-        update_proposal_status(config.registry_path, proposal_id, "failed", notes=str(exc))
-        raise
+        reason = str(exc)
+        if "Experiment output validation failed" not in reason:
+            update_proposal_status(config.registry_path, proposal_id, "failed", notes=reason)
+            _upsert_proposal_node(config, proposal, status="failed", outcome_type="system_error", guidance=reason)
+            raise
+        update_proposal_status(config.registry_path, proposal_id, "rejected", notes=f"Auto-rejected failed run: {reason}")
+        _upsert_proposal_node(
+            config,
+            proposal,
+            status="rejected",
+            outcome_type="failed_run",
+            guidance=(
+                "Reflect on the failure mode before proposing a related child idea. "
+                "Avoid repeating the same execution, schema, or modelling failure."
+            ),
+        )
+        _write_nonpromotion_summary(
+            config,
+            proposal_id=proposal_id,
+            outcome_type="failed",
+            reason=f"Auto-rejected failed run: {reason}",
+            quantitative_signal=None,
+        )
+        return {
+            "proposal_id": proposal_id,
+            "experiment_id": None,
+            "comparison_id": None,
+            "decision": "auto_reject",
+            "auto_rejected": True,
+            "auto_reject_reason": reason,
+            "metrics_summary": {},
+        }
 
 
 
@@ -249,6 +362,14 @@ def _validate_and_normalise(
     parent_branch = parsed.get("parent_branch_id") or champion["branch_id"]
     if parent_branch != champion["branch_id"]:
         errors.append("parent_branch_id must match the current official champion branch")
+    research_parent = parsed.get("research_parent_node_id") or parsed.get("parent_node_id")
+    if research_parent is not None:
+        if not isinstance(research_parent, str) or not research_parent.strip():
+            errors.append("research_parent_node_id must be a non-empty string or null")
+        else:
+            node_ids = {node["node_id"] for node in list_research_nodes(config.registry_path)}
+            if research_parent not in node_ids:
+                errors.append("research_parent_node_id must refer to a node in this active run's research_tree")
     branch_action = parsed.get("branch_action", "extend_current")
     branch_id = parsed.get("branch_id") or (parsed.get("proposal_id") if branch_action == "new_branch" else parent_branch)
     proposal = normalise_proposal(parsed, branch_id=branch_id, parent_branch_id=parent_branch)
@@ -401,6 +522,7 @@ def _validate_attempt_outputs(
             primary_metric=config.primary_metric,
             tweedie_power=config.tweedie_power,
             champion_predictions=champion_predictions,
+            rules=ValidationRules(require_positive_lift=False),
             allow_constant_predictions=model_family == "global_mean",
             target_mode=config.target_mode,
         ),
@@ -511,6 +633,89 @@ def _proposal_id(parsed: dict[str, Any] | None) -> str:
         return parsed["proposal_id"]
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     return f"invalid_proposal_{stamp}"
+
+
+def _upsert_proposal_node(
+    config: ProjectConfig,
+    proposal: dict[str, Any],
+    *,
+    status: str,
+    outcome_type: str | None = None,
+    experiment_id: str | None = None,
+    comparison_id: str | None = None,
+    screening: dict[str, Any] | None = None,
+    metrics: dict[str, Any] | None = None,
+    guidance: str | None = None,
+) -> None:
+    """Mirror proposal lifecycle into the active run's research tree."""
+
+    proposal_id = proposal.get("proposal_id") or _proposal_id(proposal)
+    cfg = proposal.get("config") or proposal.get("experiment_config") or {}
+    tags = proposal.get("exploration_tags")
+    if tags is not None and not isinstance(tags, list):
+        tags = [str(tags)]
+    upsert_research_node(
+        config.registry_path,
+        node_id=proposal_id,
+        proposal_id=proposal_id,
+        parent_node_id=proposal.get("research_parent_node_id") or proposal.get("parent_node_id"),
+        parent_experiment_id=proposal.get("parent_experiment_id") or cfg.get("parent_experiment_id"),
+        experiment_id=experiment_id,
+        comparison_id=comparison_id,
+        branch_id=proposal.get("branch_id"),
+        status=status,
+        outcome_type=outcome_type,
+        hypothesis=proposal.get("rationale"),
+        change_summary=proposal.get("change_summary"),
+        expected_benefit=proposal.get("expected_benefit"),
+        key_risk=proposal.get("key_risk"),
+        tags=tags,
+        screening=screening,
+        metrics=metrics,
+        guidance=guidance,
+    )
+
+
+def _screening_metrics_summary(screening: dict[str, Any]) -> dict[str, Any]:
+    if not screening:
+        return {}
+    keys = [
+        "gate_mode",
+        "gate_metric",
+        "target_mode",
+        "passed",
+        "champion_score",
+        "challenger_score",
+        "lift",
+        "relative_lift",
+        "overlap_rows",
+    ]
+    result: dict[str, Any] = {}
+    for key in keys:
+        if key in screening:
+            value = screening[key]
+            result[key] = round(float(value), 6) if isinstance(value, float) else value
+    return result
+
+
+def _write_nonpromotion_summary(
+    config: ProjectConfig,
+    *,
+    proposal_id: str,
+    outcome_type: str,
+    reason: str,
+    quantitative_signal: dict[str, Any] | None,
+) -> None:
+    # Lazy import avoids a module import cycle: handoff imports this workflow.
+    from autoresearch.controller.handoff import write_nonpromotion_summary
+
+    write_nonpromotion_summary(
+        config,
+        proposal_id=proposal_id,
+        outcome_type=outcome_type,
+        reason=reason,
+        quantitative_signal=quantitative_signal,
+    )
 
 
 def _require_champion(config: ProjectConfig) -> dict[str, Any]:

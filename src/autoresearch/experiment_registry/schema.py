@@ -113,6 +113,30 @@ CREATE TABLE IF NOT EXISTS proposals (
     notes TEXT
 );
 
+CREATE TABLE IF NOT EXISTS research_nodes (
+    node_id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    proposal_id TEXT,
+    parent_node_id TEXT,
+    parent_experiment_id TEXT,
+    experiment_id TEXT,
+    comparison_id TEXT,
+    branch_id TEXT,
+    status TEXT NOT NULL,
+    outcome_type TEXT,
+    hypothesis TEXT,
+    change_summary TEXT,
+    expected_benefit TEXT,
+    key_risk TEXT,
+    tags_json TEXT,
+    screening_json TEXT,
+    metrics_json TEXT,
+    guidance TEXT,
+    FOREIGN KEY (proposal_id) REFERENCES proposals(proposal_id),
+    FOREIGN KEY (parent_node_id) REFERENCES research_nodes(node_id)
+);
+
 CREATE TABLE IF NOT EXISTS auto_sessions (
     session_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -210,6 +234,7 @@ def registry_counts(path: Path) -> dict[str, int]:
         proposal_count = con.execute("SELECT COUNT(*) FROM proposals").fetchone()[0]
         branch_count = con.execute("SELECT COUNT(*) FROM branches").fetchone()[0]
         session_count = con.execute("SELECT COUNT(*) FROM auto_sessions").fetchone()[0]
+        node_count = con.execute("SELECT COUNT(*) FROM research_nodes").fetchone()[0]
     return {
         "experiments": int(exp_count),
         "artifacts": int(art_count),
@@ -217,4 +242,5 @@ def registry_counts(path: Path) -> dict[str, int]:
         "proposals": int(proposal_count),
         "branches": int(branch_count),
         "sessions": int(session_count),
+        "research_nodes": int(node_count),
     }

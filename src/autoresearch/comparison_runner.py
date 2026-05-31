@@ -296,6 +296,104 @@ def compare_experiments(
     return artifacts
 
 
+def screen_challenger_single_split(
+    config: ProjectConfig,
+    champion_id: str,
+    challenger_id: str,
+) -> dict[str, Any]:
+    """Cheap full search-validation screen before CV bootstrap.
+
+    This is a low hurdle, not a promotion gate. It rejects challengers only
+    when they are clearly worse on the complete ordinary eval split. Similar
+    or better challengers continue to the normal CV/bootstrap comparison.
+    """
+
+    from autoresearch.evaluation.metrics import full_metric_panel, prediction_target_columns
+
+    eval_split = config.ordinary_eval_splits[0]
+    gate_metric = getattr(config, "gate_primary_metric", config.primary_metric)
+    min_abs = float(getattr(config, "screening_min_absolute_lift", -0.001))
+    min_rel = float(getattr(config, "screening_min_relative_lift", -0.002))
+
+    champion_predictions = pd.read_parquet(_artifact_path(config, champion_id, "predictions"))
+    challenger_predictions = pd.read_parquet(_artifact_path(config, challenger_id, "predictions"))
+    target_mode = infer_target_mode(challenger_predictions, config.target_mode)
+    champion = champion_predictions[champion_predictions["split"] == eval_split].copy()
+    challenger = challenger_predictions[challenger_predictions["split"] == eval_split].copy()
+
+    base = {
+        "gate_mode": "single_split_screen",
+        "eval_split": eval_split,
+        "gate_metric": gate_metric,
+        "target_mode": target_mode,
+        "champion_id": champion_id,
+        "challenger_id": challenger_id,
+        "min_absolute_lift": min_abs,
+        "min_relative_lift": min_rel,
+    }
+    if champion.empty or challenger.empty:
+        return {**base, "passed": False, "reason": f"Missing rows for eval split {eval_split!r}"}
+
+    actual_col, champion_pred_col = prediction_target_columns(champion, target_mode)
+    _, challenger_pred_col = prediction_target_columns(challenger, target_mode)
+    paired = champion[["record_id", actual_col, champion_pred_col, "exposure"]].merge(
+        challenger[["record_id", challenger_pred_col]],
+        on="record_id",
+        how="inner",
+        suffixes=("_champion", "_challenger"),
+    )
+    if paired.empty:
+        return {**base, "passed": False, "reason": "Champion and challenger predictions have no overlapping eval rows"}
+
+    champion_merged_col = f"{champion_pred_col}_champion"
+    challenger_merged_col = f"{challenger_pred_col}_challenger"
+    if champion_pred_col != challenger_pred_col:
+        champion_merged_col = champion_pred_col
+        challenger_merged_col = challenger_pred_col
+
+    champion_panel = full_metric_panel(
+        paired[actual_col],
+        paired[champion_merged_col],
+        paired["exposure"],
+        tweedie_power=config.tweedie_power,
+        target_mode=target_mode,
+    )
+    challenger_panel = full_metric_panel(
+        paired[actual_col],
+        paired[challenger_merged_col],
+        paired["exposure"],
+        tweedie_power=config.tweedie_power,
+        target_mode=target_mode,
+    )
+    champion_score = float(champion_panel[gate_metric])
+    challenger_score = float(challenger_panel[gate_metric])
+    lower_better = lower_is_better(gate_metric)
+    lift = champion_score - challenger_score if lower_better else challenger_score - champion_score
+    relative_lift = lift / max(abs(champion_score), 1e-12)
+    finite = all(pd.notna(v) for v in (champion_score, challenger_score, lift, relative_lift))
+    passed = bool(finite and lift >= min_abs and relative_lift >= min_rel)
+    reason = (
+        "passed low-hurdle single-split screen"
+        if passed
+        else (
+            f"single-split lift {lift:.6g} / relative {relative_lift:.6g} "
+            f"below low hurdle ({min_abs:.6g}, {min_rel:.6g})"
+        )
+    )
+    return {
+        **base,
+        "passed": passed,
+        "reason": reason,
+        "champion_score": champion_score,
+        "challenger_score": challenger_score,
+        "lift": float(lift),
+        "relative_lift": float(relative_lift),
+        "overlap_rows": int(len(paired)),
+        "champion_metric_panel": champion_panel,
+        "challenger_metric_panel": challenger_panel,
+    }
+
+
 def compare_against_current_champion(
     config: ProjectConfig,
     challenger_id: str,
@@ -381,6 +479,7 @@ def record_decision(
         set_official_champion,
         list_comparisons,
         list_proposals,
+        upsert_research_node,
         update_proposal_status,
     )
     from autoresearch.milestone import evaluate_on_holdout
@@ -432,6 +531,16 @@ def record_decision(
                 config.registry_path, proposal_id, "promoted",
                 comparison_id=comparison_id, notes=rationale,
             )
+            upsert_research_node(
+                config.registry_path,
+                node_id=proposal_id,
+                proposal_id=proposal_id,
+                experiment_id=challenger_id,
+                comparison_id=comparison_id,
+                status="promoted",
+                outcome_type="promoted",
+                guidance=rationale,
+            )
     else:  # reject — retain the incumbent champion
         set_official_champion(
             config.registry_path,
@@ -446,6 +555,16 @@ def record_decision(
             update_proposal_status(
                 config.registry_path, proposal_id, "inconclusive",
                 comparison_id=comparison_id, notes=rationale,
+            )
+            upsert_research_node(
+                config.registry_path,
+                node_id=proposal_id,
+                proposal_id=proposal_id,
+                experiment_id=challenger_id,
+                comparison_id=comparison_id,
+                status="rejected",
+                outcome_type="llm_rejected",
+                guidance=rationale,
             )
 
     decided_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

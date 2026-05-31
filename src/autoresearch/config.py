@@ -91,6 +91,10 @@ class ProjectConfig:
     # repair
     repair_noise_floor_eps: float = 0.002
     repair_auto_abandon_enabled: bool = True
+    # screening
+    screening_enabled: bool = True
+    screening_min_absolute_lift: float = -0.001
+    screening_min_relative_lift: float = -0.002
     # handoff
     running_stale_minutes: int = 30
 
@@ -131,6 +135,7 @@ def load_config(
     search_space = raw["search_space"]
     compute_cfg = raw.get("compute", {})
     repair_cfg = raw.get("repair", {})
+    screening_cfg = raw.get("screening", {})
 
     resolved_track = track_id or "default"
 
@@ -228,6 +233,9 @@ def load_config(
         preflight_sample_rows=int(compute_cfg.get("preflight_sample_rows", 5000)),
         repair_noise_floor_eps=float(repair_cfg.get("noise_floor_eps", 0.002)),
         repair_auto_abandon_enabled=bool(repair_cfg.get("auto_abandon_enabled", True)),
+        screening_enabled=bool(screening_cfg.get("enabled", True)),
+        screening_min_absolute_lift=float(screening_cfg.get("min_absolute_lift", -0.001)),
+        screening_min_relative_lift=float(screening_cfg.get("min_relative_lift", -0.002)),
         running_stale_minutes=int(raw.get("handoff", {}).get("running_stale_minutes", 30)),
     )
 

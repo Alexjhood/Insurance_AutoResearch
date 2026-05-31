@@ -29,6 +29,11 @@ from autoresearch.experiment_registry.sessions import (
     get_session,
     list_session_events,
 )
+from autoresearch.experiment_registry.research_tree import (
+    upsert_research_node,
+    list_research_nodes,
+    find_research_node_by_experiment,
+)
 
 __all__ = [
     "init_registry",
@@ -56,4 +61,7 @@ __all__ = [
     "list_sessions",
     "get_session",
     "list_session_events",
+    "upsert_research_node",
+    "list_research_nodes",
+    "find_research_node_by_experiment",
 ]

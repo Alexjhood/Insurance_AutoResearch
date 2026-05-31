@@ -8,6 +8,7 @@ from autoresearch.config import ProjectConfig
 from autoresearch.controller.proposal_schema import allowed_search_space
 from autoresearch.experiment_registry.registry import (
     get_official_champion,
+    list_research_nodes,
     list_comparisons,
     list_experiments,
     list_proposals,
@@ -27,6 +28,7 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
     comparisons = list_comparisons(config.registry_path)[:10]
     all_proposals = list_proposals(config.registry_path)
     proposals = all_proposals[:10]
+    research_nodes = list_research_nodes(config.registry_path, limit=25)
 
     raw_cycle = read_json(latest_cycle_path) if latest_cycle_path.exists() else None
     latest_cycle_result = _flatten_cycle_result(raw_cycle) if raw_cycle else None
@@ -44,6 +46,16 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
         "recent_experiments": _compact_experiments(experiments),
         "recent_comparisons": _compact_comparisons(comparisons),
         "recent_proposals": _compact_proposals(proposals),
+        "research_tree": {
+            "scope": "active run only",
+            "principles": [
+                "Choose an idea parent from this run's own tree: champion, near-miss, informative failure, or unexplored node.",
+                "Prefer genuine exploration over small retunes when the tree is narrow or repetitive.",
+                "Do not repeat failed configurations; use failures as evidence for materially different child ideas.",
+                "The official champion remains the evaluation parent unless the proposal schema says otherwise.",
+            ],
+            "recent_nodes": _compact_research_nodes(research_nodes),
+        },
         "proposal_count": len(all_proposals),
         "latest_cycle_result": latest_cycle_result,
         "latest_nonpromotion_summary": read_json(latest_nonpromotion_path) if latest_nonpromotion_path.exists() else None,
@@ -109,5 +121,31 @@ def _compact_proposals(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         cs = item.get("change_summary") or ""
         if len(cs) > 200:
             item["change_summary"] = cs[:200] + "…"
+        result.append(item)
+    return result
+
+
+def _compact_research_nodes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    keys = [
+        "node_id",
+        "parent_node_id",
+        "proposal_id",
+        "status",
+        "outcome_type",
+        "experiment_id",
+        "comparison_id",
+        "change_summary",
+        "expected_benefit",
+        "key_risk",
+        "metrics",
+        "guidance",
+    ]
+    result = []
+    for row in rows:
+        item = {key: row.get(key) for key in keys}
+        for text_key in ("change_summary", "expected_benefit", "key_risk", "guidance"):
+            value = item.get(text_key) or ""
+            if len(value) > 220:
+                item[text_key] = value[:220] + "…"
         result.append(item)
     return result

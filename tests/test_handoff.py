@@ -7,7 +7,7 @@ from autoresearch.controller.champion import initialise_official_champion
 from autoresearch.controller.handoff import export_context_bundle, inbox_status, ingest_proposals, write_proposal_template
 from autoresearch.controller.proposal_schema import allowed_search_space, validate_proposal
 from autoresearch.controller.workflow import ExperimentNeedsRepair, run_next_queued_proposal
-from autoresearch.experiment_registry.registry import init_registry, list_proposals, record_experiment
+from autoresearch.experiment_registry.registry import init_registry, list_proposals, list_research_nodes, record_experiment
 from autoresearch.experiment_runner import run_experiment
 from tests.test_runner import _make_config as _config, _write_fixtures
 
@@ -161,6 +161,7 @@ def test_ingest_proposals_moves_valid_and_invalid_files(tmp_path: Path) -> None:
     assert summary["valid_count"] == 1
     assert summary["invalid_count"] == 1
     assert any(item["status"] == "validated" for item in proposals)
+    assert any(node["proposal_id"] == "handoff_valid_1" for node in list_research_nodes(config.registry_path))
     assert status["processed_valid_count"] == 1
     assert status["processed_invalid_count"] == 1
 
@@ -310,3 +311,82 @@ def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=Non
     assert get_official_champion(config.registry_path)["champion_id"] == challenger_id
     record = next(p for p in list_proposals(config.registry_path) if p["proposal_id"] == proposal["proposal_id"])
     assert record["status"] == "promoted"
+
+
+def test_clear_loser_is_auto_rejected_after_single_split_screen(tmp_path: Path) -> None:
+    """A structurally valid but clearly worse challenger skips expensive comparison."""
+    from dataclasses import replace
+    from autoresearch.config import PROJECT_ROOT
+
+    config = replace(
+        _config(tmp_path),
+        root=PROJECT_ROOT,
+        primary_metric="gini_weighted",
+        screening_min_absolute_lift=-0.001,
+        screening_min_relative_lift=-0.002,
+    )
+    config.search_space["requires_model_script"] = True
+    config.search_space["allow_open_model_families"] = True
+    config.processed_dir.mkdir(parents=True, exist_ok=True)
+    config.splits_dir.mkdir(parents=True, exist_ok=True)
+    _write_fixtures(config)
+
+    champion_config = tmp_path / "global_mean.toml"
+    champion_config.write_text(
+        """
+experiment_name = "gm_screen_champion"
+model_family = "global_mean"
+target_strategy = "direct_pure_premium"
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]
+""".strip(),
+        encoding="utf-8",
+    )
+    champion_id = json.loads(
+        run_experiment(config, champion_config)["config_snapshot"].read_text(encoding="utf-8")
+    )["experiment_id"]
+    initialise_official_champion(config, champion_id)
+    config.metadata_dir.mkdir(parents=True, exist_ok=True)
+    (config.metadata_dir / "agent_schema.json").write_text(
+        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"},'
+        ' {"name": "vehicle_power_band_b", "role": "numeric_feature"}]}',
+        encoding="utf-8",
+    )
+
+    config.handoff_proposal_inbox_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_proposal_inbox_dir / "inverse_model.py").write_text(
+        """
+import numpy as np
+
+EXPOSURE = "exposure_term_a"
+
+
+def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hp):
+    base = float(train["claim_cost_capped_active"].sum() / train[EXPOSURE].sum())
+    inverse_power = 6.0 - score["vehicle_power_band_b"].astype(float).to_numpy()
+    return base * inverse_power * score[EXPOSURE].astype(float).to_numpy(), {"intent": "inverse-power"}
+""".strip(),
+        encoding="utf-8",
+    )
+    proposal = _valid_proposal(champion_id)
+    proposal["proposal_id"] = "clear_loser_1"
+    proposal["experiment_name"] = "clear_loser_exp"
+    proposal["experiment_config"]["experiment_name"] = "clear_loser_exp"
+    proposal["experiment_config"]["model_family"] = "scripted_inverse_power"
+    proposal["experiment_config"]["model"] = {"script_path": "inverse_model.py"}
+    (config.handoff_proposal_inbox_dir / "proposal.json").write_text(json.dumps(proposal), encoding="utf-8")
+    ingest_proposals(config)
+
+    result = run_next_queued_proposal(config)
+    proposals = list_proposals(config.registry_path)
+    nodes = list_research_nodes(config.registry_path)
+
+    assert result["decision"] == "auto_reject"
+    assert result["comparison_id"] is None
+    assert proposals[0]["status"] == "rejected"
+    assert any(node["node_id"] == "clear_loser_1" and node["outcome_type"] == "clear_loser" for node in nodes)
+    assert (config.handoff_results_dir / "latest_nonpromotion_summary.md").exists()

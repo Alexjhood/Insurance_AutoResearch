@@ -44,6 +44,18 @@ write `repair_request_2.json` or `repair_request_3.json` beside the proposal.
 Revise the requested `model_attempt_N.py` and rerun `autoresearch
 run-session-cycle`. After three failed attempts, the proposal is failed.
 
+## Research Tree And Screening
+
+Each run maintains its own research tree in that run's `registry.sqlite`. The
+tree records proposal nodes, their optional `research_parent_node_id`, outcome,
+screening metrics, and guidance for later proposals. Context export only reads
+the active run's tree; it does not search other tracks or runs.
+
+Valid challengers pass through a cheap full `search_validation` single-split
+screen before CV/bootstrap comparison. Clearly worse challengers are
+auto-rejected and summarised for reflection. Similar or better challengers
+continue to the full comparison report and LLM decision.
+
 ## Pause Or Stop
 
 ```bash

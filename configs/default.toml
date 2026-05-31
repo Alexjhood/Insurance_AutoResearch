@@ -108,6 +108,14 @@ preflight_sample_rows = 5000
 noise_floor_eps = 0.002
 auto_abandon_enabled = true
 
+[screening]
+# Cheap full search-validation screen before expensive CV bootstrap.
+# Challengers that are clearly worse than the champion are auto-rejected;
+# similar or better results proceed to full CV bootstrap and LLM decision.
+enabled = true
+min_absolute_lift = -0.001
+min_relative_lift = -0.002
+
 [search_space.preprocessing]
 # Claim cap is fixed at 100,000 by product decision and applied uniformly to
 # training and testing data.  The only allowed value is the default — agents
