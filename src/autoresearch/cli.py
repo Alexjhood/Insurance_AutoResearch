@@ -54,8 +54,26 @@ def _cmd_prepare_data(config, args) -> int:
     return 0
 
 
+def _inject_identity(config, args):
+    """Return config with model identity injected from args if provided."""
+    provider = getattr(args, "model_provider", None)
+    name = getattr(args, "model_name", None)
+    version = getattr(args, "model_version", None)
+    harness = getattr(args, "harness", None)
+    if provider or name or version or harness:
+        return replace(
+            config,
+            model_provider=provider or config.model_provider,
+            model_name=name or config.model_name,
+            model_version=version or config.model_version,
+            model_harness=harness or config.model_harness,
+        )
+    return config
+
+
 def _cmd_bootstrap_track(config, args) -> int:
     parser = build_parser()
+    config = _inject_identity(config, args)
     try:
         result = bootstrap_track(
             config,
@@ -305,6 +323,8 @@ def _cmd_show_proposal_inbox_status(config, args) -> int:
 
 
 def _cmd_start_session(config, args) -> int:
+    config = _inject_identity(config, args)
+    ensure_project_dirs(config)
     print(json.dumps(create_session(config, args.name, args.max_cycles), indent=2, sort_keys=True))
     return 0
 
@@ -349,6 +369,119 @@ def _cmd_compare_tracks(config, args) -> int:
     if result.get("report_path"):
         print(f"\nFull report: {result['report_path']}")
     return 0 if result.get("status") != "error" else 1
+
+
+def _cmd_memory(config, args) -> int:
+    """Dispatch memory sub-commands."""
+    from autoresearch.config import PROJECT_ROOT
+    from autoresearch.memory.harvester import harvest_all, harvest_run
+    from autoresearch.memory.store import init_memory_store, memory_store_counts
+
+    memory_path = PROJECT_ROOT / "artifacts" / "memory" / "memory.sqlite"
+    sub = getattr(args, "memory_subcommand", None)
+
+    if sub == "harvest":
+        if getattr(args, "all", False):
+            result = harvest_all(memory_path)
+            print(json.dumps(result, indent=2))
+        else:
+            # Harvest current run
+            manifest_path = config.artifacts_dir / "run_manifest.json"
+            if not manifest_path.exists():
+                print("No run_manifest.json found. Run bootstrap-track first.")
+                return 1
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                print(f"Cannot read manifest: {exc}")
+                return 1
+            identity = manifest.get("model_identity")
+            if not identity:
+                print(
+                    "run_manifest.json has no model_identity. "
+                    "Run `autoresearch memory backfill-identity` first."
+                )
+                return 1
+            harvest_run(
+                memory_path,
+                config.registry_path,
+                identity,
+                track_id=config.track_id,
+                run_id=config.run_id,
+            )
+            counts = memory_store_counts(memory_path)
+            print(json.dumps({"status": "ok", "memory_path": str(memory_path), "counts": counts}, indent=2))
+        return 0
+
+    if sub == "backfill-identity":
+        return _memory_backfill_identity(config, args, memory_path)
+
+    if sub == "status":
+        if not memory_path.exists():
+            print("Memory store does not exist yet. Run `autoresearch memory harvest --all`.")
+            return 0
+        counts = memory_store_counts(memory_path)
+        print(json.dumps({"memory_path": str(memory_path), "counts": counts}, indent=2))
+        return 0
+
+    print(f"Unknown memory subcommand: {sub}")
+    return 2
+
+
+def _memory_backfill_identity(config, args, memory_path: "Path") -> int:
+    """Write model_identity into run_manifest.json files that lack it."""
+    from autoresearch.config import PROJECT_ROOT
+
+    provider = getattr(args, "provider", None)
+    name = getattr(args, "name", None)
+    version = getattr(args, "version", None) or ""
+    harness = getattr(args, "harness", None) or ""
+    run_dir_arg = getattr(args, "run_dir", None)
+    all_missing = getattr(args, "all_missing", False)
+
+    if not provider or not name:
+        print("--provider and --name are required for backfill-identity.")
+        return 1
+
+    identity = {
+        "provider": provider.lower().strip(),
+        "name": name.lower().strip(),
+        "version": version,
+        "harness": harness,
+    }
+
+    if run_dir_arg:
+        targets = [Path(run_dir_arg) / "run_manifest.json"]
+    elif all_missing:
+        tracks_base = PROJECT_ROOT / "artifacts" / "tracks"
+        targets = list(tracks_base.rglob("run_manifest.json"))
+    else:
+        targets = [config.artifacts_dir / "run_manifest.json"]
+
+    patched = 0
+    skipped = 0
+    for mpath in targets:
+        if not mpath.exists():
+            print(f"  not found: {mpath}")
+            skipped += 1
+            continue
+        try:
+            existing = json.loads(mpath.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"  error reading {mpath}: {exc}")
+            skipped += 1
+            continue
+        if "model_identity" in existing and not getattr(args, "force", False):
+            print(f"  already has identity: {mpath}")
+            skipped += 1
+            continue
+        existing["model_identity"] = identity
+        mpath.write_text(json.dumps(existing, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"  patched: {mpath}")
+        patched += 1
+
+    print(f"backfill-identity: patched={patched} skipped={skipped}")
+    return 0
 
 
 def _cmd_list_tracks(config, args) -> int:
@@ -420,6 +553,7 @@ COMMANDS = {
     "run-session-cycles": _cmd_run_session_cycles,
     "compare-tracks": _cmd_compare_tracks,
     "list-tracks": _cmd_list_tracks,
+    "memory": _cmd_memory,
 }
 
 
@@ -471,6 +605,10 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--skip-data", action="store_true", help="Do not run prepare-data even if shared data is missing.")
     bootstrap.add_argument("--force-data", action="store_true", help="Rebuild shared data artifacts before bootstrapping.")
     bootstrap.add_argument("--skip-baselines", action="store_true", help="Do not run baseline experiments if the registry is empty.")
+    bootstrap.add_argument("--model-provider", default=None, metavar="PROVIDER", help="LLM provider (e.g. anthropic, openai). Required.")
+    bootstrap.add_argument("--model-name", default=None, metavar="NAME", help="LLM model name (e.g. claude-sonnet-4-6). Required.")
+    bootstrap.add_argument("--model-version", default=None, metavar="VERSION", help="LLM model version string (optional).")
+    bootstrap.add_argument("--harness", default=None, metavar="HARNESS", help="Agent harness name (e.g. claude-code, codex, opencode).")
     subparsers.add_parser("init-registry", help="Create the SQLite experiment registry.")
     run_parser = subparsers.add_parser("run-baseline", help="Run one deterministic baseline experiment.")
     run_parser.add_argument("experiment_config", help="Path to an experiment TOML config.")
@@ -522,6 +660,10 @@ def build_parser() -> argparse.ArgumentParser:
     start_session = subparsers.add_parser("start-session", help="Create a supervised autonomous research session.")
     start_session.add_argument("name")
     start_session.add_argument("--max-cycles", type=int, default=None)
+    start_session.add_argument("--model-provider", default=None, metavar="PROVIDER", help="LLM provider (e.g. anthropic). Written into run_manifest.json if not already present.")
+    start_session.add_argument("--model-name", default=None, metavar="NAME", help="LLM model name. Written into run_manifest.json if not already present.")
+    start_session.add_argument("--model-version", default=None, metavar="VERSION", help="LLM model version string (optional).")
+    start_session.add_argument("--harness", default=None, metavar="HARNESS", help="Agent harness name (optional).")
     session_status_parser = subparsers.add_parser("session-status", help="Inspect latest or specified session status.")
     session_status_parser.add_argument("--session-id", default=None)
     pause_parser = subparsers.add_parser("pause-session", help="Pause latest or specified session.")
@@ -542,6 +684,40 @@ def build_parser() -> argparse.ArgumentParser:
     compare_tracks_parser.add_argument("track_a", help="First track name (e.g. 'claude').")
     compare_tracks_parser.add_argument("track_b", help="Second track name (e.g. 'codex').")
     subparsers.add_parser("list-tracks", help="List all tracks that have a registry under artifacts/tracks/.")
+
+    # Memory subcommand group
+    memory_parser = subparsers.add_parser(
+        "memory",
+        help="Cross-run memory aggregator commands (harvest, backfill-identity, status).",
+    )
+    memory_subs = memory_parser.add_subparsers(dest="memory_subcommand", required=True)
+
+    mem_harvest = memory_subs.add_parser(
+        "harvest",
+        help="Harvest one run (or --all) into the aggregator store.",
+    )
+    mem_harvest.add_argument(
+        "--all",
+        action="store_true",
+        help="Discover and harvest every run under artifacts/tracks/.",
+    )
+
+    mem_backfill = memory_subs.add_parser(
+        "backfill-identity",
+        help="Write model_identity into run_manifest.json files that lack it.",
+    )
+    mem_backfill.add_argument("--provider", required=True, help="LLM provider (e.g. anthropic).")
+    mem_backfill.add_argument("--name", required=True, help="LLM model name (e.g. claude-sonnet-4-6).")
+    mem_backfill.add_argument("--version", default="", help="LLM model version (optional).")
+    mem_backfill.add_argument("--harness", default="", help="Agent harness name (optional).")
+    mem_backfill.add_argument("--run-dir", default=None, metavar="PATH", help="Patch a specific run directory only.")
+    mem_backfill.add_argument("--all-missing", action="store_true", help="Patch all run manifests under artifacts/tracks/ that lack model_identity.")
+    mem_backfill.add_argument("--force", action="store_true", help="Overwrite existing model_identity entries.")
+
+    memory_subs.add_parser(
+        "status",
+        help="Print row counts for each table in the aggregator store.",
+    )
 
     return parser
 

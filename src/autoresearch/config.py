@@ -97,6 +97,11 @@ class ProjectConfig:
     screening_min_relative_lift: float = -0.002
     # handoff
     running_stale_minutes: int = 30
+    # model identity (required for memory harvest; optional at config-load time)
+    model_provider: str | None = None
+    model_name: str | None = None
+    model_version: str | None = None
+    model_harness: str | None = None
 
 
 def _resolve(root: Path, value: str) -> Path:
@@ -277,20 +282,40 @@ def ensure_project_dirs(config: ProjectConfig) -> None:
         )
         manifest_path = config.artifacts_dir / "run_manifest.json"
         if not manifest_path.exists():
+            manifest_body: dict = {
+                "track_id": config.track_id,
+                "run_id": config.run_id,
+                "run_dir": str(config.artifacts_dir),
+                "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+            if config.model_provider and config.model_name:
+                manifest_body["model_identity"] = {
+                    "provider": config.model_provider.lower().strip(),
+                    "name": config.model_name.lower().strip(),
+                    "version": config.model_version or "",
+                    "harness": config.model_harness or "",
+                }
             manifest_path.write_text(
-                json.dumps(
-                    {
-                        "track_id": config.track_id,
-                        "run_id": config.run_id,
-                        "run_dir": str(config.artifacts_dir),
-                        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n",
+                json.dumps(manifest_body, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
+        elif config.model_provider and config.model_name:
+            # Patch identity into an existing manifest that lacks it.
+            try:
+                existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                existing = {}
+            if "model_identity" not in existing:
+                existing["model_identity"] = {
+                    "provider": config.model_provider.lower().strip(),
+                    "name": config.model_name.lower().strip(),
+                    "version": config.model_version or "",
+                    "harness": config.model_harness or "",
+                }
+                manifest_path.write_text(
+                    json.dumps(existing, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
 
 
 def _resolve_run_id(track_base: Path, requested_run_id: str | None, *, new_run: bool = False) -> str:

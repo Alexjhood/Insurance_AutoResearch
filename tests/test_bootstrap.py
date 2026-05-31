@@ -6,7 +6,16 @@ import pytest
 from autoresearch.bootstrap import bootstrap_track
 from autoresearch.experiment_registry.registry import get_official_champion, init_registry
 from tests.test_handoff import _record_direct
-from tests.test_runner import _make_config as _config
+from tests.test_runner import _make_config as _base_config
+
+
+def _config(tmp_path: Path):
+    """Make a config with required model identity for bootstrap tests."""
+    return replace(
+        _base_config(tmp_path),
+        model_provider="anthropic",
+        model_name="claude-sonnet-4-6",
+    )
 
 
 def _write_prepared_data_markers(config) -> None:

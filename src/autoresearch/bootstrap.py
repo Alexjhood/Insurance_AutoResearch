@@ -34,6 +34,13 @@ def bootstrap_track(
     if config.track_id == "default":
         raise ValueError("bootstrap-track requires --track <name>; do not bootstrap the shared default registry.")
 
+    if not config.model_provider or not config.model_name:
+        raise ValueError(
+            "bootstrap-track requires model identity. "
+            "Pass --model-provider and --model-name (e.g. --model-provider anthropic --model-name claude-sonnet-4-6). "
+            "Use --model-version and --harness for additional context."
+        )
+
     steps: list[dict[str, Any]] = []
 
     if prepare_shared_data:

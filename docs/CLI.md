@@ -29,17 +29,29 @@ Writes: `data/processed/agent_dataset_search.parquet`, `data/holdout_vault/agent
 
 Idempotently prepare data, registry, baselines, champion, templates, and context for a named track. Safe to run at the start of every new session.
 
-```bash
-autoresearch --track demo --run-id quickstart bootstrap-track
-```
-
-For new agent runs, prefer `--new-run` so the run folder includes date and time:
+**Model identity is required.** Pass `--model-provider` and `--model-name` so results can be attributed in the cross-run memory aggregator.
 
 ```bash
-autoresearch --track demo --new-run bootstrap-track
+autoresearch --track demo --new-run bootstrap-track \
+  --model-provider anthropic \
+  --model-name claude-sonnet-4-6 \
+  --model-version 20251101 \
+  --harness claude-code
 ```
 
-Writes: registry, baseline experiments, official champion, proposal templates, and handoff context under the run directory.
+Flags:
+
+| Flag | Required | Description |
+|---|---|---|
+| `--model-provider` | Yes | LLM provider (e.g. `anthropic`, `openai`, `deepseek`) |
+| `--model-name` | Yes | Model identifier (e.g. `claude-sonnet-4-6`, `gpt-4o`) |
+| `--model-version` | No | Version string stored for reference |
+| `--harness` | No | Agent harness name (e.g. `claude-code`, `codex`, `opencode`) |
+| `--skip-data` | No | Skip `prepare-data` even if shared data is missing |
+| `--force-data` | No | Rebuild shared data artifacts before bootstrapping |
+| `--skip-baselines` | No | Do not run baseline experiments if the registry is empty |
+
+Writes: `model_identity` into `run_manifest.json`; registry, baseline experiments, official champion, proposal templates, and handoff context under the run directory.
 
 ### `init-registry`
 
@@ -245,11 +257,13 @@ autoresearch --track demo --run-id quickstart inspect-proposal <proposal-id>
 
 ### `start-session`
 
-Create a named supervised autonomous research session.
+Create a named supervised autonomous research session. If model identity was not written at `bootstrap-track` time, you can pass it here and it will be patched into `run_manifest.json`.
 
 ```bash
 autoresearch --track demo --run-id quickstart start-session my-session --max-cycles 10
 ```
+
+Optional identity flags (same as `bootstrap-track`): `--model-provider`, `--model-name`, `--model-version`, `--harness`.
 
 ### `session-status`
 
@@ -334,3 +348,81 @@ autoresearch compare-tracks claude codex
 ```
 
 Writes: a full comparison report to `artifacts/cross_track/<timestamp>/comparison_report.md`. No promotion is performed.
+
+---
+
+## Cross-Run Memory Aggregator
+
+All `memory` subcommands operate on `artifacts/memory/memory.sqlite`. The aggregator contains **search-split metrics only** — no holdout data. None of these commands change per-run registries.
+
+### `memory harvest`
+
+Harvest the current run into the aggregator.
+
+```bash
+autoresearch --track claude --run-id 20260531T221638Z memory harvest
+```
+
+Harvest all discovered runs at once (backfill mode):
+
+```bash
+autoresearch memory harvest --all
+```
+
+`--all` discovers every `artifacts/tracks/**/runs/**/registry.sqlite`, reads its `run_manifest.json` for `model_identity`, and upserts. Runs whose manifest lacks `model_identity` are skipped with a warning — use `memory backfill-identity` first.
+
+### `memory backfill-identity`
+
+Write `model_identity` into existing `run_manifest.json` files that lack it. Use this for historical runs created before identity capture was added.
+
+Patch the current run:
+
+```bash
+autoresearch --track opencode --run-id 20260531T093227Z memory backfill-identity \
+  --provider deepseek \
+  --name deepseek-v3 \
+  --harness opencode
+```
+
+Patch all manifests missing identity:
+
+```bash
+autoresearch memory backfill-identity \
+  --provider anthropic \
+  --name claude-sonnet-4-6 \
+  --harness claude-code \
+  --all-missing
+```
+
+Target a specific directory:
+
+```bash
+autoresearch memory backfill-identity \
+  --provider openai --name codex-mini-latest --harness codex \
+  --run-dir artifacts/tracks/codex/runs/20260531T173106Z
+```
+
+Add `--force` to overwrite an existing `model_identity` entry.
+
+### `memory status`
+
+Print row counts for every table in the aggregator.
+
+```bash
+autoresearch memory status
+```
+
+Example output:
+
+```json
+{
+  "memory_path": "artifacts/memory/memory.sqlite",
+  "counts": {
+    "models": 4,
+    "runs": 7,
+    "experiments": 312,
+    "comparisons": 98,
+    "insights": 0
+  }
+}
+```
