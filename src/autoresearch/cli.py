@@ -433,6 +433,9 @@ def _cmd_memory(config, args) -> int:
     if sub == "query":
         return _memory_query(config, args, memory_path)
 
+    if sub == "build-playbook":
+        return _memory_build_playbook(config, args, memory_path)
+
     print(f"Unknown memory subcommand: {sub}")
     return 2
 
@@ -491,6 +494,20 @@ def _memory_list_insights(config, args, memory_path: "Path") -> int:
     run_filter = getattr(args, "run", None)
     rows = list_insights(memory_path, verified_only=verified_only, run_uid=run_filter)
     print(json.dumps(rows, indent=2))
+    return 0
+
+
+def _memory_build_playbook(config, args, memory_path: "Path") -> int:
+    """Build or regenerate the verified-insights playbook."""
+    from autoresearch.memory.playbook import build_playbook
+
+    threshold = getattr(config, "structural_gini_threshold", 0.37)
+    model_filter = getattr(args, "model_filter", None)
+    path = build_playbook(memory_path, structural_gini_threshold=threshold, model_id_filter=model_filter)
+    if path is None:
+        print("No verified insights found — playbook not generated.")
+        return 0
+    print(f"Playbook written to: {path}")
     return 0
 
 
@@ -887,6 +904,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="RUN_UID",
         help="Filter to a specific run_uid.",
+    )
+
+    mem_build_playbook = memory_subs.add_parser(
+        "build-playbook",
+        help="Compile verified insights into artifacts/memory/playbook/latest.md.",
+    )
+    mem_build_playbook.add_argument(
+        "--model-filter",
+        default=None,
+        metavar="MODEL_ID",
+        help="Produce a filtered own-model variant (e.g. 'anthropic/claude-sonnet-4-6').",
     )
 
     mem_query = memory_subs.add_parser(

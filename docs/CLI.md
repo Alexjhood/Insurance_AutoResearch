@@ -523,3 +523,17 @@ autoresearch memory query --analysis efficiency-by-model
 - `all` — all models returned, fully attributed.
 
 The resolved access level is recorded in `run_manifest.json` (`memory_access` key) at bootstrap for auditability.
+
+### `memory build-playbook`
+
+Compile verified insights and leaderboard-derived facts into a dynamic playbook at `artifacts/memory/playbook/latest.md`. A timestamped copy is also saved. Only `verified=1` insights are included; each bullet cites evidence IDs and source `model_id`.
+
+```bash
+# Build the full attributed playbook
+autoresearch memory build-playbook
+
+# Build an own-model filtered variant
+autoresearch memory build-playbook --model-filter anthropic/claude-sonnet-4-6
+```
+
+The playbook is automatically regenerated at every 5-cycle checkpoint when new verified insights have landed. When `AUTORESEARCH_MEMORY_ACCESS` is `own` or `all`, the handoff bundle links the playbook (or the filtered own-model variant). When access is `none`, the handoff is unchanged.

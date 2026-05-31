@@ -80,6 +80,22 @@ def _run_checkpoint(config: "ProjectConfig") -> None:
     )
 
     _write_reflection_prompt(config)
+    _maybe_rebuild_playbook(config, memory_path)
+
+
+def _maybe_rebuild_playbook(config: "ProjectConfig", memory_path: "Path") -> None:
+    """Regenerate the playbook if new verified insights have landed since last build."""
+    try:
+        from autoresearch.memory.playbook import build_playbook, playbook_needs_rebuild
+
+        playbook_dir = memory_path.parent / "playbook"
+        latest_path = playbook_dir / "latest.md"
+        threshold = getattr(config, "structural_gini_threshold", 0.37)
+
+        if playbook_needs_rebuild(memory_path, latest_path):
+            build_playbook(memory_path, structural_gini_threshold=threshold)
+    except Exception as exc:
+        logger.debug("Playbook rebuild skipped (non-fatal): %s", exc)
 
 
 def _write_reflection_prompt(config: "ProjectConfig") -> None:

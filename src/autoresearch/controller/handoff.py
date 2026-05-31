@@ -282,6 +282,47 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         },
     }, indent=2)
 
+    from autoresearch.memory import resolve_memory_access
+    import autoresearch.config as _cfg_module
+
+    _memory_access = resolve_memory_access(config)
+    _playbook_link_lines: list[str] = []
+    if _memory_access in ("own", "all"):
+        _playbook_base = _cfg_module.PROJECT_ROOT / "artifacts" / "memory" / "playbook"
+        _suffix = ""
+        if _memory_access == "own":
+            manifest_path = config.artifacts_dir / "run_manifest.json"
+            try:
+                import json as _json
+                _manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+                _ident = _manifest.get("model_identity") or {}
+                _provider = (_ident.get("provider") or "").lower().strip()
+                _name = (_ident.get("name") or "").lower().strip()
+                if _provider and _name:
+                    _own_id = f"{_provider}/{_name}"
+                    _own_suffix = f"_{_own_id.replace('/', '_')}"
+                    _own_path = _playbook_base / f"latest{_own_suffix}.md"
+                    if _own_path.exists():
+                        _suffix = _own_suffix
+            except (OSError, Exception):
+                pass
+        _playbook_path = _playbook_base / f"latest{_suffix}.md"
+        if _playbook_path.exists():
+            _playbook_link_lines = [
+                "",
+                "## Research playbook",
+                "",
+                f"Cross-run memory access is enabled (scope: `{_memory_access}`). "
+                "A compiled playbook of verified insights is available:",
+                f"`{_playbook_path}`",
+                "",
+                "Query the memory store for more detail:",
+                "```bash",
+                "autoresearch memory query --insights",
+                "autoresearch memory query --analysis peak-gini-by-framing",
+                "```",
+            ]
+
     lines = [
         "# Auto-Research Handoff",
         "",
@@ -322,6 +363,7 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "- Clear failures and auto-rejections are evidence. Reflect on them, then branch only when the child idea is materially different.",
         "",
         *node_lines,
+        *_playbook_link_lines,
         "",
         "## Context JSON (full detail)",
         "",
