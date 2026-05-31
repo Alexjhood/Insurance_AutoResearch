@@ -424,8 +424,71 @@ def _cmd_memory(config, args) -> int:
         print(json.dumps({"memory_path": str(memory_path), "counts": counts}, indent=2))
         return 0
 
+    if sub == "record-insight":
+        return _memory_record_insight(config, args, memory_path)
+
+    if sub == "list-insights":
+        return _memory_list_insights(config, args, memory_path)
+
     print(f"Unknown memory subcommand: {sub}")
     return 2
+
+
+def _memory_record_insight(config, args, memory_path: "Path") -> int:
+    """Record an evidence-bound insight into the aggregator."""
+    from autoresearch.memory.insights import record_insight
+
+    file_path = Path(getattr(args, "file", None) or "")
+    if not file_path.exists():
+        print(f"Insight JSON file not found: {file_path}")
+        return 1
+
+    try:
+        insight_dict = json.loads(file_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Cannot read insight file: {exc}")
+        return 1
+
+    # Read model_identity and run_uid from run_manifest.json
+    manifest_path = config.artifacts_dir / "run_manifest.json"
+    if not manifest_path.exists():
+        print("No run_manifest.json found. Run bootstrap-track first.")
+        return 1
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"Cannot read manifest: {exc}")
+        return 1
+
+    model_identity = manifest.get("model_identity")
+    if not model_identity:
+        print("run_manifest.json has no model_identity. Run `autoresearch memory backfill-identity` first.")
+        return 1
+
+    track_id = manifest.get("track_id") or config.track_id
+    run_id = manifest.get("run_id") or config.run_id
+    run_uid = f"{track_id}/{run_id}" if track_id and run_id else str(config.artifacts_dir)
+
+    result = record_insight(
+        memory_path,
+        run_uid,
+        model_identity,
+        insight_dict,
+        run_registry_path=config.registry_path,
+    )
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def _memory_list_insights(config, args, memory_path: "Path") -> int:
+    """List insights from the aggregator."""
+    from autoresearch.memory.insights import list_insights
+
+    verified_only = not getattr(args, "include_unverified", False)
+    run_filter = getattr(args, "run", None)
+    rows = list_insights(memory_path, verified_only=verified_only, run_uid=run_filter)
+    print(json.dumps(rows, indent=2))
+    return 0
 
 
 def _memory_backfill_identity(config, args, memory_path: "Path") -> int:
@@ -717,6 +780,40 @@ def build_parser() -> argparse.ArgumentParser:
     memory_subs.add_parser(
         "status",
         help="Print row counts for each table in the aggregator store.",
+    )
+
+    mem_record_insight = memory_subs.add_parser(
+        "record-insight",
+        help="Record an evidence-bound insight from a JSON file into the aggregator.",
+    )
+    mem_record_insight.add_argument(
+        "--file",
+        required=True,
+        metavar="PATH",
+        help="Path to a JSON file containing the insight (see docs/CLI.md for schema).",
+    )
+
+    mem_list_insights = memory_subs.add_parser(
+        "list-insights",
+        help="List insights stored in the aggregator.",
+    )
+    mem_list_insights.add_argument(
+        "--verified-only",
+        action="store_true",
+        default=True,
+        help="Return only verified=1 insights (default).",
+    )
+    mem_list_insights.add_argument(
+        "--include-unverified",
+        action="store_true",
+        default=False,
+        help="Include insights with verified=0.",
+    )
+    mem_list_insights.add_argument(
+        "--run",
+        default=None,
+        metavar="RUN_UID",
+        help="Filter to a specific run_uid.",
     )
 
     return parser

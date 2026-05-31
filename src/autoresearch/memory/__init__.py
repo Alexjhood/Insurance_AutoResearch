@@ -27,7 +27,7 @@ def maybe_memory_checkpoint(config: "ProjectConfig", state: dict[str, Any]) -> N
 
 def _run_checkpoint(config: "ProjectConfig") -> None:
     from autoresearch.config import PROJECT_ROOT
-    from autoresearch.memory.harvester import harvest_run
+    from autoresearch.memory import harvester
 
     memory_path = PROJECT_ROOT / "artifacts" / "memory" / "memory.sqlite"
     manifest_path = config.artifacts_dir / "run_manifest.json"
@@ -43,10 +43,57 @@ def _run_checkpoint(config: "ProjectConfig") -> None:
     if not model_identity or not model_identity.get("provider") or not model_identity.get("name"):
         return
 
-    harvest_run(
+    harvester.harvest_run(
         memory_path,
         config.registry_path,
         model_identity,
         track_id=config.track_id,
         run_id=config.run_id,
     )
+
+    _write_reflection_prompt(config)
+
+
+def _write_reflection_prompt(config: "ProjectConfig") -> None:
+    """Write pending_reflection.md into the run's handoff dir.
+
+    This prompts the agent to record 0-3 evidence-bound insights via
+    `autoresearch memory record-insight --file <path.json>`.
+    Capture is best-effort; the validator gates trust.
+    """
+    try:
+        handoff_dir = config.handoff_handoffs_dir
+        handoff_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = handoff_dir / "pending_reflection.md"
+        content = (
+            "# Reflection Prompt\n\n"
+            "A memory checkpoint just ran. You may optionally record 0-3 evidence-bound "
+            "insights from this session. Each insight must cite real experiment_ids and/or "
+            "comparison_ids from your run's registry so the validator can verify it.\n\n"
+            "## How to record an insight\n\n"
+            "Write a JSON file matching the schema below, then run:\n\n"
+            "```bash\n"
+            "autoresearch memory record-insight --file /path/to/insight.json\n"
+            "```\n\n"
+            "## Insight schema\n\n"
+            "```json\n"
+            "{\n"
+            '  "claim": "your concise claim about what works or plateaus",\n'
+            '  "scope": "general",\n'
+            '  "confidence": 0.8,\n'
+            '  "evidence": {\n'
+            '    "experiment_ids": ["exp_id_1", "exp_id_2"],\n'
+            '    "comparison_ids": ["cmp_id_1"],\n'
+            '    "metric": "gini_weighted",\n'
+            '    "delta": 0.05\n'
+            "  },\n"
+            '  "supersedes": null,\n'
+            '  "contradicts": null\n'
+            "}\n"
+            "```\n\n"
+            "Insights with fabricated evidence will be stored with `verified=0` and "
+            "excluded from the playbook and default query results.\n"
+        )
+        prompt_path.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        logger.debug("Could not write pending_reflection.md: %s", exc)

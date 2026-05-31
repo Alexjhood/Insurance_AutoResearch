@@ -448,3 +448,45 @@ structural_gini_threshold = 0.37
 ```
 
 `structural_gini_threshold` controls the Time-to-Structural-Insight leaderboard threshold. It is also available on `ProjectConfig.structural_gini_threshold`.
+
+### `memory record-insight`
+
+Record an evidence-bound insight from a JSON file into the aggregator. The insight is validated against the run's own registry (read-only): experiment/comparison IDs must exist and the cited `delta` must match the registry values within tolerance. Insights with fabricated evidence are stored with `verified=0` and excluded from the playbook and default queries.
+
+```bash
+autoresearch --track claude --run-id 20260531T221638Z memory record-insight \
+  --file /path/to/my_insight.json
+```
+
+Insight JSON schema:
+
+```json
+{
+  "claim": "rate-based Tweedie GBMs plateau ~0.33; total-target trees reach ~0.40",
+  "scope": "general",
+  "confidence": 0.8,
+  "evidence": {
+    "experiment_ids": ["exp_abc123", "exp_def456"],
+    "comparison_ids": ["cmp_xyz789"],
+    "metric": "gini_weighted",
+    "delta": 0.07
+  },
+  "supersedes": null,
+  "contradicts": null
+}
+```
+
+### `memory list-insights`
+
+List insights stored in the aggregator. Defaults to verified-only.
+
+```bash
+# Verified insights only (default)
+autoresearch memory list-insights
+
+# Include unverified insights
+autoresearch memory list-insights --include-unverified
+
+# Filter to a specific run
+autoresearch memory list-insights --run claude/20260531T221638Z
+```
