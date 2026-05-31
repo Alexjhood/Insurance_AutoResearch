@@ -430,6 +430,9 @@ def _cmd_memory(config, args) -> int:
     if sub == "list-insights":
         return _memory_list_insights(config, args, memory_path)
 
+    if sub == "query":
+        return _memory_query(config, args, memory_path)
+
     print(f"Unknown memory subcommand: {sub}")
     return 2
 
@@ -489,6 +492,76 @@ def _memory_list_insights(config, args, memory_path: "Path") -> int:
     rows = list_insights(memory_path, verified_only=verified_only, run_uid=run_filter)
     print(json.dumps(rows, indent=2))
     return 0
+
+
+def _memory_query(config, args, memory_path: "Path") -> int:
+    """Dispatch memory query subcommands (respects access gate)."""
+    from autoresearch.config import PROJECT_ROOT
+    from autoresearch.memory import resolve_memory_access
+    from autoresearch.memory.query import AccessDeniedError, query_insights, query_experiments, run_analysis
+
+    access = resolve_memory_access(config)
+    if access == "none":
+        print(
+            "Memory query refused: AUTORESEARCH_MEMORY_ACCESS is not set (default: none). "
+            "Set it to 'own' or 'all' to enable memory queries."
+        )
+        return 1
+
+    # Derive own_model_id from manifest if available
+    own_model_id: str | None = None
+    manifest_path = config.artifacts_dir / "run_manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            identity = manifest.get("model_identity") or {}
+            provider = (identity.get("provider") or "").lower().strip()
+            name = (identity.get("name") or "").lower().strip()
+            if provider and name:
+                own_model_id = f"{provider}/{name}"
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    try:
+        if getattr(args, "insights", False):
+            rows = query_insights(
+                memory_path,
+                access,
+                model_id=getattr(args, "model", None),
+                verified_only=not getattr(args, "include_unverified", False),
+                own_model_id=own_model_id,
+            )
+            print(json.dumps(rows, indent=2))
+            return 0
+
+        if getattr(args, "experiments", False):
+            rows = query_experiments(
+                memory_path,
+                access,
+                own_model_id=own_model_id,
+                filter_str=getattr(args, "filter", None),
+            )
+            print(json.dumps(rows, indent=2))
+            return 0
+
+        analysis_name = getattr(args, "analysis", None)
+        if analysis_name:
+            rows = run_analysis(
+                memory_path,
+                access,
+                analysis_name,
+                own_model_id=own_model_id,
+                threshold=getattr(config, "structural_gini_threshold", 0.37),
+            )
+            print(json.dumps(rows, indent=2))
+            return 0
+
+    except AccessDeniedError as exc:
+        print(f"Access denied: {exc}")
+        return 1
+
+    print("Specify --insights, --experiments, or --analysis <name>.")
+    return 2
 
 
 def _memory_backfill_identity(config, args, memory_path: "Path") -> int:
@@ -815,6 +888,34 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="RUN_UID",
         help="Filter to a specific run_uid.",
     )
+
+    mem_query = memory_subs.add_parser(
+        "query",
+        help="Query the aggregator (respects AUTORESEARCH_MEMORY_ACCESS gate).",
+    )
+    query_mode = mem_query.add_mutually_exclusive_group()
+    query_mode.add_argument(
+        "--insights",
+        action="store_true",
+        default=False,
+        help="Retrieve insights.",
+    )
+    query_mode.add_argument(
+        "--experiments",
+        action="store_true",
+        default=False,
+        help="Retrieve experiments.",
+    )
+    query_mode.add_argument(
+        "--analysis",
+        metavar="NAME",
+        help="Run a named canned analysis (peak-gini-by-framing, plateau-families, "
+             "biggest-single-jumps, efficiency-by-model).",
+    )
+    mem_query.add_argument("--model", default=None, metavar="MODEL_ID", help="Filter to a model_id.")
+    mem_query.add_argument("--filter", default=None, metavar="STR", help="Free-text filter hint for experiments.")
+    mem_query.add_argument("--include-unverified", action="store_true", default=False,
+                           help="Include unverified insights (only applies to --insights).")
 
     return parser
 

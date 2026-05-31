@@ -1,20 +1,48 @@
-"""Cross-run memory aggregator — checkpoint wrapper.
+"""Cross-run memory aggregator — checkpoint wrapper and access gate.
 
-The public entry point for the session loop is maybe_memory_checkpoint().
-It is a no-op-safe wrapper: exceptions are caught and logged so the loop
-never crashes from memory errors.
+Public API:
+  maybe_memory_checkpoint(config, state) — harvest + reflection prompt (session loop).
+  resolve_memory_access(config) -> str   — 'none' | 'own' | 'all' from env or manifest.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from autoresearch.config import ProjectConfig
 
 logger = logging.getLogger(__name__)
+
+_VALID_ACCESS_LEVELS = frozenset({"none", "own", "all"})
+
+
+def resolve_memory_access(config: "ProjectConfig | None" = None) -> str:
+    """Resolve AUTORESEARCH_MEMORY_ACCESS to 'none' | 'own' | 'all'.
+
+    Priority: env var > manifest value > default 'none'.
+    The agent cannot set its own env var, so it cannot self-escalate.
+    """
+    env_val = os.environ.get("AUTORESEARCH_MEMORY_ACCESS", "").strip().lower()
+    if env_val in _VALID_ACCESS_LEVELS:
+        return env_val
+
+    # Fall back to the manifest value (recorded at bootstrap time).
+    if config is not None:
+        try:
+            manifest_path = config.artifacts_dir / "run_manifest.json"
+            if manifest_path.exists():
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest_val = str(manifest.get("memory_access") or "").strip().lower()
+                if manifest_val in _VALID_ACCESS_LEVELS:
+                    return manifest_val
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    return "none"
 
 
 def maybe_memory_checkpoint(config: "ProjectConfig", state: dict[str, Any]) -> None:

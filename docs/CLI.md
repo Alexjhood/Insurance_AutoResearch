@@ -490,3 +490,36 @@ autoresearch memory list-insights --include-unverified
 # Filter to a specific run
 autoresearch memory list-insights --run claude/20260531T221638Z
 ```
+
+### `memory query`
+
+Query the aggregator. Requires `AUTORESEARCH_MEMORY_ACCESS` to be set to `own` or `all`; with the default (`none`) the command refuses with a clear message.
+
+```bash
+export AUTORESEARCH_MEMORY_ACCESS=own   # or 'all'
+
+# Retrieve verified insights (own-model only when access=own)
+autoresearch memory query --insights
+
+# Include unverified insights
+autoresearch memory query --insights --include-unverified
+
+# Filter by model
+autoresearch memory query --insights --model anthropic/claude-sonnet-4-6
+
+# Retrieve experiments
+autoresearch memory query --experiments
+
+# Canned analytical queries
+autoresearch memory query --analysis peak-gini-by-framing
+autoresearch memory query --analysis plateau-families
+autoresearch memory query --analysis biggest-single-jumps
+autoresearch memory query --analysis efficiency-by-model
+```
+
+**Access levels:**
+- `none` (default) — query refuses; `build_llm_context()` is byte-for-byte unchanged from today (run isolation guarantee).
+- `own` — results filtered to the current run's `model_id`.
+- `all` — all models returned, fully attributed.
+
+The resolved access level is recorded in `run_manifest.json` (`memory_access` key) at bootstrap for auditability.

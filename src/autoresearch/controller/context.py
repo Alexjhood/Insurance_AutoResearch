@@ -18,6 +18,7 @@ from autoresearch.utils.io import read_json
 
 def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
     """Build the bounded context that is safe to provide to the proposer."""
+    from autoresearch.memory import resolve_memory_access
 
     schema_path = config.metadata_dir / "agent_schema.json"
     latest_nonpromotion_path = config.handoff_results_dir / "latest_nonpromotion_summary.json"
@@ -33,7 +34,7 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
     raw_cycle = read_json(latest_cycle_path) if latest_cycle_path.exists() else None
     latest_cycle_result = _flatten_cycle_result(raw_cycle) if raw_cycle else None
 
-    return {
+    ctx: dict[str, Any] = {
         "project_goal": (
             f"Improve {config.target_mode} prediction while protecting reproducibility and holdout integrity. "
             "Every run starts from the global-mean no-model baseline; progress through many small, "
@@ -75,6 +76,42 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
                 "confidence_level": config.confidence_level,
             },
         },
+    }
+
+    # Add memory_access block only when access is granted.
+    # With 'none' (default) the context dict is unchanged — run isolation is sacrosanct.
+    access = resolve_memory_access(config)
+    if access in ("own", "all"):
+        ctx["memory_access"] = _build_memory_access_block(access)
+
+    return ctx
+
+
+def _build_memory_access_block(access: str) -> dict[str, Any]:
+    """Return a compact memory_access context block for the LLM proposer."""
+    scope_desc = (
+        "your own model's history across all its runs"
+        if access == "own"
+        else "all models' history, fully attributed"
+    )
+    return {
+        "scope": access,
+        "description": (
+            f"Cross-run memory is available ({scope_desc}). "
+            "Use the query tool to retrieve relevant insights or analyse experiment history. "
+            "Do NOT assume facts not returned by the tool."
+        ),
+        "how_to_query": {
+            "retrieval": "autoresearch memory query --insights [--verified-only] [--family X] [--model Z]",
+            "analytical": (
+                "autoresearch memory query "
+                "--analysis [peak-gini-by-framing | plateau-families | biggest-single-jumps | efficiency-by-model]"
+            ),
+        },
+        "playbook_hint": (
+            "A dynamic playbook may be available at artifacts/memory/playbook/latest.md "
+            "if memory build-playbook has been run."
+        ),
     }
 
 

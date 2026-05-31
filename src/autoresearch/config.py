@@ -288,11 +288,15 @@ def ensure_project_dirs(config: ProjectConfig) -> None:
         )
         manifest_path = config.artifacts_dir / "run_manifest.json"
         if not manifest_path.exists():
+            import os
+            _raw_access = os.environ.get("AUTORESEARCH_MEMORY_ACCESS", "").strip().lower()
+            _memory_access = _raw_access if _raw_access in {"none", "own", "all"} else "none"
             manifest_body: dict = {
                 "track_id": config.track_id,
                 "run_id": config.run_id,
                 "run_dir": str(config.artifacts_dir),
                 "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "memory_access": _memory_access,
             }
             if config.model_provider and config.model_name:
                 manifest_body["model_identity"] = {
