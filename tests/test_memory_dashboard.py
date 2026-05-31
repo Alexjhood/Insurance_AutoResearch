@@ -9,14 +9,15 @@ import pytest
 
 
 def test_config_has_memory_fields() -> None:
-    """ProjectConfig must expose structural_gini_threshold and memory_store_relpath."""
+    """ProjectConfig must expose structural_gini_threshold; the store path is resolved
+    out-of-tree via default_memory_store_path (not a config relpath)."""
     from autoresearch.config import load_config
+    from autoresearch.memory.store import default_memory_store_path
 
     cfg = load_config()
     assert hasattr(cfg, "structural_gini_threshold")
-    assert hasattr(cfg, "memory_store_relpath")
     assert cfg.structural_gini_threshold == pytest.approx(0.37)
-    assert "memory.sqlite" in cfg.memory_store_relpath
+    assert "memory.sqlite" in str(default_memory_store_path())
 
 
 def test_dashboard_module_imports() -> None:
@@ -46,7 +47,7 @@ def test_dashboard_module_imports() -> None:
     assert "def render_memory" in source, "render_memory function not found in dashboard/app.py"
     assert "Memory & Leaderboard" in source, "Nav entry missing in dashboard/app.py"
     assert "structural_gini_threshold" in source, "structural_gini_threshold not used in dashboard"
-    assert "memory_store_relpath" in source, "memory_store_relpath not used in dashboard"
+    assert "default_memory_store_path" in source, "dashboard must resolve the store via default_memory_store_path"
 
 
 def test_render_memory_source_references_memory_harvest(tmp_path: Path) -> None:

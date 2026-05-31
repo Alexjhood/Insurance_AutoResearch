@@ -199,12 +199,11 @@ def test_handoff_markdown_no_playbook_link_when_access_none(tmp_path: Path) -> N
 def test_handoff_markdown_links_playbook_when_access_all(tmp_path: Path) -> None:
     from autoresearch.controller.handoff import render_handoff_markdown
 
-    # Create a real playbook file under the path the handoff function looks for.
-    # handoff.py constructs: _cfg_module.PROJECT_ROOT / "artifacts" / "memory" / "playbook"
-    playbook_dir = tmp_path / "artifacts" / "memory" / "playbook"
+    # Create a real playbook file at the resolved (out-of-tree) memory location.
+    mem_dir = tmp_path / "mem"
+    playbook_dir = mem_dir / "playbook"
     playbook_dir.mkdir(parents=True)
-    playbook_path = playbook_dir / "latest.md"
-    playbook_path.write_text("# Playbook content", encoding="utf-8")
+    (playbook_dir / "latest.md").write_text("# Playbook content", encoding="utf-8")
 
     cfg = _make_cfg_with_access(tmp_path, "all")
     context: dict = {
@@ -214,14 +213,12 @@ def test_handoff_markdown_links_playbook_when_access_all(tmp_path: Path) -> None
         "research_tree": {"recent_nodes": []},
     }
 
-    import autoresearch.config as _autoresearch_config
-    original_root = _autoresearch_config.PROJECT_ROOT
-    try:
-        _autoresearch_config.PROJECT_ROOT = tmp_path
-        with patch("autoresearch.memory.resolve_memory_access", return_value="all"):
-            md = render_handoff_markdown(cfg, context)
-    finally:
-        _autoresearch_config.PROJECT_ROOT = original_root
+    with patch.dict(os.environ, {
+        "AUTORESEARCH_MEMORY_ACCESS": "all",
+        "AUTORESEARCH_MEMORY_DIR": str(mem_dir),
+    }, clear=False), \
+         patch("autoresearch.memory.resolve_memory_access", return_value="all"):
+        md = render_handoff_markdown(cfg, context)
 
     assert "playbook" in md.lower(), "Playbook section missing from handoff with access=all"
     assert "memory query" in md or "memory" in md

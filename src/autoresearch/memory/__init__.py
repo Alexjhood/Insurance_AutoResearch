@@ -54,10 +54,10 @@ def maybe_memory_checkpoint(config: "ProjectConfig", state: dict[str, Any]) -> N
 
 
 def _run_checkpoint(config: "ProjectConfig") -> None:
-    from autoresearch.config import PROJECT_ROOT
     from autoresearch.memory import harvester
+    from autoresearch.memory.store import default_memory_store_path
 
-    memory_path = PROJECT_ROOT / "artifacts" / "memory" / "memory.sqlite"
+    memory_path = default_memory_store_path()
     manifest_path = config.artifacts_dir / "run_manifest.json"
     if not manifest_path.exists():
         return
@@ -111,9 +111,23 @@ def _write_reflection_prompt(config: "ProjectConfig") -> None:
         prompt_path = handoff_dir / "pending_reflection.md"
         content = (
             "# Reflection Prompt\n\n"
-            "A memory checkpoint just ran. You may optionally record 0-3 evidence-bound "
-            "insights from this session. Each insight must cite real experiment_ids and/or "
-            "comparison_ids from your run's registry so the validator can verify it.\n\n"
+            "A checkpoint just ran for THIS run. You may optionally record 0-3 short, "
+            "evidence-bound insights about what you have learned so far in this run. "
+            "This is entirely optional and only concerns your own run -- skip it if there "
+            "is nothing genuinely new to say.\n\n"
+            "Every insight must cite real `experiment_id` / `comparison_id` values from "
+            "this run's registry so it can be checked against the recorded metrics. "
+            "Insights whose cited evidence does not match the registry are stored but "
+            "flagged `verified=0` and ignored downstream, so only record claims you can "
+            "back with IDs.\n\n"
+            "## Where to find the IDs\n\n"
+            "- The handoff / context bundle for this run lists recent experiments and "
+            "comparisons.\n"
+            "- Or list them directly:\n\n"
+            "```bash\n"
+            "autoresearch list-experiments       # experiment_id values for this run\n"
+            "autoresearch list-promotions        # comparison_id values + decisions\n"
+            "```\n\n"
             "## How to record an insight\n\n"
             "Write a JSON file matching the schema below, then run:\n\n"
             "```bash\n"

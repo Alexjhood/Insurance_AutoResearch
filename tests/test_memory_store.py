@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from autoresearch.memory.store import (
     assert_no_holdout_columns,
+    default_memory_store_path,
+    default_playbook_dir,
     init_memory_store,
+    memory_root,
     memory_store_counts,
 )
 
@@ -126,18 +131,21 @@ def test_memory_root_default_is_outside_working_tree() -> None:
 
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("AUTORESEARCH_MEMORY_DIR", None)
-        root = memory_root()
-        store = default_memory_store_path()
-    assert not str(root).startswith(str(PROJECT_ROOT)), (
+        root = memory_root().resolve()
+        store = default_memory_store_path().resolve()
+        playbook = default_playbook_dir().resolve()
+    project = PROJECT_ROOT.resolve()
+    assert not str(root).startswith(str(project)), (
         f"memory store leaked into the working tree: {root}"
     )
-    assert store == root / "memory.sqlite"
-    assert default_playbook_dir() == root / "playbook"
+    assert store == (root / "memory.sqlite")
+    assert playbook == (root / "playbook")
 
 
 def test_memory_dir_env_override(tmp_path: Path) -> None:
     """AUTORESEARCH_MEMORY_DIR overrides the default location."""
-    with patch.dict(os.environ, {"AUTORESEARCH_MEMORY_DIR": str(tmp_path)}, clear=False):
-        assert memory_root() == tmp_path
-        assert default_memory_store_path() == tmp_path / "memory.sqlite"
-        assert default_playbook_dir() == tmp_path / "playbook"
+    target = tmp_path.resolve()
+    with patch.dict(os.environ, {"AUTORESEARCH_MEMORY_DIR": str(target)}, clear=False):
+        assert memory_root().resolve() == target
+        assert default_memory_store_path().resolve() == target / "memory.sqlite"
+        assert default_playbook_dir().resolve() == target / "playbook"

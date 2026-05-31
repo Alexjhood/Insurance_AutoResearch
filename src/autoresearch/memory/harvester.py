@@ -88,7 +88,7 @@ def harvest_run(
     Parameters
     ----------
     memory_path:
-        Path to artifacts/memory/memory.sqlite (aggregator).
+        Path to the cross-run aggregator database (see store.default_memory_store_path).
     run_registry_path:
         Path to the per-run registry.sqlite opened read-only.
     model_identity:

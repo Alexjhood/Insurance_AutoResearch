@@ -353,7 +353,7 @@ Writes: a full comparison report to `artifacts/cross_track/<timestamp>/compariso
 
 ## Cross-Run Memory Aggregator
 
-All `memory` subcommands operate on `artifacts/memory/memory.sqlite`. The aggregator contains **search-split metrics only** — no holdout data. None of these commands change per-run registries.
+All `memory` subcommands operate on the cross-run aggregator, which lives **outside the repo working tree** by default (`~/.autoresearch/<project>/memory/memory.sqlite`, overridable with the `AUTORESEARCH_MEMORY_DIR` environment variable). The aggregator contains **search-split metrics only** — no holdout data. None of these commands change per-run registries.
 
 ### `memory harvest`
 
@@ -416,7 +416,7 @@ Example output:
 
 ```json
 {
-  "memory_path": "artifacts/memory/memory.sqlite",
+  "memory_path": "~/.autoresearch/<project>/memory/memory.sqlite",
   "counts": {
     "models": 4,
     "runs": 7,
@@ -429,7 +429,7 @@ Example output:
 
 ### Dashboard: Memory & Leaderboard page
 
-The Streamlit dashboard (`autoresearch dashboard`) includes a **Memory & Leaderboard** page that reads from `artifacts/memory/memory.sqlite`. It shows:
+The Streamlit dashboard (`autoresearch dashboard`) includes a **Memory & Leaderboard** page that reads from the cross-run aggregator (`~/.autoresearch/<project>/memory/memory.sqlite` by default; `AUTORESEARCH_MEMORY_DIR` overrides). It shows:
 
 - **Score-trace chart** — running peak `gini_weighted` per `model_id` across cycles (toggle models on/off).
 - **Peak Quality** tab — `max(gini_weighted)` per model across all its runs.
@@ -526,7 +526,7 @@ The resolved access level is recorded in `run_manifest.json` (`memory_access` ke
 
 ### `memory build-playbook`
 
-Compile verified insights and leaderboard-derived facts into a dynamic playbook at `artifacts/memory/playbook/latest.md`. A timestamped copy is also saved. Only `verified=1` insights are included; each bullet cites evidence IDs and source `model_id`.
+Compile verified insights and leaderboard-derived facts into a dynamic playbook at `<memory_dir>/playbook/latest.md` (default `~/.autoresearch/<project>/memory/playbook/latest.md`; `AUTORESEARCH_MEMORY_DIR` overrides). A timestamped copy is also saved. Only `verified=1` insights are included; each bullet cites evidence IDs and source `model_id`.
 
 ```bash
 # Build the full attributed playbook
