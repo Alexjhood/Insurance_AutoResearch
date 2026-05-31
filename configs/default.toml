@@ -96,6 +96,18 @@ allow_feature_builder_modules = true
 # be written into the experiment artifact instead of imported from src/models.
 requires_model_script = true
 
+[compute]
+base_budget_minutes = 10
+budget_increment_minutes = 5
+experiments_per_increment = 5
+enforce = true
+preflight_enabled = true
+preflight_sample_rows = 5000
+
+[repair]
+noise_floor_eps = 0.002
+auto_abandon_enabled = true
+
 [search_space.preprocessing]
 # Claim cap is fixed at 100,000 by product decision and applied uniformly to
 # training and testing data.  The only allowed value is the default — agents

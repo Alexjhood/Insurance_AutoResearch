@@ -81,6 +81,18 @@ class ProjectConfig:
     search_space: dict[str, object]
     run_id: str = "default"
     track_base_dir: Path | None = None
+    # compute budget
+    base_budget_minutes: int = 10
+    budget_increment_minutes: int = 5
+    experiments_per_increment: int = 5
+    compute_enforce: bool = True
+    preflight_enabled: bool = True
+    preflight_sample_rows: int = 5000
+    # repair
+    repair_noise_floor_eps: float = 0.002
+    repair_auto_abandon_enabled: bool = True
+    # handoff
+    running_stale_minutes: int = 30
 
 
 def _resolve(root: Path, value: str) -> Path:
@@ -117,6 +129,8 @@ def load_config(
     handoff = raw["handoff"]
     deduplication = raw["deduplication"]
     search_space = raw["search_space"]
+    compute_cfg = raw.get("compute", {})
+    repair_cfg = raw.get("repair", {})
 
     resolved_track = track_id or "default"
 
@@ -206,6 +220,15 @@ def load_config(
         deduplication_policy=str(deduplication["policy"]),
         deduplication_lookback=int(deduplication["lookback"]),
         search_space=dict(search_space),
+        base_budget_minutes=int(compute_cfg.get("base_budget_minutes", 10)),
+        budget_increment_minutes=int(compute_cfg.get("budget_increment_minutes", 5)),
+        experiments_per_increment=int(compute_cfg.get("experiments_per_increment", 5)),
+        compute_enforce=bool(compute_cfg.get("enforce", True)),
+        preflight_enabled=bool(compute_cfg.get("preflight_enabled", True)),
+        preflight_sample_rows=int(compute_cfg.get("preflight_sample_rows", 5000)),
+        repair_noise_floor_eps=float(repair_cfg.get("noise_floor_eps", 0.002)),
+        repair_auto_abandon_enabled=bool(repair_cfg.get("auto_abandon_enabled", True)),
+        running_stale_minutes=int(raw.get("handoff", {}).get("running_stale_minutes", 30)),
     )
 
 

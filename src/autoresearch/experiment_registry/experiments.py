@@ -28,6 +28,10 @@ def record_experiment(
     artifacts: dict[str, Path],
     code_version: str | None = None,
     notes: str | None = None,
+    fit_wall_seconds: float | None = None,
+    fit_cpu_seconds: float | None = None,
+    compute_budget_seconds: float | None = None,
+    timed_out: bool = False,
 ) -> None:
     """Insert or replace a completed experiment and its artifact records."""
 
@@ -49,9 +53,13 @@ def record_experiment(
                 config_snapshot_path,
                 code_version,
                 metrics_path,
+                fit_wall_seconds,
+                fit_cpu_seconds,
+                compute_budget_seconds,
+                timed_out,
                 notes
             )
-            VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 experiment_id,
@@ -66,6 +74,10 @@ def record_experiment(
                 str(config_snapshot_path),
                 code_version,
                 str(metrics_path),
+                fit_wall_seconds,
+                fit_cpu_seconds,
+                compute_budget_seconds,
+                int(timed_out),
                 notes,
             ),
         )

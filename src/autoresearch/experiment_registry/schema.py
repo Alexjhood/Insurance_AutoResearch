@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS experiments (
     rationale_path TEXT,
     metrics_path TEXT,
     uncertainty_summary_path TEXT,
+    fit_wall_seconds REAL,
+    fit_cpu_seconds REAL,
+    compute_budget_seconds REAL,
+    timed_out INTEGER,
     notes TEXT
 );
 
@@ -167,6 +171,10 @@ def _migrate_experiments(con: sqlite3.Connection) -> None:
         "target_mode": "TEXT",
         "preprocessing_summary": "TEXT",
         "claim_cap_threshold": "REAL",
+        "fit_wall_seconds": "REAL",
+        "fit_cpu_seconds": "REAL",
+        "compute_budget_seconds": "REAL",
+        "timed_out": "INTEGER",
     }
     for column, definition in columns.items():
         if column not in existing:

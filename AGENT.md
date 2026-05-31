@@ -6,6 +6,48 @@ Read this file at the start of every session. Keep it open as reference.
 
 ---
 
+## Cheat sheet — gotchas & tips
+<!-- USER-MAINTAINED: add new tips here as they come up. Keep entries short and concrete. -->
+
+### Library × loss capability matrix (target has exact zeros)
+
+The burning-cost target (`claim_cost_capped_active`) **contains exact zeros** — most policies have no claim. Losses requiring strictly positive `y` (gamma, log) will error or need a frequency/severity split.
+
+| Estimator | Tweedie | Gamma / Poisson | Notes |
+|---|---|---|---|
+| `lightgbm` | ✓ (`objective="tweedie"`, `tweedie_variance_power`) | ✓ (gamma needs `y > 0`) | Preferred for pure-premium with zeros |
+| `xgboost` | ✓ (`reg:tweedie`, `tweedie_variance_power`) | ✓ | Preferred for pure-premium with zeros |
+| `statsmodels GLM` | ✓ (`family=Tweedie`) | ✓ | Good for GLM baselines |
+| `sklearn TweedieRegressor` | ✓ (GLM only, no trees) | — | |
+| `sklearn HistGradientBoostingRegressor` | **✗ — no `tweedie_power` arg** | gamma/poisson valid but need `y > 0` | Valid losses: `squared_error`, `absolute_error`, `gamma`, `poisson`, `quantile` |
+
+**Do not pass `tweedie_power` to `HistGradientBoostingRegressor`** — it will raise `TypeError` immediately.
+
+For pure-premium with zeros: prefer Tweedie objective (lightgbm/xgboost/statsmodels) or Poisson-frequency × severity decomposition.
+
+### Categorical encoding
+
+Features with string values (e.g. `'B12'`) must be encoded before estimators that need numeric input.
+- **lightgbm**: cast to `category` dtype; lightgbm handles it natively.
+- **xgboost / sklearn**: use ordinal or one-hot encoding explicitly.
+
+### Other recurring traps
+
+- Always multiply predicted rates by `exposure_term_a` to return totals.
+- Always apply `apply_training_calibration` before returning.
+- Build feature lists with care — `list + int` concatenation raises `TypeError`.
+- `blend` components require predictions from prior experiments to exist on disk.
+
+### Compute budget (see also "Exploration philosophy" below)
+
+There is a per-experiment wall-clock budget controlled by `[compute]` in `configs/default.toml`:
+- Default: **10 minutes for the first 5 experiments**, +5 minutes every 5 experiments (`10 + 5 × (N // 5)` minutes).
+- The challenger is **refit ~5×** per comparison (1 experiment fit + 4 CV folds), so the effective cost is ~5× a single fit. Budget your single fit accordingly.
+- Use **early stopping** whenever the estimator supports it (see "Exploration philosophy → Compute budget & early stopping").
+- Cost drivers: `n_estimators × (1/learning_rate)`, `num_leaves`/`max_depth`, dataset size. A 5000-tree, `lr=0.003`, no-early-stopping model is ~25k tree builds and will likely exceed the budget.
+
+---
+
 ## Starting point — every run begins with no model
 
 Each run is bootstrapped with the **`global_mean` baseline** for the active target: burning-cost mode predicts `(total training claim cost / total training exposure) × exposure`; frequency mode predicts `(total training claim count / total training exposure) × exposure`. It is the flat exposure-weighted rate, the simplest possible "model", and it is the official champion at the start of every run.
@@ -22,6 +64,30 @@ The research loop rewards **many small, well-motivated improvements** over a few
 - **Use the research log.** Log what each step taught you, not just whether it promoted. A non-promotion that taught you something about a segment is valuable.
 
 This applies to every cycle, including the very first proposal of a fresh run.
+
+### Compute budget & early stopping
+
+**Per-experiment wall-clock budget** (configured in `configs/default.toml` `[compute]`):
+
+```
+budget_minutes = 10 + 5 × (N // 5)
+```
+
+where `N` = number of experiments already run in this run (zero-based). So experiments 1–5 get 10 min, 6–10 get 15 min, etc.
+
+**Sequencing guidance:** start with cheap, fast models (GLMs, shallow trees, small `n_estimators`) to map the available signal, then escalate to higher-capacity models only once cheap ideas are exhausted. This dovetails with the "small steps, broad search" philosophy.
+
+**The challenger is refit ~5×** per comparison (one experiment fit + 4 CV folds; champion folds are cached). Effective cost ≈ 5× a single fit — budget accordingly.
+
+**Cost drivers to watch:** `n_estimators × (1/learning_rate)`, `num_leaves`/`max_depth`, and dataset size. A "5000-tree, lr=0.003, no early stopping" model is ~25k tree builds over 430K rows and will likely blow the budget.
+
+**Use early stopping whenever the estimator supports it.** This saves compute *and* tends to improve calibration:
+
+- **lightgbm / xgboost:** hold out a validation slice from `train` (e.g. 10%), pass `early_stopping_rounds` / callbacks, and let the round count be data-driven rather than a large fixed `n_estimators`.
+- Use a **train-internal** split for early stopping — **never** the search-validation or holdout data.
+- Record the chosen `n_estimators` in `model_notes` so future runs can use it as a starting point.
+
+If an experiment times out, the framework marks it `failed` with a `compute_budget_exceeded` reason and the repair request will contain the budget and elapsed time. Fix: reduce `n_estimators`, increase `learning_rate`, or use early stopping.
 
 ---
 
@@ -333,6 +399,23 @@ pred_score, calib_factor = apply_training_calibration(
 notes["native_pred_to_actual_ratio"] = round(1.0 / calib_factor, 4)
 notes["calib_factor"] = round(float(calib_factor), 4)
 ```
+
+**Early stopping — use it whenever the estimator supports it**
+
+For lightgbm/xgboost, hold out a validation slice from `train` internally and pass early-stopping parameters:
+
+```python
+# lightgbm example
+n_val = max(1000, int(0.1 * len(train)))
+val_slice = train.iloc[-n_val:]
+train_slice = train.iloc[:-n_val]
+callbacks = [lgb.early_stopping(50, verbose=False), lgb.log_evaluation(-1)]
+model.fit(X_tr, y_tr, sample_weight=w_tr,
+          eval_set=[(X_val, y_val)], callbacks=callbacks)
+notes["n_estimators_chosen"] = model.best_iteration_
+```
+
+Use a **train-internal** split (never search_validation or holdout). This keeps compute within budget *and* avoids over-boosting (which hurt `double_lift_slope` in prior runs).
 
 If you need a new library: add it to `pyproject.toml` and run:
 ```bash

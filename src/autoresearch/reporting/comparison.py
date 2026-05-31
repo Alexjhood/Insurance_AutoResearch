@@ -137,6 +137,8 @@ def write_comparison_html_report(
 
     champion_details = _experiment_details(config, champion_id)
     challenger_details = _experiment_details(config, challenger_id)
+    champion_timing = _load_timing(config, champion_id)
+    challenger_timing = _load_timing(config, challenger_id)
 
     gate_metric = getattr(config, "gate_primary_metric", "rank_gini_weighted")
     gate_mode = comparison_summary.get("gate_mode", "single_partition")
@@ -156,6 +158,8 @@ def write_comparison_html_report(
         challenger_id=challenger_id,
         champion_details=champion_details,
         challenger_details=challenger_details,
+        champion_timing=champion_timing,
+        challenger_timing=challenger_timing,
         champion_metrics=champion_metrics,
         challenger_metrics=challenger_metrics,
         lift_data=lift_data,
@@ -193,6 +197,16 @@ def _load_proposal_for_experiment(config: ProjectConfig, experiment_id: str) -> 
     except Exception:
         pass
     return None
+
+
+def _load_timing(config: ProjectConfig, experiment_id: str) -> dict[str, Any]:
+    """Load the timing block from an experiment's metrics.json, or empty dict."""
+    try:
+        metrics_path = _artifact_path(config, experiment_id, "metrics")
+        metrics = read_json(metrics_path)
+        return dict(metrics.get("timing") or {})
+    except Exception:
+        return {}
 
 
 def _experiment_details(config: ProjectConfig, experiment_id: str) -> dict[str, Any]:
@@ -583,6 +597,8 @@ def _render_html(
     challenger_id: str,
     champion_details: dict[str, Any],
     challenger_details: dict[str, Any],
+    champion_timing: dict[str, Any] | None = None,
+    challenger_timing: dict[str, Any] | None = None,
     champion_metrics: dict[str, Any],
     challenger_metrics: dict[str, Any],
     lift_data: dict,
@@ -673,6 +689,7 @@ def _render_html(
     chall_details_html = _details_card("Challenger", challenger_details)
     diff_discussion_html = _experiment_diff_discussion(champion_details, challenger_details)
     native_calib_html = _native_calibration_warning(challenger_details)
+    compute_html = _compute_section(champion_timing or {}, challenger_timing or {})
 
     js_code = r"""
 const CHAMP_COLOR='#1f77b4',CHALL_COLOR='#d62728',ACTUAL_COLOR='#2ca02c';
@@ -1233,6 +1250,11 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
   </div>
 
   <div class="section">
+    <h2>Compute &amp; Timing</h2>
+    <div class="card" style="padding:12px">{compute_html}</div>
+  </div>
+
+  <div class="section">
     <h2>Validation Metrics</h2>
     <div class="card" style="padding:12px">{metrics_html}</div>
   </div>
@@ -1570,6 +1592,68 @@ def _native_calibration_warning(challenger_details: dict[str, Any]) -> str:
         )
     except (TypeError, ValueError):
         return ""
+
+
+def _compute_section(champion_timing: dict[str, Any], challenger_timing: dict[str, Any]) -> str:
+    """Render a small Compute & Timing table for the comparison report."""
+    if not champion_timing and not challenger_timing:
+        return "<p style='color:#6c757d;font-size:13px'>No timing data available (experiments predating this feature).</p>"
+
+    def _t(val: Any, unit: str = "s") -> str:
+        if val is None:
+            return "—"
+        try:
+            return f"{float(val):.1f}{unit}"
+        except (TypeError, ValueError):
+            return str(val)
+
+    def _pct(val: Any) -> str:
+        if val is None:
+            return "—"
+        try:
+            pct = float(val) * 100
+            color = "#7a1a1a" if pct > 90 else "#5a3a00" if pct > 70 else "#0a5c2e"
+            return f'<span style="color:{color};font-weight:600">{pct:.1f}%</span>'
+        except (TypeError, ValueError):
+            return "—"
+
+    rows = [
+        "<table>",
+        "<tr><th>Metric</th><th>Champion</th><th>Challenger</th></tr>",
+    ]
+
+    def _to_row(label: str, c_val: Any, h_val: Any) -> str:
+        return f"<tr><td>{escape(label)}</td><td>{c_val}</td><td>{h_val}</td></tr>"
+
+    rows.append(_to_row(
+        "Fit wall-clock time",
+        _t(champion_timing.get("fit_wall_seconds")),
+        _t(challenger_timing.get("fit_wall_seconds")),
+    ))
+    rows.append(_to_row(
+        "Fit CPU time",
+        _t(champion_timing.get("fit_cpu_seconds")),
+        _t(challenger_timing.get("fit_cpu_seconds")),
+    ))
+    rows.append(_to_row(
+        "Budget (seconds)",
+        _t(champion_timing.get("compute_budget_seconds")),
+        _t(challenger_timing.get("compute_budget_seconds")),
+    ))
+    rows.append(_to_row(
+        "Budget utilisation",
+        _pct(champion_timing.get("budget_utilisation")),
+        _pct(challenger_timing.get("budget_utilisation")),
+    ))
+
+    c_to = bool(champion_timing.get("timed_out"))
+    h_to = bool(challenger_timing.get("timed_out"))
+    c_to_str = '<span style="color:#7a1a1a;font-weight:700">⚠ YES</span>' if c_to else "No"
+    h_to_str = '<span style="color:#7a1a1a;font-weight:700">⚠ YES</span>' if h_to else "No"
+    rows.append(_to_row("Timed out", c_to_str, h_to_str))
+
+    rows.append("</table>")
+    return "\n".join(rows)
 
 
 def _summary_table(comparison_summary: dict[str, Any], bootstrap_summary: dict[str, Any]) -> str:

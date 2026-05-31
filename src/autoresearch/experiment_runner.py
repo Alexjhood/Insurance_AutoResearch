@@ -2,12 +2,54 @@
 
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime, timezone
+import math
 from pathlib import Path
+import signal
+import threading
+import time
 import tomllib
+import traceback as _tb_module
 from typing import Any
 
 import pandas as pd
+
+
+class ComputeBudgetExceeded(Exception):
+    """Raised when the per-experiment wall-clock budget is exceeded."""
+
+
+class PreflightFailed(Exception):
+    """Raised when the cheap preflight smoke-test catches a runtime error."""
+
+    def __init__(self, message: str, *, exception_class: str = "", traceback_str: str = "") -> None:
+        super().__init__(message)
+        self.exception_class = exception_class
+        self.traceback_str = traceback_str
+
+
+@contextlib.contextmanager
+def _compute_budget_alarm(budget_sec: float | None):
+    """Context manager that raises ComputeBudgetExceeded if budget_sec is exceeded.
+
+    Uses SIGALRM (POSIX only) when called on the main thread.  Silently skips
+    when budget_sec is None/zero, or when not on the main thread.
+    """
+    if budget_sec is None or budget_sec <= 0 or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def _handler(signum, frame):  # noqa: ARG001
+        raise ComputeBudgetExceeded(f"SIGALRM fired after {budget_sec:.0f}s budget")
+
+    old_handler = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(int(math.ceil(budget_sec)))
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 from autoresearch.config import ProjectConfig, ensure_project_dirs
 from autoresearch.data.holdout_vault import load_search_dataset
@@ -39,6 +81,7 @@ def run_experiment(
     experiment_config_path: Path,
     *,
     output_dir: Path | None = None,
+    compute_budget_sec: float | None = None,
 ) -> dict[str, Path]:
     """Run one deterministic experiment end to end."""
 
@@ -164,7 +207,7 @@ def run_experiment(
         hyperparameters.pop("model_script_path", None)
         hyperparameters.pop("script_sha256", None)
 
-    result = dispatch_model(
+    dispatch_kwargs: dict[str, Any] = dict(
         frame=frame,
         split_frame=split_frame,
         model_family=model_family,
@@ -177,6 +220,54 @@ def run_experiment(
         model_script_path=model_script_path,
         target_mode=config.target_mode,
     )
+
+    # ── Preflight smoke-test ──────────────────────────────────────────────────
+    if getattr(config, "preflight_enabled", True):
+        _run_preflight_smoke_test(frame, dispatch_kwargs, config)
+
+    # ── Full fit with optional wall-clock budget ──────────────────────────────
+    t_wall_start = time.perf_counter()
+    t_cpu_start = time.process_time()
+    fit_wall_seconds: float | None = None
+    fit_cpu_seconds: float | None = None
+    timed_out = False
+
+    effective_budget = compute_budget_sec if getattr(config, "compute_enforce", True) else None
+    try:
+        with _compute_budget_alarm(effective_budget):
+            result = dispatch_model(**dispatch_kwargs)
+    except ComputeBudgetExceeded:
+        fit_wall_seconds = time.perf_counter() - t_wall_start
+        timed_out = True
+        msg = (
+            f"Compute budget exceeded: ran {fit_wall_seconds:.1f}s, "
+            f"budget {effective_budget:.0f}s. "
+            "Reduce n_estimators / use early stopping / lower model complexity."
+        )
+        record_experiment(
+            config.registry_path,
+            experiment_id=experiment_id,
+            experiment_name=exp.get("experiment_name", "unknown"),
+            model_family=model_family,
+            target_strategy=target_strategy,
+            target_mode=config.target_mode,
+            preprocessing_summary={},
+            claim_cap_threshold=cap_threshold if cap_enabled else None,
+            status="failed",
+            parent_experiment_id=exp.get("parent_experiment_id") or None,
+            config_snapshot_path=None,
+            metrics_path=None,
+            artifacts={},
+            code_version=None,
+            fit_wall_seconds=fit_wall_seconds,
+            compute_budget_seconds=effective_budget,
+            timed_out=True,
+            notes=msg,
+        )
+        raise ComputeBudgetExceeded(msg)
+
+    fit_wall_seconds = time.perf_counter() - t_wall_start
+    fit_cpu_seconds = time.process_time() - t_cpu_start
 
     metrics = evaluate_predictions(
         result.predictions,
@@ -213,6 +304,11 @@ def run_experiment(
         "milestone_holdout_accessed": False,
     }
 
+    budget_util = (
+        round(fit_wall_seconds / effective_budget, 4)
+        if effective_budget and effective_budget > 0 and fit_wall_seconds is not None
+        else None
+    )
     metrics_payload = {
         **metrics,
         "experiment_id": experiment_id,
@@ -222,6 +318,13 @@ def run_experiment(
         "target_mode": config.target_mode,
         "preprocessing": config_snapshot["effective_preprocessing"],
         "model_notes": result.model_notes,
+        "timing": {
+            "fit_wall_seconds": round(fit_wall_seconds, 3) if fit_wall_seconds is not None else None,
+            "fit_cpu_seconds": round(fit_cpu_seconds, 3) if fit_cpu_seconds is not None else None,
+            "compute_budget_seconds": effective_budget,
+            "budget_utilisation": budget_util,
+            "timed_out": timed_out,
+        },
     }
 
     # Environment manifest
@@ -275,6 +378,10 @@ def run_experiment(
         metrics_path=metrics_path,
         artifacts=artifacts,
         code_version=env_manifest.get("git_sha"),
+        fit_wall_seconds=fit_wall_seconds,
+        fit_cpu_seconds=fit_cpu_seconds,
+        compute_budget_seconds=effective_budget,
+        timed_out=timed_out,
         notes=f"Experiment with {model_family}/{target_strategy}; milestone holdout not accessed.",
     )
     return artifacts
@@ -298,6 +405,61 @@ def _resolve_model_script_path(experiment_config_path: Path, model_cfg: dict[str
     if not raw:
         return None
     path = Path(str(raw))
-    if not path.is_absolute():
-        path = experiment_config_path.parent / path
-    return path.resolve()
+    if path.is_absolute():
+        return path.resolve()
+
+    # Anchor relative paths to the experiment config's directory (the proposal dir).
+    local_path = (experiment_config_path.parent / path).resolve()
+    if local_path.exists():
+        return local_path
+
+    # Fallback: try from the project root to handle repo-root-relative paths like
+    # "artifacts/tracks/..." stored in a proposal that was generated from a different cwd.
+    # This prevents the doubled-path bug where joining such a path onto an already-nested
+    # experiment_config_path.parent produces ".../artifacts/tracks/artifacts/tracks/...".
+    from autoresearch.config import PROJECT_ROOT
+    root_path = (PROJECT_ROOT / path).resolve()
+    if root_path.exists():
+        return root_path
+
+    return local_path
+
+
+def _run_preflight_smoke_test(
+    frame: Any,
+    dispatch_kwargs: dict[str, Any],
+    config: ProjectConfig,
+) -> None:
+    """Run model on a small sample to catch API/type/loss-compatibility errors quickly.
+
+    Raises PreflightFailed (with full traceback) if the model script errors on
+    the sample.  Skips gracefully if the model family has no script or if the
+    sample produces a degenerate split.
+    """
+    n = min(getattr(config, "preflight_sample_rows", 5000), len(frame))
+    if n <= 0:
+        return
+
+    sample = frame.sample(n=n, random_state=42)
+    # Filter split_frame to sampled rows so the splits are consistent.
+    sample_splits = dispatch_kwargs.get("split_frame")
+    if sample_splits is not None and "record_id" in sample_splits.columns:
+        sample_splits = sample_splits[sample_splits["record_id"].isin(sample["record_id"])]
+
+    effective_splits = (
+        sample_splits
+        if (sample_splits is not None and len(sample_splits) > 0)
+        else dispatch_kwargs.get("split_frame")
+    )
+    try:
+        from autoresearch.models.dispatcher import dispatch_model as _dm
+        _dm(**{**dispatch_kwargs, "frame": sample, "split_frame": effective_splits})
+    except Exception:
+        tb = _tb_module.format_exc()
+        import sys
+        exc = sys.exc_info()[1]
+        raise PreflightFailed(
+            str(exc),
+            exception_class=type(exc).__name__,
+            traceback_str=tb,
+        ) from exc

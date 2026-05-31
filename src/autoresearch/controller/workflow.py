@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
+import sqlite3
 from pathlib import Path
 import shutil
 import hashlib
+import traceback as _tb_module
 from typing import Any
 
 from autoresearch.comparison_runner import compare_experiments
@@ -25,7 +27,7 @@ from autoresearch.experiment_registry.registry import (
     update_proposal_status,
     upsert_branch,
 )
-from autoresearch.experiment_runner import run_experiment
+from autoresearch.experiment_runner import ComputeBudgetExceeded, PreflightFailed, run_experiment
 from autoresearch.evaluation.validation import validate_experiment_outputs
 from autoresearch.run_artifacts import next_iteration_dir, proposal_iteration_dir
 from autoresearch.utils.io import read_json, write_json
@@ -41,6 +43,34 @@ def enqueue_proposal_from_file(config: ProjectConfig, proposal_path: Path) -> di
     champion = _require_champion(config)
     parsed = read_json(proposal_path)
     parsed.setdefault("proposal_id", _proposal_id(parsed))
+
+    # ── Dedup: skip proposals whose proposal_id already exists in the registry ─
+    from autoresearch.experiment_registry.proposals import list_proposals as _list_proposals
+    _existing = {p["proposal_id"] for p in _list_proposals(config.registry_path)
+                 if p.get("status") not in {"failed", "duplicate"}}
+    if parsed["proposal_id"] in _existing:
+        record_proposal(
+            config.registry_path,
+            proposal_id=parsed["proposal_id"],
+            status="duplicate",
+            parent_experiment_id=parsed.get("parent_experiment_id"),
+            parent_branch_id=parsed.get("parent_branch_id"),
+            branch_id=parsed.get("branch_id"),
+            experiment_name=parsed.get("experiment_name"),
+            rationale=parsed.get("rationale"),
+            change_summary=parsed.get("change_summary"),
+            expected_benefit=parsed.get("expected_benefit"),
+            key_risk=parsed.get("key_risk"),
+            config=parsed.get("experiment_config"),
+            validation_errors=[],
+            llm_provider="manual_file",
+            llm_model=None,
+            prompt_path=None,
+            response_path=None,
+            proposal_path=proposal_path,
+            notes=f"Duplicate: proposal_id {parsed['proposal_id']!r} already exists in registry.",
+        )
+        return {"proposal_id": parsed["proposal_id"], "status": "duplicate", "validation_errors": []}
     iteration_dir = next_iteration_dir(config, parsed["proposal_id"])
     out_dir = iteration_dir / "proposal"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -75,9 +105,48 @@ def enqueue_proposal_from_file(config: ProjectConfig, proposal_path: Path) -> di
     return {"proposal_id": proposal["proposal_id"], "status": status, "validation_errors": errors}
 
 
+def _reconcile_stale_running_proposals(config: ProjectConfig) -> None:
+    """Flip any proposals stuck in 'running' past the stale threshold to 'failed'."""
+    stale_minutes = getattr(config, "running_stale_minutes", 30)
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=stale_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(config.registry_path) as con:
+        con.execute(
+            """
+            UPDATE proposals
+            SET status = 'failed',
+                updated_at = CURRENT_TIMESTAMP,
+                notes = 'Reconciled: stale running proposal (process likely died).'
+            WHERE status = 'running'
+            AND updated_at < ?
+            """,
+            (cutoff,),
+        )
+
+
+def _compute_experiment_budget(config: ProjectConfig) -> float | None:
+    """Compute the per-experiment wall-clock budget in seconds for the current run."""
+    if not getattr(config, "compute_enforce", True):
+        return None
+    base_min = getattr(config, "base_budget_minutes", 10)
+    inc_min = getattr(config, "budget_increment_minutes", 5)
+    per_inc = getattr(config, "experiments_per_increment", 5)
+    # Count prior experiments in this run's registry
+    n_prior = 0
+    if config.registry_path.exists():
+        try:
+            with sqlite3.connect(config.registry_path) as con:
+                row = con.execute("SELECT COUNT(*) FROM experiments").fetchone()
+                n_prior = int(row[0]) if row else 0
+        except Exception:
+            pass
+    budget_minutes = base_min + inc_min * (n_prior // per_inc)
+    return float(budget_minutes * 60)
+
+
 def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
     """Run the next validated proposal and gate it against the official champion."""
 
+    _reconcile_stale_running_proposals(config)
     champion = _require_champion(config)
     proposal = next_queued_proposal(config.registry_path)
     if proposal is None:
@@ -89,6 +158,7 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
     proposal_dir = iteration_dir / "proposal"
     proposal_dir.mkdir(parents=True, exist_ok=True)
 
+    compute_budget_sec = _compute_experiment_budget(config)
     try:
         outputs = _run_validated_experiment_attempts(
             config,
@@ -96,6 +166,7 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
             champion["champion_id"],
             proposal_dir,
             iteration_dir,
+            compute_budget_sec=compute_budget_sec,
         )
         experiment_id = read_json(outputs["config_snapshot"])["experiment_id"]
         update_proposal_status(config.registry_path, proposal_id, "completed", experiment_id=experiment_id)
@@ -190,6 +261,8 @@ def _run_validated_experiment_attempts(
     champion_id: str,
     proposal_dir: Path,
     iteration_dir: Path,
+    *,
+    compute_budget_sec: float | None = None,
 ) -> dict[str, Path]:
     """Run a proposal script, validating outputs before comparison.
 
@@ -200,6 +273,11 @@ def _run_validated_experiment_attempts(
     """
 
     last_report: dict[str, Any] | None = None
+    # Track per-attempt numeric lifts for auto-abandon check.
+    attempt_lifts: list[float | None] = []
+    noise_eps = getattr(config, "repair_noise_floor_eps", 0.002)
+    auto_abandon = getattr(config, "repair_auto_abandon_enabled", True)
+
     for attempt in range(1, 4):
         attempt_script = proposal_dir / f"model_attempt_{attempt}.py"
         cfg = dict(proposal["config"])
@@ -218,11 +296,39 @@ def _run_validated_experiment_attempts(
         cfg["model"] = model_cfg
         experiment_config_path = proposal_dir / f"experiment_config_attempt_{attempt}.toml"
         experiment_config_path.write_text(_to_toml(cfg), encoding="utf-8")
-        outputs = run_experiment(
-            config,
-            experiment_config_path,
-            output_dir=iteration_dir / "experiment" / f"attempt_{attempt}",
-        )
+
+        # ── Run experiment, catching compute/preflight failures ────────────────
+        try:
+            outputs = run_experiment(
+                config,
+                experiment_config_path,
+                output_dir=iteration_dir / "experiment" / f"attempt_{attempt}",
+                compute_budget_sec=compute_budget_sec,
+            )
+        except (ComputeBudgetExceeded, PreflightFailed) as exc:
+            error_type = "compute_budget_exceeded" if isinstance(exc, ComputeBudgetExceeded) else "runtime_exception"
+            tb_str = getattr(exc, "traceback_str", _tb_module.format_exc())
+            exc_report: dict[str, Any] = {
+                "attempt": attempt,
+                "valid": False,
+                "reason": str(exc)[:400],
+                "error_type": error_type,
+                "exception_class": type(exc).__name__,
+                "traceback": tb_str[-4000:],
+                "checks": [],
+            }
+            attempt_lifts.append(None)
+            last_report = exc_report
+            if attempt < 3:
+                _write_repair_request(proposal_dir, attempt + 1, exc_report)
+                next_script = proposal_dir / f"model_attempt_{attempt + 1}.py"
+                if not next_script.exists():
+                    raise ExperimentNeedsRepair(
+                        f"Attempt {attempt} failed with {type(exc).__name__}: {str(exc)[:200]}. "
+                        f"Write {next_script} and rerun the proposal."
+                    )
+            continue
+
         report = _validate_attempt_outputs(config, champion_id, outputs, attempt)
         validation_path = Path(outputs["config_snapshot"]).parent / "validation_report.json"
         write_json(validation_path, report)
@@ -243,7 +349,25 @@ def _run_validated_experiment_attempts(
             config, champion_id, experiment_id, report,
             comparison_dir=iteration_dir / f"failed_attempt_{attempt}_comparison",
         )
+        # Record the numeric lift for auto-abandon check.
+        raw_lift = report.get("lift_summary", {}) or {}
+        attempt_lifts.append(raw_lift.get("lift") if raw_lift else None)
         last_report = report
+
+        # ── Auto-abandon: two consecutive attempts at/below noise floor ────────
+        if auto_abandon and len(attempt_lifts) >= 2:
+            last_two = attempt_lifts[-2:]
+            if all(v is not None and abs(v) < noise_eps for v in last_two):
+                abandon_reason = (
+                    "Auto-abandoned: two consecutive attempts at/below noise floor "
+                    f"(|lift| < {noise_eps}); structural change required."
+                )
+                last_report = dict(last_report)
+                last_report["reason"] = abandon_reason
+                raise ValueError(
+                    f"Experiment output validation failed after repair attempts: {abandon_reason}"
+                )
+
         if attempt < 3:
             _write_repair_request(proposal_dir, attempt + 1, report)
             next_script = proposal_dir / f"model_attempt_{attempt + 1}.py"
@@ -335,9 +459,11 @@ def _artifact_path(config: ProjectConfig, experiment_id: str, artifact_type: str
 
 
 def _write_repair_request(proposal_dir: Path, next_attempt: int, report: dict[str, Any]) -> Path:
-    payload = {
+    error_type = report.get("error_type", "positive_lift_failed")
+    payload: dict[str, Any] = {
         "next_attempt": next_attempt,
         "write_script": f"model_attempt_{next_attempt}.py",
+        "error_type": error_type,
         "reason": report.get("reason"),
         "failed_checks": [check for check in report.get("checks", []) if not check.get("passed")],
         "metrics_summary": report.get("metrics_summary"),
@@ -349,6 +475,9 @@ def _write_repair_request(proposal_dir: Path, next_attempt: int, report: dict[st
             "on the fix strategy."
         ),
     }
+    if error_type in ("runtime_exception", "compute_budget_exceeded"):
+        payload["exception_class"] = report.get("exception_class", "")
+        payload["traceback"] = report.get("traceback", "")
     path = proposal_dir / f"repair_request_{next_attempt}.json"
     write_json(path, payload)
     return path
