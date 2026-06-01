@@ -130,6 +130,7 @@ CREATE TABLE IF NOT EXISTS research_nodes (
     expected_benefit TEXT,
     key_risk TEXT,
     tags_json TEXT,
+    tree_json TEXT,
     screening_json TEXT,
     metrics_json TEXT,
     guidance TEXT,
@@ -175,6 +176,7 @@ def init_registry(path: Path) -> Path:
         con.executescript(SCHEMA)
         _migrate_experiments(con)
         _migrate_comparisons(con)
+        _migrate_research_nodes(con)
 
     from autoresearch.config import PROJECT_ROOT
     from autoresearch.utils.integrity import write_integrity_manifest
@@ -219,6 +221,18 @@ def _migrate_comparisons(con: sqlite3.Connection) -> None:
     for column, definition in columns.items():
         if column not in existing:
             con.execute(f"ALTER TABLE comparisons ADD COLUMN {column} {definition}")
+
+
+def _migrate_research_nodes(con: sqlite3.Connection) -> None:
+    """Add research-tree metadata columns to older per-run registries."""
+
+    existing = {row[1] for row in con.execute("PRAGMA table_info(research_nodes)").fetchall()}
+    columns = {
+        "tree_json": "TEXT",
+    }
+    for column, definition in columns.items():
+        if column not in existing:
+            con.execute(f"ALTER TABLE research_nodes ADD COLUMN {column} {definition}")
 
 
 def registry_counts(path: Path) -> dict[str, int]:

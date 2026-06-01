@@ -39,7 +39,7 @@ def test_session_wait_pause_resume_stop(tmp_path: Path) -> None:
     assert list_sessions(config.registry_path)[0]["state"] == "completed"
 
 
-def test_duplicate_proposal_is_rejected_and_summarised(tmp_path: Path) -> None:
+def test_second_proposal_is_deferred_while_one_is_queued(tmp_path: Path) -> None:
     config = _ready_config(tmp_path)
     config.handoff_proposal_inbox_dir.mkdir(parents=True)
     first = _valid_proposal()
@@ -55,6 +55,6 @@ def test_duplicate_proposal_is_rejected_and_summarised(tmp_path: Path) -> None:
     proposals = list_proposals(config.registry_path)
 
     assert first_summary["valid_count"] == 1
-    assert second_summary["duplicate_count"] == 1
-    assert any(item["status"] == "duplicate" for item in proposals)
-    assert (config.handoff_results_dir / "latest_nonpromotion_summary.md").exists()
+    assert second_summary["deferred_count"] == 1
+    assert not any(item["status"] == "duplicate" for item in proposals)
+    assert (config.handoff_proposal_inbox_dir / "second.json").exists()

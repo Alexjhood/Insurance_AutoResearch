@@ -30,6 +30,7 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
     all_proposals = list_proposals(config.registry_path)
     proposals = all_proposals[:10]
     research_nodes = list_research_nodes(config.registry_path, limit=25)
+    compact_nodes = _compact_research_nodes(research_nodes)
 
     raw_cycle = read_json(latest_cycle_path) if latest_cycle_path.exists() else None
     latest_cycle_result = _flatten_cycle_result(raw_cycle) if raw_cycle else None
@@ -55,7 +56,8 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
                 "Do not repeat failed configurations; use failures as evidence for materially different child ideas.",
                 "The official champion remains the evaluation parent unless the proposal schema says otherwise.",
             ],
-            "recent_nodes": _compact_research_nodes(research_nodes),
+            "tree_policy": _build_tree_policy(champion, compact_nodes),
+            "recent_nodes": compact_nodes,
         },
         "proposal_count": len(all_proposals),
         "latest_cycle_result": latest_cycle_result,
@@ -176,6 +178,7 @@ def _compact_research_nodes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "key_risk",
         "metrics",
         "guidance",
+        "tree_metadata",
     ]
     result = []
     for row in rows:
@@ -186,3 +189,124 @@ def _compact_research_nodes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 item[text_key] = value[:220] + "…"
         result.append(item)
     return result
+
+
+def _build_tree_policy(champion: dict[str, Any] | None, nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return compact active-run tree-walk guidance without prescribing model types."""
+
+    chronological = list(reversed(nodes))
+    axis_counts: dict[str, int] = {}
+    for node in chronological:
+        axis = _node_axis(node)
+        if axis:
+            axis_counts[axis] = axis_counts.get(axis, 0) + 1
+
+    recent_axis = None
+    streak = 0
+    for node in reversed(chronological):
+        axis = _node_axis(node)
+        if not axis:
+            break
+        if recent_axis is None:
+            recent_axis = axis
+            streak = 1
+            continue
+        if axis != recent_axis:
+            break
+        streak += 1
+
+    actions: list[dict[str, Any]] = []
+    active_nodes = [
+        node for node in nodes
+        if node.get("status") in {"awaiting_decision", "promoted", "completed", "screened"}
+        or node.get("experiment_id")
+    ]
+    failed_nodes = [
+        node for node in nodes
+        if node.get("outcome_type") in {"clear_loser", "failed_run", "needs_repair", "system_error"}
+        or node.get("status") in {"rejected", "failed", "needs_repair"}
+    ]
+    champion_node = _find_champion_node(champion, nodes)
+
+    if not nodes:
+        actions.append({
+            "action_id": "start_first_root",
+            "tree_action": "new_root",
+            "requires_parent_node_id": False,
+            "parent_node_id": None,
+            "reason": "No active-run research nodes exist yet; start a first explicit hypothesis.",
+        })
+    elif streak >= 2:
+        actions.append({
+            "action_id": f"rotate_after_{recent_axis}_streak",
+            "tree_action": "rotate_axis",
+            "requires_parent_node_id": True,
+            "parent_node_id": (active_nodes[0]["node_id"] if active_nodes else nodes[0]["node_id"]),
+            "avoid_axis": recent_axis,
+            "reason": "Recent nodes repeat the same exploration axis; choose a different axis with a clear learning goal.",
+        })
+
+    if champion_node:
+        actions.append({
+            "action_id": "extend_current_champion",
+            "tree_action": "exploit_champion",
+            "requires_parent_node_id": True,
+            "parent_node_id": champion_node["node_id"],
+            "reason": "Build from the node that produced the current champion if there is direct diagnostic evidence.",
+        })
+    elif active_nodes:
+        actions.append({
+            "action_id": "extend_recent_successful_node",
+            "tree_action": "extend_node",
+            "requires_parent_node_id": True,
+            "parent_node_id": active_nodes[0]["node_id"],
+            "reason": "Extend a completed or screened node only if the child changes the hypothesis, not just a small dial.",
+        })
+
+    if failed_nodes:
+        actions.append({
+            "action_id": "learn_from_recent_failure",
+            "tree_action": "revisit_failure",
+            "requires_parent_node_id": True,
+            "parent_node_id": failed_nodes[0]["node_id"],
+            "reason": "Use a recent failure as evidence for a materially different child idea.",
+        })
+
+    if len(axis_counts) < 3 and nodes:
+        actions.append({
+            "action_id": "open_underexplored_axis",
+            "tree_action": "new_root",
+            "requires_parent_node_id": False,
+            "parent_node_id": None,
+            "reason": "The active-run tree is still narrow; a genuinely different axis can add useful information.",
+        })
+
+    return {
+        "scope": "active run only",
+        "one_proposal_per_context_refresh": True,
+        "axis_counts": axis_counts,
+        "recent_axis_streak": {"axis": recent_axis, "count": streak},
+        "recommended_actions": actions[:4],
+        "override_policy": (
+            "If no recommended action fits, set selected_tree_action_id to the closest action "
+            "and provide tree_policy_override_rationale."
+        ),
+    }
+
+
+def _node_axis(node: dict[str, Any]) -> str | None:
+    metadata = node.get("tree_metadata") or {}
+    axis = metadata.get("exploration_axis")
+    return str(axis) if axis else None
+
+
+def _find_champion_node(champion: dict[str, Any] | None, nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not champion:
+        return None
+    champion_id = champion.get("champion_id")
+    if not champion_id:
+        return None
+    for node in nodes:
+        if node.get("experiment_id") == champion_id:
+            return node
+    return None

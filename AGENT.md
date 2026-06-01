@@ -58,7 +58,9 @@ Everything you build develops relative to this. The first real model you propose
 
 The research loop rewards **many small, well-motivated improvements** over a few large jumps. When you choose what to try next:
 
-- **Use the active run's research tree.** The handoff context contains a `research_tree` for this run only. Choose a `research_parent_node_id` when a new idea builds on a prior hypothesis, near-miss, auto-rejection, or informative failure. Use `null` for a genuinely new line of attack. Do not use other runs as proposal evidence unless the user explicitly asks for cross-run analysis.
+- **Use the active run's research tree.** The handoff context contains a `research_tree` for this run only. Choose a `research_parent_node_id` when a new idea builds on a prior hypothesis, near-miss, auto-rejection, or informative failure. Use `null` only for a genuinely new line of attack. Do not use other runs as proposal evidence unless the user explicitly asks for cross-run analysis.
+- **Follow the tree policy.** `research_tree.tree_policy.recommended_actions` gives a small set of active-run tree-walk options. Pick one with `selected_tree_action_id`, set `tree_action`, and explain the parent choice in `parent_rationale`. If you ignore the recommendation, include `tree_policy_override_rationale`.
+- **Submit one idea per context refresh.** The framework ingests at most one valid proposal while any proposal is queued or awaiting decision. Extra JSON files stay in the inbox as `deferred_pending_context_refresh`; refresh context before relying on them.
 - **Bias toward breadth over depth.** Try a range of different ideas before doubling down on any one direction. A run that explores many distinct hypotheses in a session is better than one that iterates narrowly.
 - **Prioritise variety of approach, not just variety of dial.** Small steps are fine and similar space is fine to revisit — but the *priority* is covering genuinely different modelling paradigms: different model families (linear/GLM, single trees, bagged trees, boosted trees, GAMs, nearest-neighbour, neural), different target framings (direct pure-premium vs frequency–severity vs two-stage, rate-target vs total-target), and different feature representations (raw, binned, interacted, encoded). Re-tuning one estimator's hyperparameters is the *lowest-information* move available — reach for it only when a distinct approach has been ruled out, not as the default next step. Past runs have stalled by submitting ~10 near-identical boosted-tree variants in a row; do not repeat that pattern.
 - **Analyse the problem before tuning it.** Before proposing, spend a little effort understanding *why* the champion misses: look at calibration residuals by segment (region, age band, vehicle type, exposure), check where the largest errors concentrate, and check what signal a simple model is and isn't capturing. A targeted diagnostic that tells you *where* the model is wrong is worth more than a blind hyperparameter sweep. This is especially important at a plateau (see routine D) — a plateau is a signal to *investigate*, not to tune harder.
@@ -179,7 +181,7 @@ Evaluates on the fixed `search_validation` split with 30 bootstrap resamples. CI
 
 ### Single-split screening
 
-Before the expensive CV/bootstrap comparison, every valid challenger is screened once on the full `search_validation` split. This is a low hurdle, not a promotion gate: clearly worse challengers are auto-rejected, while similar or better challengers proceed to full comparison and LLM decision. Auto-rejections are still written to the research tree and non-promotion summaries; read them as evidence for the next proposal.
+Before the expensive CV/bootstrap comparison, every valid challenger is screened once on the full `search_validation` split. This is a low hurdle, not a promotion gate: clearly worse challengers are auto-rejected, while similar or better challengers proceed to full comparison and LLM decision. Auto-rejections still write a cheap diagnostic comparison report using a single paired eval-split sample; this report is for analysis only and is not recorded as an official pending comparison. Auto-rejections are also written to the research tree and non-promotion summaries; read them as evidence for the next proposal.
 
 ---
 
@@ -264,7 +266,9 @@ The agent schema in `context/latest_context.json` lists *all* historical target 
 
 ### B. Proposal-schema first (prevents inbox ingestion failures)
 
-The inbox JSON has a strict schema. Before writing your first proposal in a fresh run, read `proposal_inbox/proposal_template.json` *once*. The required top-level keys include `parent_experiment_id`, `parent_branch_id`, `branch_action`, `experiment_config`, `change_summary`, `expected_benefit`, `key_risk`, `rationale`, `proposal_id`, `experiment_name`. Slimmer JSON is rejected at ingestion and counts as a wasted cycle.
+The inbox JSON has a strict schema. Before writing your first proposal in a fresh run, read `proposal_inbox/proposal_template.json` *once*. The required top-level keys include `parent_experiment_id`, `parent_branch_id`, `branch_action`, `experiment_config`, `change_summary`, `expected_benefit`, `key_risk`, `rationale`, `proposal_id`, `experiment_name`, `tree_action`, `selected_tree_action_id`, `parent_rationale`, `exploration_axis`, `approach_family`, `target_framing`, `feature_representation`, and `expected_learning`. Slimmer JSON is rejected at ingestion and counts as a wasted cycle.
+
+Tree fields are behavioural metadata, not prescriptions for implementation. Use them to describe what the experiment is trying to learn and where it sits in this run's tree. `tree_action=new_root` may use `research_parent_node_id=null`; every other `tree_action` must point to a valid node in this run's `research_tree`.
 
 ### C. Inbox audit (prevents re-submitting stale stubs)
 
@@ -300,7 +304,7 @@ Rule of thumb: if you have 2 consecutive same-axis experiments at the plateau, t
 
 ### G. Axis rotation & approach diversity
 
-Track which **axis** each experiment changes (hyperparameter / preprocessing / target / features / family). After 2 same-axis experiments — promoted or not — rotate to a different axis. This prevents the failure mode where 3+ consecutive experiments all tune the same dial.
+Track which **axis** each experiment changes (`model_family`, `target_framing`, `feature_representation`, `calibration`, `hyperparameter`, `diagnostic_probe`, `data_slice`, `ensemble`, or `other`). After 2 same-axis experiments — promoted or not — rotate to a different axis. This prevents the failure mode where 3+ consecutive experiments all tune the same dial. The framework now computes this from proposal metadata and surfaces recommendations in `research_tree.tree_policy`.
 
 **Stronger rule for model family / paradigm (the most common waste):** maintain a short ledger in your research log of which *distinct approaches* you have tried, along these axes:
 

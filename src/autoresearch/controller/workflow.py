@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 import json
 import sqlite3
 from pathlib import Path
@@ -15,7 +16,12 @@ from autoresearch.comparison_runner import compare_experiments, screen_challenge
 from autoresearch.config import ProjectConfig, ensure_project_dirs
 from autoresearch.milestone import evaluate_on_holdout
 from autoresearch.controller.context import build_llm_context
-from autoresearch.controller.proposal_schema import allowed_search_space, normalise_proposal, validate_proposal
+from autoresearch.controller.proposal_schema import (
+    TREE_ACTIONS,
+    allowed_search_space,
+    normalise_proposal,
+    validate_proposal,
+)
 
 from autoresearch.experiment_registry.registry import (
     get_official_champion,
@@ -162,6 +168,36 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
         raise ValueError("No validated proposals are queued")
 
     proposal_id = proposal["proposal_id"]
+    if proposal.get("parent_experiment_id") != champion["champion_id"]:
+        reason = (
+            f"Proposal parent {proposal.get('parent_experiment_id')!r} is stale; "
+            f"current champion is {champion['champion_id']!r}."
+        )
+        update_proposal_status(config.registry_path, proposal_id, "stale_parent", notes=reason)
+        _upsert_proposal_node(
+            config,
+            proposal,
+            status="stale_parent",
+            outcome_type="stale_parent",
+            guidance="Refresh context and redesign the proposal from the current champion before running it.",
+        )
+        _write_nonpromotion_summary(
+            config,
+            proposal_id=proposal_id,
+            outcome_type="stale_parent",
+            reason=reason,
+            quantitative_signal={"current_champion_id": champion["champion_id"]},
+        )
+        return {
+            "proposal_id": proposal_id,
+            "experiment_id": None,
+            "comparison_id": None,
+            "decision": "auto_reject",
+            "auto_rejected": True,
+            "auto_reject_reason": reason,
+            "metrics_summary": {},
+        }
+
     update_proposal_status(config.registry_path, proposal_id, "running", notes="Deterministic execution started.")
     _upsert_proposal_node(config, proposal, status="running")
     iteration_dir = proposal_iteration_dir(config, proposal)
@@ -212,6 +248,12 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
             )
             if not screening.get("passed", False):
                 reason = screening.get("reason", "Failed single-split screen.")
+                diagnostic_comparison = _write_screening_failure_comparison_report(
+                    config,
+                    champion_id=champion["champion_id"],
+                    challenger_id=experiment_id,
+                    iteration_dir=iteration_dir,
+                )
                 update_proposal_status(
                     config.registry_path,
                     proposal_id,
@@ -248,6 +290,9 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
                     "auto_rejected": True,
                     "auto_reject_reason": reason,
                     "screening_report": str(screening_path),
+                    "comparison_report": str(diagnostic_comparison.get("html_report", "")),
+                    "diagnostic_comparison_report": str(diagnostic_comparison.get("promotion_report", "")),
+                    "diagnostic_gate_mode": "single_partition",
                     "metrics_summary": _screening_metrics_summary(screening),
                 }
 
@@ -355,25 +400,66 @@ def _validate_and_normalise(
     parsed.setdefault("proposal_id", _proposal_id(parsed))
     if not isinstance(parsed.get("experiment_config"), dict):
         parsed["experiment_config"] = {}
-    space = allowed_search_space(config, build_llm_context(config).get("agent_schema"))
+    context = build_llm_context(config)
+    space = allowed_search_space(config, context.get("agent_schema"))
     errors = validate_proposal(parsed, space)
     if parsed.get("parent_experiment_id") != champion["champion_id"]:
         errors.append("parent_experiment_id must match the current official champion")
     parent_branch = parsed.get("parent_branch_id") or champion["branch_id"]
     if parent_branch != champion["branch_id"]:
         errors.append("parent_branch_id must match the current official champion branch")
-    research_parent = parsed.get("research_parent_node_id") or parsed.get("parent_node_id")
-    if research_parent is not None:
-        if not isinstance(research_parent, str) or not research_parent.strip():
-            errors.append("research_parent_node_id must be a non-empty string or null")
-        else:
-            node_ids = {node["node_id"] for node in list_research_nodes(config.registry_path)}
-            if research_parent not in node_ids:
-                errors.append("research_parent_node_id must refer to a node in this active run's research_tree")
+    _validate_tree_navigation(config, parsed, context, errors)
     branch_action = parsed.get("branch_action", "extend_current")
     branch_id = parsed.get("branch_id") or (parsed.get("proposal_id") if branch_action == "new_branch" else parent_branch)
     proposal = normalise_proposal(parsed, branch_id=branch_id, parent_branch_id=parent_branch)
     return proposal, errors
+
+
+def _validate_tree_navigation(
+    config: ProjectConfig,
+    parsed: dict[str, Any],
+    context: dict[str, Any],
+    errors: list[str],
+) -> None:
+    """Validate explicit active-run tree-walk fields."""
+
+    tree_action = parsed.get("tree_action")
+    research_parent = parsed.get("research_parent_node_id") or parsed.get("parent_node_id")
+    nodes = list_research_nodes(config.registry_path)
+    node_ids = {node["node_id"] for node in nodes}
+
+    if research_parent is not None:
+        if not isinstance(research_parent, str) or not research_parent.strip():
+            errors.append("research_parent_node_id must be a non-empty string or null")
+        elif research_parent not in node_ids:
+            errors.append("research_parent_node_id must refer to a node in this active run's research_tree")
+
+    if tree_action in TREE_ACTIONS and tree_action != "new_root" and not research_parent:
+        errors.append(f"tree_action={tree_action} requires research_parent_node_id")
+
+    policy = (context.get("research_tree") or {}).get("tree_policy") or {}
+    recommended = policy.get("recommended_actions") or []
+    recommended_ids = {str(item.get("action_id")) for item in recommended if item.get("action_id")}
+    selected = parsed.get("selected_tree_action_id")
+    selected_recommendation = next((item for item in recommended if item.get("action_id") == selected), None)
+    if (
+        selected_recommendation
+        and selected_recommendation.get("tree_action") != tree_action
+        and not parsed.get("tree_policy_override_rationale")
+    ):
+        errors.append("tree_action must match selected_tree_action_id or include tree_policy_override_rationale")
+    if (
+        tree_action == "new_root"
+        and len(nodes) >= 3
+        and not parsed.get("tree_policy_override_rationale")
+        and not (selected_recommendation and selected_recommendation.get("tree_action") == "new_root")
+    ):
+        errors.append(
+            "tree_action=new_root after the early tree requires tree_policy_override_rationale "
+            "explaining the materially new axis"
+        )
+    if recommended_ids and selected not in recommended_ids and not parsed.get("tree_policy_override_rationale"):
+        errors.append("selected_tree_action_id must match research_tree.tree_policy or include tree_policy_override_rationale")
 
 
 def _run_validated_experiment_attempts(
@@ -573,6 +659,54 @@ def _attach_failed_attempt_comparison(
     return report
 
 
+def _write_screening_failure_comparison_report(
+    config: ProjectConfig,
+    *,
+    champion_id: str,
+    challenger_id: str,
+    iteration_dir: Path,
+) -> dict[str, Path]:
+    """Write a cheap diagnostic report for challengers that fail screening.
+
+    The low-hurdle screen has already established that the challenger is a
+    clear loser, so this report is for diagnosis only. It uses one paired
+    sample on the ordinary eval split and is not recorded as an official
+    pending comparison.
+    """
+
+    out_dir = iteration_dir / "comparison"
+    diagnostic_config = replace(
+        config,
+        gate_mode="single_partition",
+        repeated_resamples=1,
+        bootstrap_iterations=1,
+        resample_fraction=1.0,
+        escalation_partitions=0,
+    )
+    try:
+        return compare_experiments(
+            diagnostic_config,
+            champion_id,
+            challenger_id,
+            output_dir=out_dir,
+            record=False,
+        )
+    except Exception as exc:
+        error_path = out_dir / "diagnostic_comparison_error.json"
+        error_path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(
+            error_path,
+            {
+                "champion_id": champion_id,
+                "challenger_id": challenger_id,
+                "reason": str(exc),
+                "gate_mode": "single_partition",
+                "repeated_resamples": 1,
+            },
+        )
+        return {"diagnostic_comparison_error": error_path}
+
+
 def _artifact_path(config: ProjectConfig, experiment_id: str, artifact_type: str) -> Path:
     for artifact in list_artifacts(config.registry_path, experiment_id):
         if artifact["artifact_type"] == artifact_type:
@@ -654,6 +788,18 @@ def _upsert_proposal_node(
     tags = proposal.get("exploration_tags")
     if tags is not None and not isinstance(tags, list):
         tags = [str(tags)]
+    tree_metadata = {
+        "tree_action": proposal.get("tree_action"),
+        "selected_tree_action_id": proposal.get("selected_tree_action_id"),
+        "parent_rationale": proposal.get("parent_rationale"),
+        "exploration_axis": proposal.get("exploration_axis"),
+        "approach_family": proposal.get("approach_family"),
+        "target_framing": proposal.get("target_framing"),
+        "feature_representation": proposal.get("feature_representation"),
+        "expected_learning": proposal.get("expected_learning"),
+        "tree_policy_override_rationale": proposal.get("tree_policy_override_rationale"),
+    }
+    tree_metadata = {key: value for key, value in tree_metadata.items() if value is not None}
     upsert_research_node(
         config.registry_path,
         node_id=proposal_id,
@@ -670,6 +816,7 @@ def _upsert_proposal_node(
         expected_benefit=proposal.get("expected_benefit"),
         key_risk=proposal.get("key_risk"),
         tags=tags,
+        tree_metadata=tree_metadata,
         screening=screening,
         metrics=metrics,
         guidance=guidance,

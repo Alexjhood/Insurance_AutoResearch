@@ -7,7 +7,13 @@ from autoresearch.controller.champion import initialise_official_champion
 from autoresearch.controller.handoff import export_context_bundle, inbox_status, ingest_proposals, write_proposal_template
 from autoresearch.controller.proposal_schema import allowed_search_space, validate_proposal
 from autoresearch.controller.workflow import ExperimentNeedsRepair, run_next_queued_proposal
-from autoresearch.experiment_registry.registry import init_registry, list_proposals, list_research_nodes, record_experiment
+from autoresearch.experiment_registry.registry import (
+    init_registry,
+    list_proposals,
+    list_research_nodes,
+    record_experiment,
+    set_official_champion,
+)
 from autoresearch.experiment_runner import run_experiment
 from tests.test_runner import _make_config as _config, _write_fixtures
 
@@ -40,6 +46,15 @@ def _valid_proposal(parent_id: str = "direct") -> dict:
         "proposal_id": "handoff_valid_1",
         "parent_experiment_id": parent_id,
         "parent_branch_id": "main",
+        "tree_action": "new_root",
+        "research_parent_node_id": None,
+        "selected_tree_action_id": "start_first_root",
+        "parent_rationale": "This starts a first active-run hypothesis.",
+        "exploration_axis": "model_family",
+        "approach_family": "baseline check",
+        "target_framing": "direct_pure_premium",
+        "feature_representation": "raw",
+        "expected_learning": "Verify the queue and evaluation loop with a simple baseline.",
         "branch_action": "new_branch",
         "experiment_name": "handoff_global_mean_2",
         "rationale": "Run a second global-mean baseline.",
@@ -164,6 +179,86 @@ def test_ingest_proposals_moves_valid_and_invalid_files(tmp_path: Path) -> None:
     assert any(node["proposal_id"] == "handoff_valid_1" for node in list_research_nodes(config.registry_path))
     assert status["processed_valid_count"] == 1
     assert status["processed_invalid_count"] == 1
+
+
+def test_batch_ingest_defers_second_valid_until_context_refresh(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _record_direct(config)
+    initialise_official_champion(config)
+    config.metadata_dir.mkdir(parents=True, exist_ok=True)
+    (config.metadata_dir / "agent_schema.json").write_text(
+        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]}',
+        encoding="utf-8",
+    )
+    first = _valid_proposal()
+    second = _valid_proposal()
+    second["proposal_id"] = "handoff_valid_2"
+    second["experiment_name"] = "handoff_global_mean_3"
+    second["experiment_config"]["experiment_name"] = "handoff_global_mean_3"
+    config.handoff_proposal_inbox_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_proposal_inbox_dir / "first.json").write_text(json.dumps(first), encoding="utf-8")
+    (config.handoff_proposal_inbox_dir / "second.json").write_text(json.dumps(second), encoding="utf-8")
+
+    summary = ingest_proposals(config)
+    proposals = list_proposals(config.registry_path)
+
+    assert summary["valid_count"] == 1
+    assert summary["deferred_count"] == 1
+    assert len([item for item in proposals if item["status"] == "validated"]) == 1
+    assert (config.handoff_proposal_inbox_dir / "second.json").exists()
+
+
+def test_tree_action_requires_parent_for_non_root(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _record_direct(config)
+    initialise_official_champion(config)
+    config.metadata_dir.mkdir(parents=True, exist_ok=True)
+    (config.metadata_dir / "agent_schema.json").write_text(
+        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]}',
+        encoding="utf-8",
+    )
+    proposal = _valid_proposal()
+    proposal["tree_action"] = "extend_node"
+    proposal["selected_tree_action_id"] = "start_first_root"
+    config.handoff_proposal_inbox_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_proposal_inbox_dir / "proposal.json").write_text(json.dumps(proposal), encoding="utf-8")
+
+    summary = ingest_proposals(config)
+
+    assert summary["invalid_count"] == 1
+    assert any("requires research_parent_node_id" in err for err in summary["results"][0]["validation_errors"])
+
+
+def test_stale_parent_is_auto_rejected_before_execution(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _record_direct(config)
+    initialise_official_champion(config)
+    config.metadata_dir.mkdir(parents=True, exist_ok=True)
+    (config.metadata_dir / "agent_schema.json").write_text(
+        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]}',
+        encoding="utf-8",
+    )
+    config.handoff_proposal_inbox_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_proposal_inbox_dir / "proposal.json").write_text(
+        json.dumps(_valid_proposal()),
+        encoding="utf-8",
+    )
+    ingest_proposals(config)
+    set_official_champion(
+        config.registry_path,
+        champion_id="new_champion",
+        branch_id="main",
+        reason="test champion moved",
+        action="promote",
+    )
+
+    result = run_next_queued_proposal(config)
+    proposal = list_proposals(config.registry_path)[0]
+    nodes = list_research_nodes(config.registry_path)
+
+    assert result["decision"] == "auto_reject"
+    assert proposal["status"] == "stale_parent"
+    assert any(node["node_id"] == "handoff_valid_1" and node["outcome_type"] == "stale_parent" for node in nodes)
 
 
 def test_validation_failure_writes_repair_request(tmp_path: Path) -> None:
@@ -387,6 +482,11 @@ def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=Non
 
     assert result["decision"] == "auto_reject"
     assert result["comparison_id"] is None
+    assert Path(result["comparison_report"]).exists()
+    diagnostic_report = json.loads(Path(result["diagnostic_comparison_report"]).read_text(encoding="utf-8"))
+    assert diagnostic_report["gate_mode"] == "single_partition"
+    assert diagnostic_report["comparison_summary"]["n_resamples"] == 1
+    assert diagnostic_report["bootstrap_summary"]["bootstrap_iterations"] == 1
     assert proposals[0]["status"] == "rejected"
     assert any(node["node_id"] == "clear_loser_1" and node["outcome_type"] == "clear_loser" for node in nodes)
     assert (config.handoff_results_dir / "latest_nonpromotion_summary.md").exists()

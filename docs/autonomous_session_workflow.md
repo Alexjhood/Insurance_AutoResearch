@@ -47,13 +47,40 @@ run-session-cycle`. After three failed attempts, the proposal is failed.
 ## Research Tree And Screening
 
 Each run maintains its own research tree in that run's `registry.sqlite`. The
-tree records proposal nodes, their optional `research_parent_node_id`, outcome,
-screening metrics, and guidance for later proposals. Context export only reads
-the active run's tree; it does not search other tracks or runs.
+tree records proposal nodes, explicit tree-walk metadata, their optional
+`research_parent_node_id`, outcome, screening metrics, and guidance for later
+proposals. Context export only reads the active run's tree; it does not search
+other tracks or runs.
+
+The context also includes `research_tree.tree_policy.recommended_actions`. A
+proposal must choose one recommendation through `selected_tree_action_id`, set
+`tree_action`, and explain the choice in `parent_rationale`. Use
+`tree_action=new_root` with `research_parent_node_id=null` only for a genuinely
+new line of attack. Other tree actions must point to a valid node from this
+run's tree. Cross-run memory, when enabled, may inform broad strategy but does
+not provide tree parent IDs or active-run evidence.
+
+Only one valid proposal is ingested per context refresh while the queue is
+active or a decision is pending. Additional JSON files remain in the inbox with
+`deferred_pending_context_refresh` in the ingest summary, so the agent can
+refresh context before choosing whether to keep, rewrite, or delete them.
+
+Required tree metadata fields are:
+
+- `tree_action`
+- `selected_tree_action_id`
+- `parent_rationale`
+- `exploration_axis`
+- `approach_family`
+- `target_framing`
+- `feature_representation`
+- `expected_learning`
 
 Valid challengers pass through a cheap full `search_validation` single-split
 screen before CV/bootstrap comparison. Clearly worse challengers are
-auto-rejected and summarised for reflection. Similar or better challengers
+auto-rejected and summarised for reflection, but the framework still writes a
+diagnostic comparison report using one paired eval-split sample. That report is
+not recorded as an official pending comparison. Similar or better challengers
 continue to the full comparison report and LLM decision.
 
 ## Pause Or Stop

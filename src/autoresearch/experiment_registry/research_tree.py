@@ -28,6 +28,7 @@ def upsert_research_node(
     expected_benefit: str | None = None,
     key_risk: str | None = None,
     tags: list[str] | None = None,
+    tree_metadata: dict[str, Any] | None = None,
     screening: dict[str, Any] | None = None,
     metrics: dict[str, Any] | None = None,
     guidance: str | None = None,
@@ -42,9 +43,9 @@ def upsert_research_node(
                 node_id, proposal_id, parent_node_id, parent_experiment_id,
                 experiment_id, comparison_id, branch_id, status, outcome_type,
                 hypothesis, change_summary, expected_benefit, key_risk,
-                tags_json, screening_json, metrics_json, guidance
+                tags_json, tree_json, screening_json, metrics_json, guidance
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(node_id) DO UPDATE SET
                 updated_at = CURRENT_TIMESTAMP,
                 proposal_id = COALESCE(excluded.proposal_id, proposal_id),
@@ -60,6 +61,7 @@ def upsert_research_node(
                 expected_benefit = COALESCE(excluded.expected_benefit, expected_benefit),
                 key_risk = COALESCE(excluded.key_risk, key_risk),
                 tags_json = COALESCE(excluded.tags_json, tags_json),
+                tree_json = COALESCE(excluded.tree_json, tree_json),
                 screening_json = COALESCE(excluded.screening_json, screening_json),
                 metrics_json = COALESCE(excluded.metrics_json, metrics_json),
                 guidance = COALESCE(excluded.guidance, guidance)
@@ -79,6 +81,7 @@ def upsert_research_node(
                 expected_benefit,
                 key_risk,
                 dumps(tags) if tags is not None else None,
+                dumps(tree_metadata) if tree_metadata is not None else None,
                 dumps(screening) if screening is not None else None,
                 dumps(metrics) if metrics is not None else None,
                 guidance,
@@ -132,6 +135,7 @@ def find_research_node_by_experiment(path: Path, experiment_id: str) -> dict[str
 def _decode_node(row: dict[str, Any]) -> dict[str, Any]:
     for raw_key, out_key, default in (
         ("tags_json", "tags", []),
+        ("tree_json", "tree_metadata", {}),
         ("screening_json", "screening", None),
         ("metrics_json", "metrics", None),
     ):

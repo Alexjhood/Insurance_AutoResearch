@@ -12,6 +12,27 @@ from autoresearch.feature_policy import NON_PREDICTIVE_COLUMNS, predictive_colum
 VALID_STATUSES = {
     "proposed", "validated", "running", "completed", "failed",
     "compared", "promoted", "rejected", "inconclusive", "duplicate", "needs_repair",
+    "screened", "awaiting_decision", "stale_parent",
+}
+
+TREE_ACTIONS = {
+    "new_root",
+    "extend_node",
+    "revisit_failure",
+    "exploit_champion",
+    "rotate_axis",
+}
+
+EXPLORATION_AXES = {
+    "model_family",
+    "target_framing",
+    "feature_representation",
+    "calibration",
+    "hyperparameter",
+    "diagnostic_probe",
+    "data_slice",
+    "ensemble",
+    "other",
 }
 
 TARGET_COLUMNS = {
@@ -72,6 +93,9 @@ def validate_proposal(proposal: dict[str, Any], search_space: dict[str, Any]) ->
     required_text = [
         "proposal_id", "parent_experiment_id", "experiment_name",
         "rationale", "change_summary", "expected_benefit", "key_risk",
+        "tree_action", "parent_rationale", "exploration_axis",
+        "approach_family", "target_framing", "feature_representation",
+        "expected_learning", "selected_tree_action_id",
     ]
     for field in required_text:
         if not isinstance(proposal.get(field), str) or not proposal[field].strip():
@@ -80,6 +104,21 @@ def validate_proposal(proposal: dict[str, Any], search_space: dict[str, Any]) ->
     proposal_id = proposal.get("proposal_id", "")
     if proposal_id and not re.fullmatch(r"[A-Za-z0-9_\-]{3,80}", proposal_id):
         errors.append("proposal_id must be 3-80 chars using letters, numbers, hyphen, or underscore")
+
+    tree_action = proposal.get("tree_action")
+    if tree_action not in TREE_ACTIONS:
+        errors.append(f"tree_action must be one of {sorted(TREE_ACTIONS)}")
+
+    exploration_axis = proposal.get("exploration_axis")
+    if exploration_axis not in EXPLORATION_AXES:
+        errors.append(f"exploration_axis must be one of {sorted(EXPLORATION_AXES)}")
+
+    if "research_parent_node_id" in proposal:
+        research_parent = proposal.get("research_parent_node_id")
+        if research_parent is not None and (
+            not isinstance(research_parent, str) or not research_parent.strip()
+        ):
+            errors.append("research_parent_node_id must be a non-empty string or null")
 
     branch_action = proposal.get("branch_action", "extend_current")
     if branch_action not in search_space["branch_actions"]:
