@@ -60,10 +60,20 @@ new line of attack. Other tree actions must point to a valid node from this
 run's tree. Cross-run memory, when enabled, may inform broad strategy but does
 not provide tree parent IDs or active-run evidence.
 
+The process also maintains explicit research lines. A proposal declares
+`research_line_action`, `research_line_id`, `research_line_label`,
+`research_line_hypothesis`, and `line_membership_rationale`. These lines are
+local to the active run and should stay small in number. They allow the agent to
+advance a coherent local hypothesis with `record-decision --decision
+local_promote` without replacing the official champion for the whole run.
+
 Only one valid proposal is ingested per context refresh while the queue is
 active or a decision is pending. Additional JSON files remain in the inbox with
 `deferred_pending_context_refresh` in the ingest summary, so the agent can
 refresh context before choosing whether to keep, rewrite, or delete them.
+Every context export rewrites the proposal templates in both `handoffs/` and
+`proposal_inbox/` so they match the current champion and tree-policy
+recommendation.
 
 Required tree metadata fields are:
 
@@ -75,13 +85,20 @@ Required tree metadata fields are:
 - `target_framing`
 - `feature_representation`
 - `expected_learning`
+- `research_line_action`
+- `research_line_id`
+- `research_line_label`
+- `research_line_hypothesis`
+- `line_membership_rationale`
 
 Valid challengers pass through a cheap full `search_validation` single-split
 screen before CV/bootstrap comparison. Clearly worse challengers are
 auto-rejected and summarised for reflection, but the framework still writes a
 diagnostic comparison report using one paired eval-split sample. That report is
 not recorded as an official pending comparison. Similar or better challengers
-continue to the full comparison report and LLM decision.
+continue to the full comparison report and LLM decision. When a research line
+has a local incumbent, the single-split screen uses that local incumbent;
+otherwise it falls back to the official champion.
 
 ## Pause Or Stop
 

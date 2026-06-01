@@ -139,12 +139,34 @@ After every comparison, the framework writes `decision = "pending_llm"`. **You m
 ### How to record your decision
 ```bash
 autoresearch --track <track> record-decision <comparison_id> --decision promote --rationale "Challenger improved gini_weighted by X and reduced APL by Y, indicating better rank discrimination and safer pricing."
+autoresearch --track <track> record-decision <comparison_id> --decision local_promote --rationale "Challenger is useful progress for the named research line, but not enough to replace the global champion."
 autoresearch --track <track> record-decision <comparison_id> --decision reject  --rationale "Win rate 0.48 in the close-call band even after escalation; insufficient evidence."
 ```
 
 The comparison_id appears in the `compare-experiments` output and in `list-promotions`.
 
-On `promote`: guardrails are re-checked; hard fails block the promotion with an error message. On success, the holdout evaluation fires automatically.
+On `promote`: guardrails are re-checked; hard fails block the promotion with an error message. On success, the holdout evaluation fires automatically and the proposal also becomes the local incumbent for its research line.
+
+On `local_promote`: the proposal becomes the local incumbent for its research line, but the official champion and holdout remain unchanged. Use this when a line has made coherent progress that is worth extending, but the whole run should not yet switch champion.
+
+On `reject`: the official champion is retained. Treat the result as evidence for future line design.
+
+---
+
+## Research lines
+
+Every proposal must declare a local research line:
+
+- `research_line_action`: `create_line`, `extend_line`, `revisit_line`, or `close_line`.
+- `research_line_id`: a short stable identifier for the line.
+- `research_line_label`, `research_line_hypothesis`, and `line_membership_rationale`: enough context to explain why the proposal belongs there.
+
+Keep the run organised into a small number of coherent lines. A line is a local sequence of related hypotheses, not a prescribed model family. It should describe what the run is trying to learn, while leaving implementation choices open.
+
+The framework tracks two kinds of promotion:
+
+- **Global promotion** (`promote`): replaces the official champion for the whole run and triggers holdout evaluation.
+- **Local promotion** (`local_promote`): advances only the proposal's research line and becomes that line's incumbent for future screening.
 
 ---
 
@@ -181,7 +203,7 @@ Evaluates on the fixed `search_validation` split with 30 bootstrap resamples. CI
 
 ### Single-split screening
 
-Before the expensive CV/bootstrap comparison, every valid challenger is screened once on the full `search_validation` split. This is a low hurdle, not a promotion gate: clearly worse challengers are auto-rejected, while similar or better challengers proceed to full comparison and LLM decision. Auto-rejections still write a cheap diagnostic comparison report using a single paired eval-split sample; this report is for analysis only and is not recorded as an official pending comparison. Auto-rejections are also written to the research tree and non-promotion summaries; read them as evidence for the next proposal.
+Before the expensive CV/bootstrap comparison, every valid challenger is screened once on the full `search_validation` split. This is a low hurdle, not a promotion gate: clearly worse challengers are auto-rejected, while similar or better challengers proceed to full comparison and LLM decision. If the proposal's research line already has a local incumbent, this screen compares against that local incumbent; otherwise it falls back to the official champion. Auto-rejections still write a cheap diagnostic comparison report using a single paired eval-split sample; this report is for analysis only and is not recorded as an official pending comparison. Auto-rejections are also written to the research tree and non-promotion summaries; read them as evidence for the next proposal.
 
 ---
 
@@ -269,6 +291,8 @@ The agent schema in `context/latest_context.json` lists *all* historical target 
 The inbox JSON has a strict schema. Before writing your first proposal in a fresh run, read `proposal_inbox/proposal_template.json` *once*. The required top-level keys include `parent_experiment_id`, `parent_branch_id`, `branch_action`, `experiment_config`, `change_summary`, `expected_benefit`, `key_risk`, `rationale`, `proposal_id`, `experiment_name`, `tree_action`, `selected_tree_action_id`, `parent_rationale`, `exploration_axis`, `approach_family`, `target_framing`, `feature_representation`, and `expected_learning`. Slimmer JSON is rejected at ingestion and counts as a wasted cycle.
 
 Tree fields are behavioural metadata, not prescriptions for implementation. Use them to describe what the experiment is trying to learn and where it sits in this run's tree. `tree_action=new_root` may use `research_parent_node_id=null`; every other `tree_action` must point to a valid node in this run's `research_tree`.
+
+The handoff export refreshes both `handoffs/proposal_template.json` and `proposal_inbox/proposal_template.json`. If a proposal is already queued, running, or awaiting decision, treat any other proposal JSON left in the inbox as stale until the next context refresh says otherwise.
 
 ### C. Inbox audit (prevents re-submitting stale stubs)
 

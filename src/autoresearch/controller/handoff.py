@@ -30,9 +30,11 @@ def export_context_bundle(config: ProjectConfig) -> dict[str, Path]:
 
     write_json(latest_context, context)
     latest_handoff.write_text(render_handoff_markdown(config, context), encoding="utf-8")
+    template_outputs = _write_proposal_template_files(config, context)
     return {
         "latest_context_json": latest_context,
         "latest_handoff_markdown": latest_handoff,
+        **template_outputs,
     }
 
 
@@ -41,13 +43,44 @@ def write_proposal_template(config: ProjectConfig) -> dict[str, Path]:
 
     ensure_project_dirs(config)
     context = build_llm_context(config)
+    return _write_proposal_template_files(config, context)
+
+
+def _write_proposal_template_files(config: ProjectConfig, context: dict[str, Any]) -> dict[str, Path]:
+    """Write proposal template/schema files from an already-built context."""
+
+    template = _proposal_template(config, context)
+    schema = proposal_schema_document(config, context)
+    template_path = config.handoff_handoffs_dir / "proposal_template.json"
+    schema_path = config.handoff_handoffs_dir / "proposal_schema.json"
+    inbox_template_path = config.handoff_proposal_inbox_dir / "proposal_template.json"
+    write_json(template_path, template)
+    write_json(schema_path, schema)
+    write_json(inbox_template_path, template)
+    return {
+        "proposal_template": template_path,
+        "proposal_schema": schema_path,
+        "inbox_template": inbox_template_path,
+    }
+
+
+def _proposal_template(config: ProjectConfig, context: dict[str, Any]) -> dict[str, Any]:
+    """Return a proposal template aligned to the current champion and tree policy."""
+
     champion = context.get("official_champion") or {}
     recommended_actions = ((context.get("research_tree") or {}).get("tree_policy") or {}).get("recommended_actions") or []
     recommended_action = recommended_actions[0] if recommended_actions else {}
-    template = {
+    research_lines = (context.get("research_lines") or {}).get("active_lines") or []
+    selected_line = research_lines[0] if research_lines else {}
+    return {
         "proposal_id": "short_unique_id",
         "parent_experiment_id": champion.get("champion_id", "OFFICIAL_CHAMPION_ID"),
         "parent_branch_id": champion.get("branch_id", "main"),
+        "research_line_action": "extend_line" if selected_line else "create_line",
+        "research_line_id": selected_line.get("line_id", "line_short_name"),
+        "research_line_label": selected_line.get("label", "Short research line label"),
+        "research_line_hypothesis": selected_line.get("hypothesis", "What this line is trying to learn."),
+        "line_membership_rationale": "Why this proposal belongs in this research line.",
         "tree_action": recommended_action.get("tree_action", "new_root"),
         "research_parent_node_id": recommended_action.get("parent_node_id"),
         "selected_tree_action_id": recommended_action.get("action_id", "start_first_root"),
@@ -77,18 +110,6 @@ def write_proposal_template(config: ProjectConfig) -> dict[str, Path]:
                 "feature_exclusions": [],
             },
         },
-    }
-    schema = proposal_schema_document(config, context)
-    template_path = config.handoff_handoffs_dir / "proposal_template.json"
-    schema_path = config.handoff_handoffs_dir / "proposal_schema.json"
-    inbox_template_path = config.handoff_proposal_inbox_dir / "proposal_template.json"
-    write_json(template_path, template)
-    write_json(schema_path, schema)
-    write_json(inbox_template_path, template)
-    return {
-        "proposal_template": template_path,
-        "proposal_schema": schema_path,
-        "inbox_template": inbox_template_path,
     }
 
 
@@ -203,6 +224,11 @@ def ingest_proposals(config: ProjectConfig) -> dict[str, Any]:
             if item["status"] not in {"validated", "duplicate", "deferred_pending_context_refresh"}
         ),
     }
+    if summary["deferred_count"]:
+        summary["agent_warning"] = (
+            "Additional proposal JSON files were left in the inbox because one proposal is already active. "
+            "Refresh context before deciding whether to keep or rewrite them."
+        )
     write_json(config.handoff_results_dir / "latest_ingest_summary.json", summary)
     export_context_bundle(config)
     return summary
@@ -286,15 +312,23 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
     )
     feature_list = ", ".join(f"`{f}`" for f in features)
     tree = context.get("research_tree") or {}
+    research_lines = context.get("research_lines") or {}
     node_lines = _render_tree_node_lines(tree.get("recent_nodes") or [])
+    research_line_lines = _render_research_line_lines(research_lines.get("active_lines") or [])
     recommended_actions = (tree.get("tree_policy") or {}).get("recommended_actions") or []
     recommended_action = recommended_actions[0] if recommended_actions else {}
     action_lines = _render_tree_policy_lines(recommended_actions)
+    deferred_lines = _render_deferred_proposal_warning(config)
 
     template_json = json.dumps({
         "proposal_id": "<short_unique_id>",
         "parent_experiment_id": champion_id,
         "parent_branch_id": branch_id,
+        "research_line_action": "<create_line|extend_line|revisit_line|close_line>",
+        "research_line_id": "<line_short_name>",
+        "research_line_label": "<human readable line label>",
+        "research_line_hypothesis": "<what this local line is exploring>",
+        "line_membership_rationale": "<why this proposal belongs in this line>",
         "tree_action": recommended_action.get("tree_action", "<tree_action>"),
         "research_parent_node_id": recommended_action.get("parent_node_id"),
         "selected_tree_action_id": recommended_action.get("action_id", "<recommended action_id>"),
@@ -377,6 +411,7 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         f"Copy this to `{config.handoff_proposal_inbox_dir}/proposal_<name>.json` and fill in the `<...>` fields.",
         "Also write `model_<name>.py` (same directory) with a `fit_predict(train, score, ...)` function.",
         "Write exactly one proposal for this context refresh.",
+        *deferred_lines,
         "",
         "```json",
         template_json,
@@ -399,9 +434,14 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "- Scope: active run only. Do not use results from other runs as proposal evidence.",
         "- Choose `research_parent_node_id` from this tree when the next idea builds on a prior hypothesis; use `null` only for a genuinely new line of attack.",
         "- Cross-run memory, when enabled, may inform broad strategy but must not supply tree parent IDs or evidence for this run.",
+        "- Choose `research_line_action` and `research_line_id` so the run maintains a small number of coherent local research lines.",
+        "- A future `record-decision` can be `promote` for the whole run, `local_promote` for this line only, or `reject`.",
+        "- The single-split hurdle uses this line's local incumbent where available; full comparison still reports against the official champion.",
         "- Set `tree_action`, `selected_tree_action_id`, and `parent_rationale`; if you ignore the recommended action, include `tree_policy_override_rationale`.",
         "- Prefer genuine exploration over repetitive small retunes. A useful child idea should change the hypothesis, representation, target framing, or error mode it addresses.",
         "- Clear failures and auto-rejections are evidence. Reflect on them, then branch only when the child idea is materially different.",
+        "",
+        *research_line_lines,
         "",
         *action_lines,
         "",
@@ -425,6 +465,11 @@ def proposal_schema_document(config: ProjectConfig, context: dict[str, Any]) -> 
             "parent_experiment_id",
             "parent_branch_id",
             "branch_action",
+            "research_line_action",
+            "research_line_id",
+            "research_line_label",
+            "research_line_hypothesis",
+            "line_membership_rationale",
             "tree_action",
             "selected_tree_action_id",
             "parent_rationale",
@@ -450,6 +495,8 @@ def proposal_schema_document(config: ProjectConfig, context: dict[str, Any]) -> 
             "research_parent_node_id is optional and may only point to a node from this active run's research_tree.",
             "tree_action=new_root may use research_parent_node_id=null; all other tree actions must point to a valid active-run node.",
             "selected_tree_action_id should match a recommended action from research_tree.tree_policy, unless tree_policy_override_rationale explains the deviation.",
+            "research_line_action=create_line must use a new research_line_id; extend_line/revisit_line/close_line must use an existing active-run line.",
+            "Keep the active run to a small number of coherent research lines; use local promotion for progress inside a line without replacing the global champion.",
             "Only one validated proposal is ingested per context refresh while a proposal is queued or awaiting decision; additional proposal JSON files remain deferred in the inbox.",
             f"Active target_mode is {config.target_mode}; use frequency only when the run was explicitly configured for it.",
             "Do not reference milestone_holdout.",
@@ -475,6 +522,22 @@ def _render_tree_node_lines(nodes: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def _render_research_line_lines(lines_in: list[dict[str, Any]]) -> list[str]:
+    if not lines_in:
+        return ["Research lines: none yet. Use `research_line_action=create_line` for the first coherent line of attack."]
+    lines = ["Active research lines:"]
+    for item in lines_in[:5]:
+        label = item.get("label") or item.get("line_id")
+        incumbent = item.get("current_experiment_id") or item.get("best_experiment_id") or "none"
+        hypothesis = item.get("hypothesis") or ""
+        if len(hypothesis) > 120:
+            hypothesis = hypothesis[:120] + "..."
+        lines.append(
+            f"- `{item.get('line_id')}` ({label}); local_incumbent=`{incumbent}`; hypothesis: {hypothesis}"
+        )
+    return lines
+
+
 def _render_tree_policy_lines(actions: list[dict[str, Any]]) -> list[str]:
     if not actions:
         return ["Recommended tree actions: none yet."]
@@ -486,6 +549,29 @@ def _render_tree_policy_lines(actions: list[dict[str, Any]]) -> list[str]:
             f"- `{action.get('action_id')}`: {action.get('tree_action')}{parent_text} — {action.get('reason')}"
         )
     return lines
+
+
+def _render_deferred_proposal_warning(config: ProjectConfig) -> list[str]:
+    summary_path = config.handoff_results_dir / "latest_ingest_summary.json"
+    if not summary_path.exists():
+        return []
+    try:
+        summary = read_json(summary_path)
+    except (OSError, json.JSONDecodeError):
+        return []
+    deferred = [
+        item
+        for item in summary.get("results", [])
+        if item.get("status") == "deferred_pending_context_refresh"
+    ]
+    if not deferred:
+        return []
+    names = ", ".join(f"`{Path(item.get('source_path') or item.get('proposal_id') or '').name}`" for item in deferred)
+    return [
+        "",
+        f"Deferred proposal warning: {len(deferred)} proposal JSON file(s) remain in the inbox ({names}).",
+        "Refresh context and rewrite or remove them before running another cycle.",
+    ]
 
 
 def render_cycle_summary(summary: dict[str, Any]) -> str:

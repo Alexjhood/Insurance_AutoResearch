@@ -34,6 +34,14 @@ from autoresearch.experiment_registry.research_tree import (
     list_research_nodes,
     find_research_node_by_experiment,
 )
+from autoresearch.experiment_registry.research_lines import (
+    upsert_research_line,
+    set_research_line_champion,
+    record_research_line_history,
+    get_research_line,
+    list_research_lines,
+    list_research_line_history,
+)
 
 __all__ = [
     "init_registry",
@@ -64,4 +72,10 @@ __all__ = [
     "upsert_research_node",
     "list_research_nodes",
     "find_research_node_by_experiment",
+    "upsert_research_line",
+    "set_research_line_champion",
+    "record_research_line_history",
+    "get_research_line",
+    "list_research_lines",
+    "list_research_line_history",
 ]

@@ -15,6 +15,7 @@ def upsert_research_node(
     path: Path,
     *,
     node_id: str,
+    line_id: str | None = None,
     proposal_id: str | None = None,
     parent_node_id: str | None = None,
     parent_experiment_id: str | None = None,
@@ -40,14 +41,15 @@ def upsert_research_node(
         con.execute(
             """
             INSERT INTO research_nodes (
-                node_id, proposal_id, parent_node_id, parent_experiment_id,
+                node_id, line_id, proposal_id, parent_node_id, parent_experiment_id,
                 experiment_id, comparison_id, branch_id, status, outcome_type,
                 hypothesis, change_summary, expected_benefit, key_risk,
                 tags_json, tree_json, screening_json, metrics_json, guidance
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(node_id) DO UPDATE SET
                 updated_at = CURRENT_TIMESTAMP,
+                line_id = COALESCE(excluded.line_id, line_id),
                 proposal_id = COALESCE(excluded.proposal_id, proposal_id),
                 parent_node_id = COALESCE(excluded.parent_node_id, parent_node_id),
                 parent_experiment_id = COALESCE(excluded.parent_experiment_id, parent_experiment_id),
@@ -68,6 +70,7 @@ def upsert_research_node(
             """,
             (
                 node_id,
+                line_id,
                 proposal_id,
                 parent_node_id,
                 parent_experiment_id,
@@ -81,7 +84,7 @@ def upsert_research_node(
                 expected_benefit,
                 key_risk,
                 dumps(tags) if tags is not None else None,
-                dumps(tree_metadata) if tree_metadata is not None else None,
+                dumps(tree_metadata) if tree_metadata else None,
                 dumps(screening) if screening is not None else None,
                 dumps(metrics) if metrics is not None else None,
                 guidance,

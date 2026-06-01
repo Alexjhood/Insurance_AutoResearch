@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from autoresearch.config import ProjectConfig
@@ -9,6 +10,8 @@ from autoresearch.controller.proposal_schema import allowed_search_space
 from autoresearch.experiment_registry.registry import (
     get_official_champion,
     list_research_nodes,
+    list_research_lines,
+    list_research_line_history,
     list_comparisons,
     list_experiments,
     list_proposals,
@@ -30,6 +33,8 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
     all_proposals = list_proposals(config.registry_path)
     proposals = all_proposals[:10]
     research_nodes = list_research_nodes(config.registry_path, limit=25)
+    research_lines = list_research_lines(config.registry_path)
+    research_line_history = list_research_line_history(config.registry_path)[:20]
     compact_nodes = _compact_research_nodes(research_nodes)
 
     raw_cycle = read_json(latest_cycle_path) if latest_cycle_path.exists() else None
@@ -59,7 +64,20 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
             "tree_policy": _build_tree_policy(champion, compact_nodes),
             "recent_nodes": compact_nodes,
         },
+        "research_lines": {
+            "scope": "active run only",
+            "max_active_lines": 5,
+            "principles": [
+                "Self-sort proposals into a small number of named research lines.",
+                "Use local promotion to advance a promising line without replacing the global champion.",
+                "Use global promotion only when the experiment should become the whole run's official champion.",
+                "The single-split hurdle compares against the local line incumbent when one exists.",
+            ],
+            "active_lines": _compact_research_lines([line for line in research_lines if line.get("status") == "active"]),
+            "recent_line_history": _compact_research_line_history(research_line_history),
+        },
         "proposal_count": len(all_proposals),
+        "active_queue": _active_queue_summary(all_proposals, config.running_stale_minutes),
         "latest_cycle_result": latest_cycle_result,
         "latest_nonpromotion_summary": read_json(latest_nonpromotion_path) if latest_nonpromotion_path.exists() else None,
         "agent_schema": _compact_agent_schema(raw_schema),
@@ -164,9 +182,58 @@ def _compact_proposals(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def _active_queue_summary(rows: list[dict[str, Any]], stale_minutes: int) -> dict[str, Any]:
+    active_statuses = {"validated", "proposed", "needs_repair", "running", "awaiting_decision"}
+    active = []
+    stale_after = int(stale_minutes) * 60
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        status = row.get("status")
+        if status not in active_statuses:
+            continue
+        item = {
+            "proposal_id": row.get("proposal_id"),
+            "status": status,
+            "experiment_name": row.get("experiment_name"),
+            "parent_experiment_id": row.get("parent_experiment_id"),
+            "updated_at": row.get("updated_at"),
+        }
+        if status == "running":
+            updated_at = _parse_registry_time(row.get("updated_at"))
+            running_for = int((now - updated_at).total_seconds()) if updated_at else None
+            item.update({
+                "running_for_seconds": running_for,
+                "stale_after_seconds": stale_after,
+                "is_stale": bool(running_for is not None and running_for > stale_after),
+            })
+        active.append(item)
+    return {
+        "active_count": len(active),
+        "has_running": any(item["status"] == "running" for item in active),
+        "has_awaiting_decision": any(item["status"] == "awaiting_decision" for item in active),
+        "items": active[:5],
+    }
+
+
+def _parse_registry_time(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
+
+
 def _compact_research_nodes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     keys = [
         "node_id",
+        "line_id",
         "parent_node_id",
         "proposal_id",
         "status",
@@ -187,6 +254,52 @@ def _compact_research_nodes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             value = item.get(text_key) or ""
             if len(value) > 220:
                 item[text_key] = value[:220] + "…"
+        result.append(item)
+    return result
+
+
+def _compact_research_lines(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    keys = [
+        "line_id",
+        "label",
+        "status",
+        "root_node_id",
+        "hypothesis",
+        "current_node_id",
+        "current_experiment_id",
+        "best_node_id",
+        "best_experiment_id",
+        "notes",
+    ]
+    result = []
+    for row in rows[:8]:
+        item = {key: row.get(key) for key in keys}
+        for text_key in ("hypothesis", "notes"):
+            value = item.get(text_key) or ""
+            if len(value) > 220:
+                item[text_key] = value[:220] + "…"
+        result.append(item)
+    return result
+
+
+def _compact_research_line_history(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    keys = [
+        "created_at",
+        "line_id",
+        "previous_experiment_id",
+        "new_experiment_id",
+        "node_id",
+        "action",
+        "reason",
+        "comparison_id",
+        "proposal_id",
+    ]
+    result = []
+    for row in rows[:12]:
+        item = {key: row.get(key) for key in keys}
+        reason = item.get("reason") or ""
+        if len(reason) > 180:
+            item["reason"] = reason[:180] + "…"
         result.append(item)
     return result
 

@@ -34,4 +34,10 @@ from autoresearch.experiment_registry import (  # noqa: F401
     upsert_research_node,
     list_research_nodes,
     find_research_node_by_experiment,
+    upsert_research_line,
+    set_research_line_champion,
+    record_research_line_history,
+    get_research_line,
+    list_research_lines,
+    list_research_line_history,
 )

@@ -116,6 +116,7 @@ def session_status(config: ProjectConfig, session_id: str | None = None) -> dict
         "state": state,
         "events": list_session_events(config.registry_path, state["session_id"], limit=20),
         "inbox": inbox_status(config),
+        "running_proposals": _running_proposal_status(config),
     }
 
 
@@ -129,6 +130,7 @@ def run_session_cycle(config: ProjectConfig, session_id: str | None = None) -> d
         return _record_waiting(config, state, "Session is stopped or completed.")
 
     state["state"] = "running"
+    state.pop("latest_error", None)
     _persist_state(config, state, event_type="running", message="Cycle started.")
 
     inbox = inbox_status(config)
@@ -263,6 +265,7 @@ def _persist_state(
 ) -> None:
     state["updated_at"] = _now()
     state["official_champion"] = get_official_champion(config.registry_path)
+    state["running_proposals"] = _running_proposal_status(config)
     session_dir = _session_dir(config, state["session_id"])
     session_dir.mkdir(parents=True, exist_ok=True)
     state_path = session_dir / "state.json"
@@ -362,6 +365,7 @@ def _session_dir(config: ProjectConfig, session_id: str) -> Path:
 
 def _render_session_summary(state: dict[str, Any]) -> str:
     champion = state.get("official_champion") or {}
+    running = state.get("running_proposals") or []
     return "\n".join(
         [
             "# Auto-Research Session Summary",
@@ -373,9 +377,45 @@ def _render_session_summary(state: dict[str, Any]) -> str:
             f"- max_cycles: {state.get('max_cycles')}",
             f"- stop_requested: {state.get('stop_requested')}",
             f"- official_champion: `{champion.get('champion_id')}`",
+            f"- running_proposals: {len(running)}",
             f"- updated_at: {state['updated_at']}",
         ]
     ) + "\n"
+
+
+def _running_proposal_status(config: ProjectConfig) -> list[dict[str, Any]]:
+    now = datetime.now(timezone.utc)
+    stale_after = int(getattr(config, "running_stale_minutes", 30)) * 60
+    result: list[dict[str, Any]] = []
+    for item in list_proposals(config.registry_path):
+        if item.get("status") != "running":
+            continue
+        updated_at = _parse_registry_time(item.get("updated_at"))
+        running_for = int((now - updated_at).total_seconds()) if updated_at else None
+        result.append({
+            "proposal_id": item.get("proposal_id"),
+            "updated_at": item.get("updated_at"),
+            "running_for_seconds": running_for,
+            "stale_after_seconds": stale_after,
+            "is_stale": bool(running_for is not None and running_for > stale_after),
+            "notes": item.get("notes"),
+        })
+    return result
+
+
+def _parse_registry_time(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
 
 
 def _now() -> str:

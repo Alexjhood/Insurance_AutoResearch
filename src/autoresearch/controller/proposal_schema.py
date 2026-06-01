@@ -11,7 +11,7 @@ from autoresearch.feature_policy import NON_PREDICTIVE_COLUMNS, predictive_colum
 
 VALID_STATUSES = {
     "proposed", "validated", "running", "completed", "failed",
-    "compared", "promoted", "rejected", "inconclusive", "duplicate", "needs_repair",
+    "compared", "promoted", "local_promoted", "rejected", "inconclusive", "duplicate", "needs_repair",
     "screened", "awaiting_decision", "stale_parent",
 }
 
@@ -33,6 +33,13 @@ EXPLORATION_AXES = {
     "data_slice",
     "ensemble",
     "other",
+}
+
+RESEARCH_LINE_ACTIONS = {
+    "create_line",
+    "extend_line",
+    "revisit_line",
+    "close_line",
 }
 
 TARGET_COLUMNS = {
@@ -72,6 +79,7 @@ def allowed_search_space(config, agent_schema: dict[str, Any] | None = None) -> 
             )
         },
         "branch_actions": ["extend_current", "new_branch"],
+        "research_line_actions": sorted(RESEARCH_LINE_ACTIONS),
         "allow_legacy_baselines": bool(ss.get("allow_legacy_baselines", False)),
         "allow_open_model_families": bool(ss.get("allow_open_model_families", False)),
         "requires_model_script": bool(ss.get("requires_model_script", False)),
@@ -96,6 +104,8 @@ def validate_proposal(proposal: dict[str, Any], search_space: dict[str, Any]) ->
         "tree_action", "parent_rationale", "exploration_axis",
         "approach_family", "target_framing", "feature_representation",
         "expected_learning", "selected_tree_action_id",
+        "research_line_action", "research_line_id", "research_line_label",
+        "research_line_hypothesis", "line_membership_rationale",
     ]
     for field in required_text:
         if not isinstance(proposal.get(field), str) or not proposal[field].strip():
@@ -104,6 +114,14 @@ def validate_proposal(proposal: dict[str, Any], search_space: dict[str, Any]) ->
     proposal_id = proposal.get("proposal_id", "")
     if proposal_id and not re.fullmatch(r"[A-Za-z0-9_\-]{3,80}", proposal_id):
         errors.append("proposal_id must be 3-80 chars using letters, numbers, hyphen, or underscore")
+
+    line_id = proposal.get("research_line_id", "")
+    if line_id and not re.fullmatch(r"[A-Za-z0-9_\-]{3,80}", line_id):
+        errors.append("research_line_id must be 3-80 chars using letters, numbers, hyphen, or underscore")
+
+    line_action = proposal.get("research_line_action")
+    if line_action not in RESEARCH_LINE_ACTIONS:
+        errors.append(f"research_line_action must be one of {sorted(RESEARCH_LINE_ACTIONS)}")
 
     tree_action = proposal.get("tree_action")
     if tree_action not in TREE_ACTIONS:

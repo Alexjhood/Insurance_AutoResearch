@@ -10,9 +10,11 @@ from autoresearch.controller.workflow import ExperimentNeedsRepair, run_next_que
 from autoresearch.experiment_registry.registry import (
     init_registry,
     list_proposals,
+    list_research_lines,
     list_research_nodes,
     record_experiment,
     set_official_champion,
+    upsert_research_node,
 )
 from autoresearch.experiment_runner import run_experiment
 from tests.test_runner import _make_config as _config, _write_fixtures
@@ -46,6 +48,11 @@ def _valid_proposal(parent_id: str = "direct") -> dict:
         "proposal_id": "handoff_valid_1",
         "parent_experiment_id": parent_id,
         "parent_branch_id": "main",
+        "research_line_action": "create_line",
+        "research_line_id": "line_handoff_valid",
+        "research_line_label": "Handoff validation line",
+        "research_line_hypothesis": "Validate the proposal queue on a simple baseline line.",
+        "line_membership_rationale": "This proposal starts the handoff validation line.",
         "tree_action": "new_root",
         "research_parent_node_id": None,
         "selected_tree_action_id": "start_first_root",
@@ -127,8 +134,21 @@ def test_export_context_and_template(tmp_path: Path) -> None:
     assert context_outputs["latest_handoff_markdown"].exists()
     assert template_outputs["proposal_template"].exists()
     assert template_outputs["proposal_schema"].exists()
+    refreshed_template = json.loads(context_outputs["proposal_template"].read_text(encoding="utf-8"))
+    assert refreshed_template["parent_experiment_id"] == "direct"
     assert context["allowed_search_space"]["feature_columns"] == ["driver_age_band_d"]
     assert "exposure_term_a` is not a predictive feature" in handoff
+
+    set_official_champion(
+        config.registry_path,
+        champion_id="new_direct",
+        branch_id="main",
+        reason="test refresh",
+        action="promote",
+    )
+    refreshed = export_context_bundle(config)
+    inbox_template = json.loads(refreshed["inbox_template"].read_text(encoding="utf-8"))
+    assert inbox_template["parent_experiment_id"] == "new_direct"
 
 
 def test_exposure_is_rejected_as_model_feature(tmp_path: Path) -> None:
@@ -177,6 +197,7 @@ def test_ingest_proposals_moves_valid_and_invalid_files(tmp_path: Path) -> None:
     assert summary["invalid_count"] == 1
     assert any(item["status"] == "validated" for item in proposals)
     assert any(node["proposal_id"] == "handoff_valid_1" for node in list_research_nodes(config.registry_path))
+    assert list_research_lines(config.registry_path)[0]["line_id"] == "line_handoff_valid"
     assert status["processed_valid_count"] == 1
     assert status["processed_invalid_count"] == 1
 
@@ -204,8 +225,34 @@ def test_batch_ingest_defers_second_valid_until_context_refresh(tmp_path: Path) 
 
     assert summary["valid_count"] == 1
     assert summary["deferred_count"] == 1
+    assert "agent_warning" in summary
     assert len([item for item in proposals if item["status"] == "validated"]) == 1
     assert (config.handoff_proposal_inbox_dir / "second.json").exists()
+    handoff = (config.handoff_handoffs_dir / "latest_handoff.md").read_text(encoding="utf-8")
+    assert "Deferred proposal warning" in handoff
+
+
+def test_research_tree_metadata_survives_status_only_update(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    upsert_research_node(
+        config.registry_path,
+        node_id="node_1",
+        proposal_id="node_1",
+        status="validated",
+        tree_metadata={"exploration_axis": "model_family", "tree_action": "new_root"},
+    )
+    upsert_research_node(
+        config.registry_path,
+        node_id="node_1",
+        proposal_id="node_1",
+        status="running",
+        tree_metadata={},
+    )
+
+    node = list_research_nodes(config.registry_path)[0]
+
+    assert node["status"] == "running"
+    assert node["tree_metadata"]["exploration_axis"] == "model_family"
 
 
 def test_tree_action_requires_parent_for_non_root(tmp_path: Path) -> None:

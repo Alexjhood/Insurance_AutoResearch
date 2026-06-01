@@ -778,10 +778,10 @@ def build_parser() -> argparse.ArgumentParser:
     champion_parser.add_argument("challenger_id")
     decision_parser = subparsers.add_parser(
         "record-decision",
-        help="Record the LLM's promote/reject decision for a pending comparison.",
+        help="Record the LLM's promote/local_promote/reject decision for a pending comparison.",
     )
     decision_parser.add_argument("comparison_id", help="comparison_id from compare-experiments output.")
-    decision_parser.add_argument("--decision", required=True, choices=["promote", "reject"],
+    decision_parser.add_argument("--decision", required=True, choices=["promote", "local_promote", "reject"],
                                  help="LLM's final verdict.")
     decision_parser.add_argument("--rationale", required=True,
                                  help="Written justification for the decision.")

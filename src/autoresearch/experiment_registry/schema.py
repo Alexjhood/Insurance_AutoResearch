@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS research_nodes (
     node_id TEXT PRIMARY KEY,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    line_id TEXT,
     proposal_id TEXT,
     parent_node_id TEXT,
     parent_experiment_id TEXT,
@@ -136,6 +137,37 @@ CREATE TABLE IF NOT EXISTS research_nodes (
     guidance TEXT,
     FOREIGN KEY (proposal_id) REFERENCES proposals(proposal_id),
     FOREIGN KEY (parent_node_id) REFERENCES research_nodes(node_id)
+);
+
+CREATE TABLE IF NOT EXISTS research_lines (
+    line_id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    label TEXT NOT NULL,
+    status TEXT NOT NULL,
+    root_node_id TEXT,
+    parent_line_id TEXT,
+    hypothesis TEXT,
+    current_node_id TEXT,
+    current_experiment_id TEXT,
+    best_node_id TEXT,
+    best_experiment_id TEXT,
+    notes TEXT,
+    metadata_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS research_line_history (
+    history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    line_id TEXT NOT NULL,
+    previous_experiment_id TEXT,
+    new_experiment_id TEXT,
+    node_id TEXT,
+    action TEXT NOT NULL,
+    reason TEXT,
+    comparison_id TEXT,
+    proposal_id TEXT,
+    FOREIGN KEY (line_id) REFERENCES research_lines(line_id)
 );
 
 CREATE TABLE IF NOT EXISTS auto_sessions (
@@ -177,6 +209,7 @@ def init_registry(path: Path) -> Path:
         _migrate_experiments(con)
         _migrate_comparisons(con)
         _migrate_research_nodes(con)
+        _migrate_research_lines(con)
 
     from autoresearch.config import PROJECT_ROOT
     from autoresearch.utils.integrity import write_integrity_manifest
@@ -228,11 +261,26 @@ def _migrate_research_nodes(con: sqlite3.Connection) -> None:
 
     existing = {row[1] for row in con.execute("PRAGMA table_info(research_nodes)").fetchall()}
     columns = {
+        "line_id": "TEXT",
         "tree_json": "TEXT",
     }
     for column, definition in columns.items():
         if column not in existing:
             con.execute(f"ALTER TABLE research_nodes ADD COLUMN {column} {definition}")
+
+
+def _migrate_research_lines(con: sqlite3.Connection) -> None:
+    """Add research-line metadata columns to older registries."""
+
+    existing = {row[1] for row in con.execute("PRAGMA table_info(research_lines)").fetchall()}
+    columns = {
+        "best_node_id": "TEXT",
+        "best_experiment_id": "TEXT",
+        "metadata_json": "TEXT",
+    }
+    for column, definition in columns.items():
+        if column not in existing:
+            con.execute(f"ALTER TABLE research_lines ADD COLUMN {column} {definition}")
 
 
 def registry_counts(path: Path) -> dict[str, int]:
@@ -249,6 +297,7 @@ def registry_counts(path: Path) -> dict[str, int]:
         branch_count = con.execute("SELECT COUNT(*) FROM branches").fetchone()[0]
         session_count = con.execute("SELECT COUNT(*) FROM auto_sessions").fetchone()[0]
         node_count = con.execute("SELECT COUNT(*) FROM research_nodes").fetchone()[0]
+        line_count = con.execute("SELECT COUNT(*) FROM research_lines").fetchone()[0]
     return {
         "experiments": int(exp_count),
         "artifacts": int(art_count),
@@ -257,4 +306,5 @@ def registry_counts(path: Path) -> dict[str, int]:
         "branches": int(branch_count),
         "sessions": int(session_count),
         "research_nodes": int(node_count),
+        "research_lines": int(line_count),
     }

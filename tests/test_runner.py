@@ -557,6 +557,53 @@ def test_record_decision_promote_updates_champion(tmp_path: Path) -> None:
     assert comp["decided_by"] == "llm"
 
 
+def test_record_decision_local_promote_updates_line_only(tmp_path: Path) -> None:
+    """local_promote advances a research line without replacing the official champion."""
+    from autoresearch.comparison_runner import record_decision
+    from autoresearch.experiment_registry.registry import (
+        get_official_champion,
+        get_research_line,
+        list_comparisons,
+        set_official_champion,
+        upsert_research_line,
+        upsert_research_node,
+    )
+
+    config, champ_id, chal_id = _setup_two_experiments(tmp_path, "rdlp")
+    set_official_champion(
+        config.registry_path, champion_id=champ_id, branch_id="main",
+        reason="seed", action="initialised", comparison_id="",
+    )
+    upsert_research_line(
+        config.registry_path,
+        line_id="line_local",
+        label="Local line",
+        status="active",
+        root_node_id="node_local",
+        hypothesis="Test local progression.",
+        current_experiment_id=champ_id,
+    )
+    upsert_research_node(
+        config.registry_path,
+        node_id="node_local",
+        line_id="line_local",
+        experiment_id=chal_id,
+        status="awaiting_decision",
+    )
+
+    artifacts = compare_experiments(config, champ_id, chal_id)
+    comp_id = json.loads(artifacts["promotion_report"].read_text())["comparison_id"]
+
+    result = record_decision(config, comp_id, decision="local_promote", rationale="Good for this line only.")
+
+    assert result["decision"] == "local_promote"
+    assert result["research_line_id"] == "line_local"
+    assert get_official_champion(config.registry_path)["champion_id"] == champ_id
+    assert get_research_line(config.registry_path, "line_local")["current_experiment_id"] == chal_id
+    comp = next(c for c in list_comparisons(config.registry_path) if c["comparison_id"] == comp_id)
+    assert comp["decision"] == "local_promote"
+
+
 def test_record_decision_promote_blocked_by_guardrail(tmp_path: Path) -> None:
     """A promote is blocked (raises) when the stored guardrail status is a hard fail."""
     import sqlite3

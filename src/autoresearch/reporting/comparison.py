@@ -18,6 +18,8 @@ from autoresearch.experiment_registry.registry import (
     list_artifacts,
     list_champion_history,
     list_experiments,
+    list_research_lines,
+    list_research_nodes,
 )
 from autoresearch.utils.io import read_json
 
@@ -134,6 +136,11 @@ def write_comparison_html_report(
     # correctly on the first render (when the report is opened immediately).
     pending_promoted = challenger_id if decision.get("decision") == "promote" else None
     history_points = _all_experiment_history_points(config, eval_split, pending_promoted_id=pending_promoted)
+    line_history_points = _research_line_history_points(
+        config,
+        eval_split,
+        pending_line_experiment_id=challenger_id if decision.get("local_promoted") else None,
+    )
 
     champion_details = _experiment_details(config, champion_id)
     challenger_details = _experiment_details(config, challenger_id)
@@ -168,6 +175,7 @@ def write_comparison_html_report(
         pred_hist_data=pred_hist_data,
         diff_data=diff_data,
         history_points=history_points,
+        line_history_points=line_history_points,
         metric_lift_table=metric_lift_table or [],
     )
     output_path.write_text(html, encoding="utf-8")
@@ -287,6 +295,68 @@ def _all_experiment_history_points(
 
     return points or [{"step": 1, "gini": 0.0, "label": "baseline", "promoted": True,
                        "experiment_id": ""}]
+
+
+def _research_line_history_points(
+    config: ProjectConfig,
+    eval_split: str,
+    *,
+    pending_line_experiment_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return chronological experiment metrics grouped by declared research line."""
+
+    lines = {line["line_id"]: line for line in list_research_lines(config.registry_path)}
+    nodes = list(reversed(list_research_nodes(config.registry_path)))
+    global_steps = {
+        point["experiment_id"]: point["step"]
+        for point in _all_experiment_history_points(config, eval_split)
+        if point.get("experiment_id")
+    }
+    line_steps: dict[str, int] = {}
+    points: list[dict[str, Any]] = []
+    for node in nodes:
+        line_id = node.get("line_id")
+        experiment_id = node.get("experiment_id")
+        if not line_id or not experiment_id:
+            continue
+        try:
+            metrics = read_json(_artifact_path(config, experiment_id, "metrics"))
+            split_m = next(
+                (item for item in metrics["split_metrics"] if item["split"] == eval_split),
+                None,
+            )
+            if split_m is None:
+                continue
+            all_metrics = {
+                key: round(float(value), 6)
+                for key, value in split_m.items()
+                if isinstance(value, (int, float)) and key != "row_count"
+            }
+        except Exception:
+            continue
+        line = lines.get(line_id, {})
+        line_steps[line_id] = line_steps.get(line_id, 0) + 1
+        local_promoted = (
+            experiment_id == line.get("current_experiment_id")
+            or experiment_id == line.get("best_experiment_id")
+            or experiment_id == pending_line_experiment_id
+            or node.get("status") in {"local_promoted", "promoted"}
+        )
+        points.append({
+            "global_step": global_steps.get(experiment_id, len(points) + 1),
+            "line_step": line_steps[line_id],
+            "line_id": line_id,
+            "line_label": line.get("label") or line_id,
+            "experiment_id": experiment_id,
+            "node_id": node.get("node_id"),
+            "label": node.get("change_summary") or node.get("proposal_id") or experiment_id[:32],
+            "status": node.get("status"),
+            "outcome_type": node.get("outcome_type"),
+            "local_promoted": local_promoted,
+            "metrics": all_metrics,
+            "gini": all_metrics.get("gini_weighted"),
+        })
+    return points
 
 
 # ---------------------------------------------------------------------------
@@ -607,11 +677,12 @@ def _render_html(
     pred_hist_data: dict,
     diff_data: dict,
     history_points: list,
+    line_history_points: list,
     metric_lift_table: list[dict[str, Any]] | None = None,
 ) -> str:
     decision_str = decision.get("decision", "?")
     # pending_llm → amber; promote/promoted → green; reject/rejected → red
-    if decision_str in ("promote", "promoted"):
+    if decision_str in ("promote", "promoted", "local_promote"):
         decision_color, decision_bg = "#0a5c2e", "#e8f5e9"
     elif decision_str in ("reject", "rejected"):
         decision_color, decision_bg = "#7a1a1a", "#fce8e8"
@@ -625,6 +696,7 @@ def _render_html(
         "pending_llm": "AWAITING LLM DECISION",
         "promote": "PROMOTED",
         "promoted": "PROMOTED",
+        "local_promote": "LOCAL PROMOTION",
         "reject": "REJECTED",
         "rejected": "REJECTED",
         "inconclusive": "INCONCLUSIVE",
@@ -672,6 +744,7 @@ def _render_html(
         "const HIST=" + json.dumps(pred_hist_data, separators=(",", ":")) + ";"
         "const DIFF=" + json.dumps(diff_data, separators=(",", ":")) + ";"
         "const HISTORY=" + json.dumps(history_points, separators=(",", ":")) + ";"
+        "const LINE_HISTORY=" + json.dumps(line_history_points, separators=(",", ":")) + ";"
         "const METRIC_TABLE=" + json.dumps(_metric_table, separators=(",", ":")) + ";"
         f"const GATE_METRIC={json.dumps(gate_primary_metric)};"
         f"const GATE_MODE={json.dumps(gate_mode)};"
@@ -1093,6 +1166,63 @@ function renderHistory(){
   }),CFG);
 }
 
+/* ── Research-line metric progression ───────────────────────────────── */
+function renderLineHistory(){
+  const metricKey=document.getElementById('line-history-metric-select')
+    ?document.getElementById('line-history-metric-select').value:'gini_weighted';
+  const xMode=document.querySelector('input[name="line-history-x"]:checked')
+    ?document.querySelector('input[name="line-history-x"]:checked').value:'global_step';
+  const getVal=(d)=>{
+    if(d.metrics&&d.metrics[metricKey]!=null)return d.metrics[metricKey];
+    if(metricKey==='gini_weighted')return d.gini??null;
+    return null;
+  };
+  const valid=LINE_HISTORY.filter(d=>getVal(d)!=null);
+  if(valid.length===0){
+    Plotly.react('line-history-chart',[],mkLayout({title:{text:'No research-line data for '+metricKey}}),CFG);
+    return;
+  }
+  const byLine={};
+  valid.forEach(d=>{
+    if(!byLine[d.line_id])byLine[d.line_id]=[];
+    byLine[d.line_id].push(d);
+  });
+  const palette=['#1f77b4','#d62728','#2ca02c','#9467bd','#8c564b','#e377c2','#17becf'];
+  const traces=Object.keys(byLine).sort().map((lineId,i)=>{
+    const rows=byLine[lineId].sort((a,b)=>(xMode==='line_step'?a.line_step-b.line_step:a.global_step-b.global_step));
+    const color=palette[i%palette.length];
+    return {
+      name:rows[0].line_label||lineId,
+      x:rows.map(d=>xMode==='line_step'?d.line_step:d.global_step),
+      y:rows.map(getVal),
+      mode:'lines+markers+text',
+      text:rows.map(d=>d.local_promoted?'★':''),
+      textposition:'top center',
+      textfont:{size:12,color:color},
+      customdata:rows.map(d=>[d.experiment_id,d.node_id,d.status,d.outcome_type,d.label]),
+      line:{color:color,width:2},
+      marker:{
+        size:rows.map(d=>d.local_promoted?10:7),
+        color:color,
+        symbol:rows.map(d=>d.local_promoted?'circle':'circle-open'),
+        opacity:0.9,
+      },
+      hovertemplate:
+        'Step %{x}<br>'+metricKey+': %{y:.4f}<br>'+
+        '%{customdata[4]}<br>experiment: %{customdata[0]}<br>'+
+        'node: %{customdata[1]}<br>status: %{customdata[2]}<extra>'+lineId+'</extra>',
+    };
+  });
+  const allVals=valid.map(getVal).filter(v=>v!=null);
+  const yMin=Math.min(...allVals),yMax=Math.max(...allVals);
+  const pad=Math.max((yMax-yMin)*0.12,Math.abs(yMax||1)*0.02);
+  Plotly.react('line-history-chart',traces,mkLayout({
+    title:{text:'Research Line Metric Progression — '+metricKey,font:{size:14}},
+    xaxis:{title:xMode==='line_step'?'Experiment Number Within Research Line':'Experiment Step In Run',dtick:1},
+    yaxis:{title:metricKey,range:[yMin-pad,yMax+pad]},
+  }),CFG);
+}
+
 /* ── Init ────────────────────────────────────────────────────────────── */
 document.getElementById('lift-bands').addEventListener('change',renderLift);
 document.querySelectorAll('input[name="lift-mode"]').forEach(r=>r.addEventListener('change',renderLift));
@@ -1127,7 +1257,20 @@ if(histMetricSel){
   });
   histMetricSel.addEventListener('change',renderHistory);
 }
-renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
+const lineHistMetricSel=document.getElementById('line-history-metric-select');
+if(lineHistMetricSel){
+  const _lineKeys=Array.from(new Set(LINE_HISTORY.flatMap(d=>d.metrics?Object.keys(d.metrics):[])));
+  if(_lineKeys.length===0)_lineKeys.push('gini_weighted');
+  _lineKeys.sort().forEach(k=>{
+    const o=document.createElement('option');
+    o.value=k;o.textContent=k+(k==='gini_weighted'?' (default)':'');
+    if(k==='gini_weighted')o.selected=true;
+    lineHistMetricSel.appendChild(o);
+  });
+  lineHistMetricSel.addEventListener('change',renderLineHistory);
+}
+document.querySelectorAll('input[name="line-history-x"]').forEach(r=>r.addEventListener('change',renderLineHistory));
+renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();renderLineHistory();
 """
     if target_mode != "burning_cost":
         js_code = (
@@ -1364,6 +1507,24 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();
       </label>
     </div>
     <div class="chart-wrap"><div id="history-chart" style="height:360px"></div></div>
+  </div>
+
+  <!-- ── RESEARCH LINE HISTORY ── -->
+  <div class="section">
+    <h2>Research Line Metric Progression</h2>
+    <p class="chart-note">
+      Selected metric for experiments grouped by declared research line.
+      Filled markers with a star indicate experiments locally promoted within their line.
+      Use the x-axis selector to view chronology across the whole run or progress inside each line.
+    </p>
+    <div class="controls">
+      <label style="font-weight:600">Metric:&nbsp;
+        <select id="line-history-metric-select" style="min-width:220px"></select>
+      </label>
+      <label><input type="radio" name="line-history-x" value="global_step" checked> Run experiment step</label>
+      <label><input type="radio" name="line-history-x" value="line_step"> Experiment number within line</label>
+    </div>
+    <div class="chart-wrap"><div id="line-history-chart" style="height:420px"></div></div>
   </div>
 
 </div>

@@ -24,13 +24,16 @@ from autoresearch.controller.proposal_schema import (
 )
 
 from autoresearch.experiment_registry.registry import (
+    get_research_line,
     get_official_champion,
     list_artifacts,
+    list_research_lines,
     list_research_nodes,
     next_queued_proposal,
     record_proposal,
     record_experiment_artifacts,
     set_official_champion,
+    upsert_research_line,
     upsert_research_node,
     update_proposal_status,
     upsert_branch,
@@ -166,6 +169,7 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
     proposal = next_queued_proposal(config.registry_path)
     if proposal is None:
         raise ValueError("No validated proposals are queued")
+    proposal = _hydrate_proposal_from_path(proposal)
 
     proposal_id = proposal["proposal_id"]
     if proposal.get("parent_experiment_id") != champion["champion_id"]:
@@ -228,8 +232,9 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
         )
 
         screening: dict[str, Any] | None = None
+        local_champion_id = _local_research_line_champion(config, proposal, champion["champion_id"])
         if getattr(config, "screening_enabled", True):
-            screening = screen_challenger_single_split(config, champion["champion_id"], experiment_id)
+            screening = screen_challenger_single_split(config, local_champion_id, experiment_id)
             screening_path = iteration_dir / "comparison" / "single_split_screening.json"
             screening_path.parent.mkdir(parents=True, exist_ok=True)
             write_json(screening_path, screening)
@@ -250,7 +255,7 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
                 reason = screening.get("reason", "Failed single-split screen.")
                 diagnostic_comparison = _write_screening_failure_comparison_report(
                     config,
-                    champion_id=champion["champion_id"],
+                    champion_id=local_champion_id,
                     challenger_id=experiment_id,
                     iteration_dir=iteration_dir,
                 )
@@ -293,6 +298,7 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
                     "comparison_report": str(diagnostic_comparison.get("html_report", "")),
                     "diagnostic_comparison_report": str(diagnostic_comparison.get("promotion_report", "")),
                     "diagnostic_gate_mode": "single_partition",
+                    "local_research_line_champion_id": local_champion_id,
                     "metrics_summary": _screening_metrics_summary(screening),
                 }
 
@@ -349,6 +355,7 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
             "escalated": report.get("escalated", False),
             "comparison_report": str(comparison_outputs.get("html_report", "")),
             "screening": screening,
+            "local_research_line_champion_id": local_champion_id,
             "metrics_summary": metrics_summary,
         }
     except ExperimentNeedsRepair as exc:
@@ -409,10 +416,74 @@ def _validate_and_normalise(
     if parent_branch != champion["branch_id"]:
         errors.append("parent_branch_id must match the current official champion branch")
     _validate_tree_navigation(config, parsed, context, errors)
+    _validate_research_line_navigation(config, parsed, errors)
     branch_action = parsed.get("branch_action", "extend_current")
     branch_id = parsed.get("branch_id") or (parsed.get("proposal_id") if branch_action == "new_branch" else parent_branch)
     proposal = normalise_proposal(parsed, branch_id=branch_id, parent_branch_id=parent_branch)
+    _ensure_research_line(config, proposal, errors)
     return proposal, errors
+
+
+def _validate_research_line_navigation(
+    config: ProjectConfig,
+    parsed: dict[str, Any],
+    errors: list[str],
+) -> None:
+    line_action = parsed.get("research_line_action")
+    line_id = parsed.get("research_line_id")
+    if not isinstance(line_id, str) or not line_id.strip():
+        return
+
+    existing = get_research_line(config.registry_path, line_id)
+    active_lines = list_research_lines(config.registry_path, status="active")
+    if line_action == "create_line":
+        if existing is not None:
+            errors.append("research_line_action=create_line requires a new research_line_id")
+        if len(active_lines) >= 5 and not parsed.get("tree_policy_override_rationale"):
+            errors.append(
+                "At most 5 active research lines are allowed without tree_policy_override_rationale; "
+                "extend or close an existing line."
+            )
+    elif line_action in {"extend_line", "revisit_line", "close_line"} and existing is None:
+        errors.append(f"research_line_action={line_action} requires an existing research_line_id")
+
+    research_parent = parsed.get("research_parent_node_id") or parsed.get("parent_node_id")
+    if research_parent and existing is not None:
+        parent_node = next(
+            (node for node in list_research_nodes(config.registry_path) if node.get("node_id") == research_parent),
+            None,
+        )
+        parent_line = parent_node.get("line_id") if parent_node else None
+        if parent_line and parent_line != line_id and not parsed.get("tree_policy_override_rationale"):
+            errors.append(
+                "research_parent_node_id belongs to a different research_line_id; "
+                "include tree_policy_override_rationale to cross lines."
+            )
+
+
+def _ensure_research_line(config: ProjectConfig, proposal: dict[str, Any], errors: list[str]) -> None:
+    if errors:
+        return
+    line_id = proposal.get("research_line_id")
+    if not line_id:
+        return
+    action = proposal.get("research_line_action")
+    root_node_id = proposal["proposal_id"] if action == "create_line" else None
+    status = "closed" if action == "close_line" else "active"
+    upsert_research_line(
+        config.registry_path,
+        line_id=line_id,
+        label=proposal.get("research_line_label") or line_id,
+        status=status,
+        root_node_id=root_node_id,
+        hypothesis=proposal.get("research_line_hypothesis"),
+        current_node_id=proposal["proposal_id"] if action == "create_line" else None,
+        notes=proposal.get("line_membership_rationale"),
+        metadata={
+            "created_or_updated_by_proposal": proposal.get("proposal_id"),
+            "research_line_action": action,
+        },
+    )
 
 
 def _validate_tree_navigation(
@@ -769,6 +840,46 @@ def _proposal_id(parsed: dict[str, Any] | None) -> str:
     return f"invalid_proposal_{stamp}"
 
 
+def _hydrate_proposal_from_path(proposal: dict[str, Any]) -> dict[str, Any]:
+    """Merge queue registry fields with the original proposal JSON metadata."""
+
+    result = dict(proposal)
+    proposal_path = result.get("proposal_path")
+    if proposal_path:
+        try:
+            stored = read_json(Path(proposal_path))
+            if isinstance(stored, dict):
+                merged = dict(stored)
+                merged.update({key: value for key, value in result.items() if value is not None})
+                if "config" not in merged and "experiment_config" in merged:
+                    merged["config"] = merged["experiment_config"]
+                if "experiment_config" not in merged and "config" in merged:
+                    merged["experiment_config"] = merged["config"]
+                return merged
+        except Exception:
+            pass
+    if "experiment_config" not in result and "config" in result:
+        result["experiment_config"] = result["config"]
+    return result
+
+
+def _local_research_line_champion(
+    config: ProjectConfig,
+    proposal: dict[str, Any],
+    fallback_champion_id: str,
+) -> str:
+    """Return the local incumbent used for cheap screening."""
+
+    line_id = proposal.get("research_line_id")
+    if not line_id:
+        return fallback_champion_id
+    line = get_research_line(config.registry_path, line_id)
+    if not line:
+        return fallback_champion_id
+    local_id = line.get("current_experiment_id") or line.get("best_experiment_id")
+    return str(local_id) if local_id else fallback_champion_id
+
+
 def _upsert_proposal_node(
     config: ProjectConfig,
     proposal: dict[str, Any],
@@ -798,11 +909,18 @@ def _upsert_proposal_node(
         "feature_representation": proposal.get("feature_representation"),
         "expected_learning": proposal.get("expected_learning"),
         "tree_policy_override_rationale": proposal.get("tree_policy_override_rationale"),
+        "research_line_action": proposal.get("research_line_action"),
+        "research_line_label": proposal.get("research_line_label"),
+        "research_line_hypothesis": proposal.get("research_line_hypothesis"),
+        "line_membership_rationale": proposal.get("line_membership_rationale"),
     }
     tree_metadata = {key: value for key, value in tree_metadata.items() if value is not None}
+    if not tree_metadata:
+        tree_metadata = None
     upsert_research_node(
         config.registry_path,
         node_id=proposal_id,
+        line_id=proposal.get("research_line_id"),
         proposal_id=proposal_id,
         parent_node_id=proposal.get("research_parent_node_id") or proposal.get("parent_node_id"),
         parent_experiment_id=proposal.get("parent_experiment_id") or cfg.get("parent_experiment_id"),

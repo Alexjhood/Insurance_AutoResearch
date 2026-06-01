@@ -465,12 +465,14 @@ def record_decision(
     decision: str,
     rationale: str,
 ) -> dict[str, Any]:
-    """Record the LLM's promote/reject verdict for a pending comparison.
+    """Record the LLM's global promote, local promote, or reject verdict.
 
-    ``decision`` must be ``"promote"`` or ``"reject"``.
+    ``decision`` must be ``"promote"``, ``"local_promote"``, or ``"reject"``.
 
     On ``promote``: re-evaluates guardrails and blocks if any hard fail is detected.
     On pass: updates the champion, fires holdout, persists the decision.
+    On ``local_promote``: advances the originating research line without changing
+    the official champion or firing holdout.
     On ``reject``: persists the rationale without promoting.
 
     Returns the final decision dict.
@@ -479,6 +481,8 @@ def record_decision(
         set_official_champion,
         list_comparisons,
         list_proposals,
+        find_research_node_by_experiment,
+        set_research_line_champion,
         upsert_research_node,
         update_proposal_status,
     )
@@ -486,8 +490,8 @@ def record_decision(
     from datetime import datetime, timezone
 
     decision = decision.lower().strip()
-    if decision not in ("promote", "reject"):
-        raise ValueError(f"decision must be 'promote' or 'reject', got {decision!r}")
+    if decision not in ("promote", "local_promote", "reject"):
+        raise ValueError(f"decision must be 'promote', 'local_promote', or 'reject', got {decision!r}")
 
     # Find the comparison record to locate artifacts
     all_comps = list_comparisons(config.registry_path)
@@ -505,6 +509,9 @@ def record_decision(
         None,
     )
     proposal_id = proposal.get("proposal_id") if proposal else None
+    node = find_research_node_by_experiment(config.registry_path, challenger_id)
+    line_id = node.get("line_id") if node else None
+    node_id = proposal_id or (node.get("node_id") if node else None)
 
     official = get_official_champion(config.registry_path)
     branch_id = official.get("branch_id", "main") if official else "main"
@@ -534,11 +541,53 @@ def record_decision(
             upsert_research_node(
                 config.registry_path,
                 node_id=proposal_id,
+                line_id=line_id,
                 proposal_id=proposal_id,
                 experiment_id=challenger_id,
                 comparison_id=comparison_id,
                 status="promoted",
                 outcome_type="promoted",
+                guidance=rationale,
+            )
+        if line_id:
+            set_research_line_champion(
+                config.registry_path,
+                line_id=line_id,
+                experiment_id=challenger_id,
+                node_id=node_id,
+                action="global_promoted",
+                reason=rationale,
+                comparison_id=comparison_id,
+                proposal_id=proposal_id,
+            )
+    elif decision == "local_promote":
+        if not line_id:
+            raise ValueError("local_promote requires the challenger to belong to a research line")
+        set_research_line_champion(
+            config.registry_path,
+            line_id=line_id,
+            experiment_id=challenger_id,
+            node_id=node_id,
+            action="local_promoted",
+            reason=rationale,
+            comparison_id=comparison_id,
+            proposal_id=proposal_id,
+        )
+        if proposal_id:
+            update_proposal_status(
+                config.registry_path, proposal_id, "local_promoted",
+                comparison_id=comparison_id, notes=rationale,
+            )
+        if node_id:
+            upsert_research_node(
+                config.registry_path,
+                node_id=node_id,
+                line_id=line_id,
+                proposal_id=proposal_id,
+                experiment_id=challenger_id,
+                comparison_id=comparison_id,
+                status="local_promoted",
+                outcome_type="local_promoted",
                 guidance=rationale,
             )
     else:  # reject — retain the incumbent champion
@@ -559,6 +608,7 @@ def record_decision(
             upsert_research_node(
                 config.registry_path,
                 node_id=proposal_id,
+                line_id=line_id,
                 proposal_id=proposal_id,
                 experiment_id=challenger_id,
                 comparison_id=comparison_id,
@@ -584,6 +634,7 @@ def record_decision(
         "decided_by": "llm",
         "decided_at": decided_at,
         "promoted": decision == "promote",
+        "local_promoted": decision == "local_promote",
         "guardrail_passed": guardrail_result.get("passed", True),
         "guardrail_failures": guardrail_result.get("failures", []),
     }
@@ -605,6 +656,7 @@ def record_decision(
         "decided_by": "llm",
         "decided_at": decided_at,
         "proposal_id": proposal_id,
+        "research_line_id": line_id,
         "guardrail_result": guardrail_result,
     }
 

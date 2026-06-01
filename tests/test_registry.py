@@ -17,4 +17,5 @@ def test_init_registry_creates_tables(tmp_path: Path) -> None:
         "branches": 0,
         "sessions": 0,
         "research_nodes": 0,
+        "research_lines": 0,
     }
