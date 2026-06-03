@@ -33,6 +33,7 @@ from autoresearch.experiment_registry.registry import (
     record_proposal,
     record_experiment_artifacts,
     set_official_champion,
+    park_research_line,
     upsert_research_line,
     upsert_research_node,
     update_proposal_status,
@@ -46,6 +47,9 @@ from autoresearch.utils.io import read_json, write_json
 
 class ExperimentNeedsRepair(ValueError):
     """Raised when a script attempt failed validation and another attempt is needed."""
+
+
+MAX_ACTIVE_RESEARCH_LINES = 5
 
 
 def enqueue_proposal_from_file(config: ProjectConfig, proposal_path: Path) -> dict[str, Any]:
@@ -439,13 +443,29 @@ def _validate_research_line_navigation(
     if line_action == "create_line":
         if existing is not None:
             errors.append("research_line_action=create_line requires a new research_line_id")
-        if len(active_lines) >= 5 and not parsed.get("tree_policy_override_rationale"):
+        park_line_id = parsed.get("park_research_line_id")
+        if len(active_lines) >= MAX_ACTIVE_RESEARCH_LINES:
+            if not isinstance(park_line_id, str) or not park_line_id.strip():
+                errors.append(
+                    f"At most {MAX_ACTIVE_RESEARCH_LINES} active research lines are allowed; "
+                    "set park_research_line_id to park one existing active line before creating another."
+                )
+            elif park_line_id == line_id:
+                errors.append("park_research_line_id cannot equal the new research_line_id")
+            elif not any(line.get("line_id") == park_line_id for line in active_lines):
+                errors.append("park_research_line_id must refer to an existing active research line")
+        elif park_line_id:
+            if not isinstance(park_line_id, str) or not park_line_id.strip():
+                errors.append("park_research_line_id must be a non-empty string or null")
+            elif not any(line.get("line_id") == park_line_id for line in active_lines):
+                errors.append("park_research_line_id must refer to an existing active research line")
+    elif line_action in {"extend_line", "revisit_line", "close_line"}:
+        if existing is None:
+            errors.append(f"research_line_action={line_action} requires an existing research_line_id")
+        elif existing.get("status") == "parked" and not parsed.get("tree_policy_override_rationale"):
             errors.append(
-                "At most 5 active research lines are allowed without tree_policy_override_rationale; "
-                "extend or close an existing line."
+                f"research_line_id {line_id!r} is parked; include tree_policy_override_rationale to revive it."
             )
-    elif line_action in {"extend_line", "revisit_line", "close_line"} and existing is None:
-        errors.append(f"research_line_action={line_action} requires an existing research_line_id")
 
     research_parent = parsed.get("research_parent_node_id") or parsed.get("parent_node_id")
     if research_parent and existing is not None:
@@ -469,7 +489,17 @@ def _ensure_research_line(config: ProjectConfig, proposal: dict[str, Any], error
         return
     action = proposal.get("research_line_action")
     root_node_id = proposal["proposal_id"] if action == "create_line" else None
-    status = "closed" if action == "close_line" else "active"
+    if action == "create_line" and proposal.get("park_research_line_id"):
+        park_research_line(
+            config.registry_path,
+            line_id=str(proposal["park_research_line_id"]),
+            reason=(
+                proposal.get("park_research_line_rationale")
+                or f"Parked to open new research line {line_id}."
+            ),
+            proposal_id=proposal.get("proposal_id"),
+        )
+    status = "parked" if action == "close_line" else "active"
     upsert_research_line(
         config.registry_path,
         line_id=line_id,
@@ -875,6 +905,8 @@ def _local_research_line_champion(
         return fallback_champion_id
     line = get_research_line(config.registry_path, line_id)
     if not line:
+        return fallback_champion_id
+    if line.get("status") != "active":
         return fallback_champion_id
     local_id = line.get("current_experiment_id") or line.get("best_experiment_id")
     return str(local_id) if local_id else fallback_champion_id

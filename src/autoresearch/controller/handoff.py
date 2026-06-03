@@ -81,6 +81,8 @@ def _proposal_template(config: ProjectConfig, context: dict[str, Any]) -> dict[s
         "research_line_label": selected_line.get("label", "Short research line label"),
         "research_line_hypothesis": selected_line.get("hypothesis", "What this line is trying to learn."),
         "line_membership_rationale": "Why this proposal belongs in this research line.",
+        "park_research_line_id": None,
+        "park_research_line_rationale": None,
         "tree_action": recommended_action.get("tree_action", "new_root"),
         "research_parent_node_id": recommended_action.get("parent_node_id"),
         "selected_tree_action_id": recommended_action.get("action_id", "start_first_root"),
@@ -315,6 +317,7 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
     research_lines = context.get("research_lines") or {}
     node_lines = _render_tree_node_lines(tree.get("recent_nodes") or [])
     research_line_lines = _render_research_line_lines(research_lines.get("active_lines") or [])
+    parked_line_lines = _render_parked_line_lines(research_lines.get("parked_lines") or [])
     recommended_actions = (tree.get("tree_policy") or {}).get("recommended_actions") or []
     recommended_action = recommended_actions[0] if recommended_actions else {}
     action_lines = _render_tree_policy_lines(recommended_actions)
@@ -329,6 +332,8 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "research_line_label": "<human readable line label>",
         "research_line_hypothesis": "<what this local line is exploring>",
         "line_membership_rationale": "<why this proposal belongs in this line>",
+        "park_research_line_id": None,
+        "park_research_line_rationale": None,
         "tree_action": recommended_action.get("tree_action", "<tree_action>"),
         "research_parent_node_id": recommended_action.get("parent_node_id"),
         "selected_tree_action_id": recommended_action.get("action_id", "<recommended action_id>"),
@@ -435,6 +440,7 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "- Choose `research_parent_node_id` from this tree when the next idea builds on a prior hypothesis; use `null` only for a genuinely new line of attack.",
         "- Cross-run memory, when enabled, may inform broad strategy but must not supply tree parent IDs or evidence for this run.",
         "- Choose `research_line_action` and `research_line_id` so the run maintains a small number of coherent local research lines.",
+        "- Keep at most 5 research lines active. When creating a new line at the cap, set `park_research_line_id` and explain why it should be parked.",
         "- A future `record-decision` can be `promote` for the whole run, `local_promote` for this line only, or `reject`.",
         "- The single-split hurdle uses this line's local incumbent where available; full comparison still reports against the official champion.",
         "- Set `tree_action`, `selected_tree_action_id`, and `parent_rationale`; if you ignore the recommended action, include `tree_policy_override_rationale`.",
@@ -442,6 +448,7 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "- Clear failures and auto-rejections are evidence. Reflect on them, then branch only when the child idea is materially different.",
         "",
         *research_line_lines,
+        *parked_line_lines,
         "",
         *action_lines,
         "",
@@ -496,6 +503,8 @@ def proposal_schema_document(config: ProjectConfig, context: dict[str, Any]) -> 
             "tree_action=new_root may use research_parent_node_id=null; all other tree actions must point to a valid active-run node.",
             "selected_tree_action_id should match a recommended action from research_tree.tree_policy, unless tree_policy_override_rationale explains the deviation.",
             "research_line_action=create_line must use a new research_line_id; extend_line/revisit_line/close_line must use an existing active-run line.",
+            "If 5 research lines are already active, research_line_action=create_line must include park_research_line_id for an existing active line.",
+            "Parked lines remain in history and reports, but new proposals should not extend them unless tree_policy_override_rationale explains why.",
             "Keep the active run to a small number of coherent research lines; use local promotion for progress inside a line without replacing the global champion.",
             "Only one validated proposal is ingested per context refresh while a proposal is queued or awaiting decision; additional proposal JSON files remain deferred in the inbox.",
             f"Active target_mode is {config.target_mode}; use frequency only when the run was explicitly configured for it.",
@@ -535,6 +544,19 @@ def _render_research_line_lines(lines_in: list[dict[str, Any]]) -> list[str]:
         lines.append(
             f"- `{item.get('line_id')}` ({label}); local_incumbent=`{incumbent}`; hypothesis: {hypothesis}"
         )
+    return lines
+
+
+def _render_parked_line_lines(lines_in: list[dict[str, Any]]) -> list[str]:
+    if not lines_in:
+        return []
+    lines = ["Parked research lines:"]
+    for item in lines_in[:5]:
+        label = item.get("label") or item.get("line_id")
+        notes = item.get("notes") or ""
+        if len(notes) > 100:
+            notes = notes[:100] + "..."
+        lines.append(f"- `{item.get('line_id')}` ({label}); parked_reason: {notes}")
     return lines
 
 

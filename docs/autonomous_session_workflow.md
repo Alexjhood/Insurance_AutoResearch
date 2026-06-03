@@ -63,9 +63,12 @@ not provide tree parent IDs or active-run evidence.
 The process also maintains explicit research lines. A proposal declares
 `research_line_action`, `research_line_id`, `research_line_label`,
 `research_line_hypothesis`, and `line_membership_rationale`. These lines are
-local to the active run and should stay small in number. They allow the agent to
-advance a coherent local hypothesis with `record-decision --decision
-local_promote` without replacing the official champion for the whole run.
+local to the active run and should stay small in number: at most 5 lines may be
+active. They allow the agent to advance a coherent local hypothesis with
+`record-decision --decision local_promote` without replacing the official
+champion for the whole run. If the run is already at the active-line cap, a
+new-line proposal must include `park_research_line_id` to park one existing
+active line.
 
 Only one valid proposal is ingested per context refresh while the queue is
 active or a decision is pending. Additional JSON files remain in the inbox with
@@ -90,6 +93,7 @@ Required tree metadata fields are:
 - `research_line_label`
 - `research_line_hypothesis`
 - `line_membership_rationale`
+- `park_research_line_id` when creating a new line at the 5-active-line cap
 
 Valid challengers pass through a cheap full `search_validation` single-split
 screen before CV/bootstrap comparison. Clearly worse challengers are
@@ -99,6 +103,19 @@ not recorded as an official pending comparison. Similar or better challengers
 continue to the full comparison report and LLM decision. When a research line
 has a local incumbent, the single-split screen uses that local incumbent;
 otherwise it falls back to the official champion.
+
+If later evidence shows a local incumbent was an artefact, clear it with:
+
+```bash
+autoresearch clear-line-champion <line_id> --reason "..."
+```
+
+To remove a weak or exhausted line from the active set while retaining its
+history, use:
+
+```bash
+autoresearch park-research-line <line_id> --reason "..."
+```
 
 ## Pause Or Stop
 

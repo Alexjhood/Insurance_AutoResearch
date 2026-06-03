@@ -119,6 +119,102 @@ def set_research_line_champion(
         )
 
 
+def park_research_line(
+    path: Path,
+    *,
+    line_id: str,
+    reason: str,
+    proposal_id: str | None = None,
+) -> None:
+    """Park a research line so it remains visible but is not normally extended."""
+
+    init_registry(path)
+    with sqlite3.connect(path) as con:
+        con.row_factory = sqlite3.Row
+        row = con.execute(
+            "SELECT * FROM research_lines WHERE line_id = ?",
+            (line_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Research line {line_id!r} not found")
+        con.execute(
+            """
+            UPDATE research_lines
+            SET updated_at = CURRENT_TIMESTAMP,
+                status = 'parked',
+                notes = ?
+            WHERE line_id = ?
+            """,
+            (reason, line_id),
+        )
+        con.execute(
+            """
+            INSERT INTO research_line_history (
+                line_id, previous_experiment_id, new_experiment_id, node_id,
+                action, reason, comparison_id, proposal_id
+            )
+            VALUES (?, ?, ?, ?, 'parked', ?, NULL, ?)
+            """,
+            (
+                line_id,
+                row["current_experiment_id"],
+                row["current_experiment_id"] or "",
+                row["current_node_id"],
+                reason,
+                proposal_id,
+            ),
+        )
+
+
+def clear_research_line_champion(
+    path: Path,
+    *,
+    line_id: str,
+    reason: str,
+    proposal_id: str | None = None,
+    comparison_id: str | None = None,
+) -> None:
+    """Clear the local incumbent for one research line.
+
+    Experiments and nodes are retained; future screening falls back to the
+    official champion until the line is locally promoted again.
+    """
+
+    init_registry(path)
+    with sqlite3.connect(path) as con:
+        con.row_factory = sqlite3.Row
+        row = con.execute(
+            "SELECT * FROM research_lines WHERE line_id = ?",
+            (line_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Research line {line_id!r} not found")
+        previous = row["current_experiment_id"] or row["best_experiment_id"]
+        con.execute(
+            """
+            UPDATE research_lines
+            SET updated_at = CURRENT_TIMESTAMP,
+                current_node_id = NULL,
+                current_experiment_id = NULL,
+                best_node_id = NULL,
+                best_experiment_id = NULL,
+                notes = ?
+            WHERE line_id = ?
+            """,
+            (reason, line_id),
+        )
+        con.execute(
+            """
+            INSERT INTO research_line_history (
+                line_id, previous_experiment_id, new_experiment_id, node_id,
+                action, reason, comparison_id, proposal_id
+            )
+            VALUES (?, ?, '', ?, 'local_cleared', ?, ?, ?)
+            """,
+            (line_id, previous, row["current_node_id"] or row["best_node_id"], reason, comparison_id, proposal_id),
+        )
+
+
 def record_research_line_history(
     path: Path,
     *,

@@ -160,13 +160,26 @@ Every proposal must declare a local research line:
 - `research_line_action`: `create_line`, `extend_line`, `revisit_line`, or `close_line`.
 - `research_line_id`: a short stable identifier for the line.
 - `research_line_label`, `research_line_hypothesis`, and `line_membership_rationale`: enough context to explain why the proposal belongs there.
+- `park_research_line_id`: optional; required when creating a new line while 5 lines are already active.
 
-Keep the run organised into a small number of coherent lines. A line is a local sequence of related hypotheses, not a prescribed model family. It should describe what the run is trying to learn, while leaving implementation choices open.
+Keep the run organised into at most 5 active lines. A line is a local sequence of related hypotheses, not a prescribed model family. It should describe what the run is trying to learn, while leaving implementation choices open. Park weak or exhausted lines instead of keeping them active indefinitely.
 
 The framework tracks two kinds of promotion:
 
 - **Global promotion** (`promote`): replaces the official champion for the whole run and triggers holdout evaluation.
 - **Local promotion** (`local_promote`): advances only the proposal's research line and becomes that line's incumbent for future screening.
+
+If later evidence shows a local incumbent was an artefact, clear it:
+
+```bash
+autoresearch --track <track> clear-line-champion <line_id> --reason "Local incumbent appears artefactual; future screening should fall back to the official champion."
+```
+
+To park an exhausted line manually:
+
+```bash
+autoresearch --track <track> park-research-line <line_id> --reason "No useful near-term follow-up."
+```
 
 ---
 

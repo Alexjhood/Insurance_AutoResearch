@@ -41,6 +41,8 @@ from autoresearch.experiment_registry.registry import (
     list_comparisons,
     list_experiments,
     list_proposals,
+    park_research_line,
+    clear_research_line_champion,
 )
 from autoresearch.experiment_runner import run_all_baselines, run_experiment
 from autoresearch.milestone import manual_evaluate_on_holdout
@@ -246,6 +248,32 @@ def _cmd_list_champion_history(config, args) -> int:
                 row["reason"],
             ])
         )
+    return 0
+
+
+def _cmd_park_research_line(config, args) -> int:
+    park_research_line(
+        config.registry_path,
+        line_id=args.line_id,
+        reason=args.reason,
+    )
+    export_context_bundle(config)
+    print(f"Parked research line: {args.line_id}")
+    print(f"Reason: {args.reason}")
+    return 0
+
+
+def _cmd_clear_line_champion(config, args) -> int:
+    clear_research_line_champion(
+        config.registry_path,
+        line_id=args.line_id,
+        reason=args.reason,
+        proposal_id=args.proposal_id,
+        comparison_id=args.comparison_id,
+    )
+    export_context_bundle(config)
+    print(f"Cleared local champion for research line: {args.line_id}")
+    print(f"Reason: {args.reason}")
     return 0
 
 
@@ -685,6 +713,8 @@ COMMANDS = {
     "run-next-proposal": _cmd_run_next_proposal,
     "list-proposals": _cmd_list_proposals,
     "list-champion-history": _cmd_list_champion_history,
+    "park-research-line": _cmd_park_research_line,
+    "clear-line-champion": _cmd_clear_line_champion,
     "list-branches": _cmd_list_branches,
     "inspect-proposal": _cmd_inspect_proposal,
     "evaluate-milestone": _cmd_evaluate_milestone,
@@ -793,6 +823,20 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("run-next-proposal", help="Run the next queued proposal through comparison and promotion gate.")
     subparsers.add_parser("list-proposals", help="Print proposal queue status.")
     subparsers.add_parser("list-champion-history", help="Print official champion history.")
+    park_line = subparsers.add_parser(
+        "park-research-line",
+        help="Park an active research line so it remains in history but is not normally extended.",
+    )
+    park_line.add_argument("line_id")
+    park_line.add_argument("--reason", required=True)
+    clear_line = subparsers.add_parser(
+        "clear-line-champion",
+        help="Clear a research line's local champion so screening falls back to the official champion.",
+    )
+    clear_line.add_argument("line_id")
+    clear_line.add_argument("--reason", required=True)
+    clear_line.add_argument("--proposal-id", default=None)
+    clear_line.add_argument("--comparison-id", default=None)
     subparsers.add_parser("list-branches", help="Print branch lineage records.")
     inspect = subparsers.add_parser("inspect-proposal", help="Print one proposal record as JSON.")
     inspect.add_argument("proposal_id")

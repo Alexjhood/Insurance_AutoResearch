@@ -9,11 +9,13 @@ from autoresearch.controller.proposal_schema import allowed_search_space, valida
 from autoresearch.controller.workflow import ExperimentNeedsRepair, run_next_queued_proposal
 from autoresearch.experiment_registry.registry import (
     init_registry,
+    clear_research_line_champion,
     list_proposals,
     list_research_lines,
     list_research_nodes,
     record_experiment,
     set_official_champion,
+    upsert_research_line,
     upsert_research_node,
 )
 from autoresearch.experiment_runner import run_experiment
@@ -253,6 +255,80 @@ def test_research_tree_metadata_survives_status_only_update(tmp_path: Path) -> N
 
     assert node["status"] == "running"
     assert node["tree_metadata"]["exploration_axis"] == "model_family"
+
+
+def test_create_line_at_cap_requires_and_applies_parking(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _record_direct(config)
+    initialise_official_champion(config)
+    config.metadata_dir.mkdir(parents=True, exist_ok=True)
+    (config.metadata_dir / "agent_schema.json").write_text(
+        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]}',
+        encoding="utf-8",
+    )
+    for idx in range(5):
+        upsert_research_line(
+            config.registry_path,
+            line_id=f"line_{idx}",
+            label=f"Line {idx}",
+            status="active",
+            hypothesis="Existing line.",
+        )
+
+    proposal = _valid_proposal()
+    proposal["proposal_id"] = "new_line_no_park"
+    proposal["research_line_id"] = "line_new"
+    proposal["research_line_label"] = "New line"
+    proposal["experiment_name"] = "new_line_no_park"
+    proposal["experiment_config"]["experiment_name"] = "new_line_no_park"
+    config.handoff_proposal_inbox_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_proposal_inbox_dir / "proposal.json").write_text(json.dumps(proposal), encoding="utf-8")
+
+    summary = ingest_proposals(config)
+
+    assert summary["invalid_count"] == 1
+    assert any("At most 5 active research lines" in err for err in summary["results"][0]["validation_errors"])
+
+    proposal["proposal_id"] = "new_line_with_park"
+    proposal["park_research_line_id"] = "line_0"
+    proposal["park_research_line_rationale"] = "Line 0 has no useful next step."
+    proposal["tree_policy_override_rationale"] = "Test isolates line parking after an intentionally invalid proposal."
+    proposal["experiment_name"] = "new_line_with_park"
+    proposal["experiment_config"]["experiment_name"] = "new_line_with_park"
+    (config.handoff_proposal_inbox_dir / "proposal2.json").write_text(json.dumps(proposal), encoding="utf-8")
+
+    summary = ingest_proposals(config)
+    lines = {line["line_id"]: line for line in list_research_lines(config.registry_path)}
+
+    assert summary["valid_count"] == 1
+    assert lines["line_0"]["status"] == "parked"
+    assert lines["line_new"]["status"] == "active"
+
+
+def test_clear_research_line_champion_keeps_line_but_removes_incumbent(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    upsert_research_line(
+        config.registry_path,
+        line_id="freq_sev",
+        label="Frequency-severity",
+        status="active",
+        hypothesis="Test decompositions.",
+        current_node_id="s12",
+        current_experiment_id="exp_s12",
+        best_node_id="s12",
+        best_experiment_id="exp_s12",
+    )
+
+    clear_research_line_champion(
+        config.registry_path,
+        line_id="freq_sev",
+        reason="s12 was an exposure artefact.",
+    )
+    line = next(item for item in list_research_lines(config.registry_path) if item["line_id"] == "freq_sev")
+
+    assert line["status"] == "active"
+    assert line["current_experiment_id"] is None
+    assert line["best_experiment_id"] is None
 
 
 def test_tree_action_requires_parent_for_non_root(tmp_path: Path) -> None:

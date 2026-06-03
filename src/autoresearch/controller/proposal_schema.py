@@ -119,6 +119,13 @@ def validate_proposal(proposal: dict[str, Any], search_space: dict[str, Any]) ->
     if line_id and not re.fullmatch(r"[A-Za-z0-9_\-]{3,80}", line_id):
         errors.append("research_line_id must be 3-80 chars using letters, numbers, hyphen, or underscore")
 
+    park_line_id = proposal.get("park_research_line_id")
+    if park_line_id is not None:
+        if not isinstance(park_line_id, str) or not park_line_id.strip():
+            errors.append("park_research_line_id must be a non-empty string or null")
+        elif not re.fullmatch(r"[A-Za-z0-9_\-]{3,80}", park_line_id):
+            errors.append("park_research_line_id must be 3-80 chars using letters, numbers, hyphen, or underscore")
+
     line_action = proposal.get("research_line_action")
     if line_action not in RESEARCH_LINE_ACTIONS:
         errors.append(f"research_line_action must be one of {sorted(RESEARCH_LINE_ACTIONS)}")
