@@ -64,6 +64,18 @@ autoresearch --track claude --new-run bootstrap-track \
 autoresearch --track claude run-session-cycles 3
 ```
 
+## Run Isolation and Analysis Sessions
+
+A **run-scope guard** (a pre-tool-use hook, shared by all three harnesses) keeps a research session inside its own run folder. Once you bootstrap, the session is bound to that run and the harness blocks any attempt to read another run's files under `artifacts/tracks/`; your own run, `src/`, data, and configs stay fully accessible. Because an un-bootstrapped session is unrestricted, **run the bootstrap command before inspecting the repository or any artifacts**.
+
+For a build or analysis thread that needs to read across runs, launch Claude Code with the analyst override in the environment:
+
+```bash
+AUTORESEARCH_SCOPE=analyst claude
+```
+
+This exempts the session from confinement. See [`docs/architecture.md`](architecture.md) → *Run-Scope Guard* for details.
+
 ## Optional: Enable Cross-Run Memory Access
 
 To let the agent query prior runs' insights and analysis:

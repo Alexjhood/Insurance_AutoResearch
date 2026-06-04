@@ -184,7 +184,7 @@ def _cmd_list_promotions(config, args) -> int:
                 row["challenger_id"],
                 str(row.get("mean_lift")),
                 str(row.get("challenger_win_rate")),
-                row["promotion_decision"],
+                row.get("final_decision") or row["promotion_decision"],
             ])
         )
     return 0

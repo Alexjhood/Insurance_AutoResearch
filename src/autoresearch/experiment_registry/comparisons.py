@@ -124,6 +124,7 @@ def list_comparisons(path: Path) -> list[dict[str, Any]]:
         item["bootstrap_summary"] = json.loads(item["bootstrap_summary"])
         item["mean_lift"] = item["paired_summary"].get("mean_lift")
         item["challenger_win_rate"] = item["paired_summary"].get("challenger_win_rate")
+        item["final_decision"] = item.get("decision") or item.get("promotion_decision")
         item["bootstrap_interval_lower"] = item["bootstrap_summary"].get("interval_lower")
         item["bootstrap_interval_upper"] = item["bootstrap_summary"].get("interval_upper")
         item["probability_challenger_outperforms"] = item["bootstrap_summary"].get(

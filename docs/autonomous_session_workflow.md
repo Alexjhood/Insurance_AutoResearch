@@ -50,7 +50,9 @@ Each run maintains its own research tree in that run's `registry.sqlite`. The
 tree records proposal nodes, explicit tree-walk metadata, their optional
 `research_parent_node_id`, outcome, screening metrics, and guidance for later
 proposals. Context export only reads the active run's tree; it does not search
-other tracks or runs.
+other tracks or runs. Beyond context export, the run-scope guard independently
+blocks a bound research session from reading other runs' folders by raw file
+access (see `docs/architecture.md` → Run-Scope Guard).
 
 The context also includes `research_tree.tree_policy.recommended_actions`. A
 proposal must choose one recommendation through `selected_tree_action_id`, set

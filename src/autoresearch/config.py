@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import tomllib
 
 from autoresearch.targets import BURNING_COST, normalise_target_mode
@@ -13,6 +14,8 @@ from autoresearch.targets import BURNING_COST, normalise_target_mode
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "default.toml"
+AGENT_TRACK_IDS = {"codex", "claude", "opencode"}
+RUN_ID_TIMESTAMP_RE = re.compile(r"^\d{8}T\d{6}Z$")
 
 
 @dataclass(frozen=True)
@@ -104,6 +107,8 @@ class ProjectConfig:
     model_harness: str | None = None
     # cross-run memory
     structural_gini_threshold: float = 0.37
+    # Whether this command should move artifacts/tracks/<track>/latest_run.json.
+    update_latest_run: bool = True
 
 
 def _resolve(root: Path, value: str) -> Path:
@@ -150,10 +155,24 @@ def load_config(
     base_artifacts = _resolve(PROJECT_ROOT, paths["artifacts_dir"])
     resolved_run = run_id or "default"
     track_base: Path | None = None
+    update_latest_run = True
 
     if track_id:
+        if track_id in AGENT_TRACK_IDS and run_id and not RUN_ID_TIMESTAMP_RE.fullmatch(run_id):
+            raise ValueError(
+                f"run_id for agent track '{track_id}' must be a UTC timestamp "
+                "in YYYYMMDDTHHMMSSZ form. Use --new-run to create one, or "
+                "omit --run-id to continue the latest timestamped run."
+            )
         track_base = base_artifacts / "tracks" / track_id
+        latest_path = track_base / "latest_run.json"
+        update_latest_run = new_run or run_id is None or not latest_path.exists()
         resolved_run = _resolve_run_id(track_base, run_id, new_run=new_run)
+        if track_id in AGENT_TRACK_IDS and not RUN_ID_TIMESTAMP_RE.fullmatch(resolved_run):
+            raise ValueError(
+                f"latest run_id for agent track '{track_id}' is not timestamp-shaped: "
+                f"{resolved_run!r}. Pass --new-run to create a timestamped run."
+            )
         run_base = track_base / "runs" / resolved_run
         artifacts_dir = run_base
         registry_path = run_base / "registry.sqlite"
@@ -246,6 +265,7 @@ def load_config(
         screening_min_relative_lift=float(screening_cfg.get("min_relative_lift", -0.002)),
         running_stale_minutes=int(raw.get("handoff", {}).get("running_stale_minutes", 30)),
         structural_gini_threshold=float(memory_cfg.get("structural_gini_threshold", 0.37)),
+        update_latest_run=update_latest_run,
     )
 
 
@@ -270,20 +290,21 @@ def ensure_project_dirs(config: ProjectConfig) -> None:
 
     if config.track_id != "default" and config.track_base_dir is not None:
         latest_path = config.track_base_dir / "latest_run.json"
-        latest_path.parent.mkdir(parents=True, exist_ok=True)
-        latest_path.write_text(
-            json.dumps(
-                {
-                    "track_id": config.track_id,
-                    "run_id": config.run_id,
-                    "run_dir": str(config.artifacts_dir),
-                },
-                indent=2,
-                sort_keys=True,
+        if config.update_latest_run:
+            latest_path.parent.mkdir(parents=True, exist_ok=True)
+            latest_path.write_text(
+                json.dumps(
+                    {
+                        "track_id": config.track_id,
+                        "run_id": config.run_id,
+                        "run_dir": str(config.artifacts_dir),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
             )
-            + "\n",
-            encoding="utf-8",
-        )
         manifest_path = config.artifacts_dir / "run_manifest.json"
         if not manifest_path.exists():
             import os

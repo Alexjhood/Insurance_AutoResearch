@@ -69,7 +69,7 @@ compare-experiments / compare-to-champion
 
 ## Cross-Run Memory Aggregator
 
-A separate read-only harvesting layer accumulates search-split experiment results across runs into a cross-run aggregator that lives **outside the repo working tree** (default `~/.autoresearch/<project>/memory/memory.sqlite`, overridable with `AUTORESEARCH_MEMORY_DIR`). Keeping it out of the working tree means per-run agents cannot reach other runs' results by raw filesystem reads — the access gate protects the query tool and context/handoff injection, not arbitrary file reads. Per-run registries are never written to; the harvester opens them `mode=ro`.
+A separate read-only harvesting layer accumulates search-split experiment results across runs into a cross-run aggregator that lives **outside the repo working tree** (default `~/.autoresearch/<project>/memory/memory.sqlite`, overridable with `AUTORESEARCH_MEMORY_DIR`). Keeping it out of the working tree means per-run agents cannot reach other runs' results through the aggregator. The memory access gate is a separate control that governs the query tool and context/handoff injection. Raw reads of *other runs' in-repo folders* are blocked independently by the run-scope guard (see below). Per-run registries are never written to; the harvester opens them `mode=ro`.
 
 ```
 artifacts/tracks/<track>/runs/<run-id>/registry.sqlite   (per-run, isolated, in repo)
@@ -85,6 +85,25 @@ artifacts/tracks/<track>/runs/<run-id>/registry.sqlite   (per-run, isolated, in 
 - `AUTORESEARCH_MEMORY_ACCESS` (env var) controls agent access: `none` (default, context unchanged), `own` (filtered to own model), `all` (all models, attributed). The agent cannot set this itself.
 - Model identity (`--model-provider`, `--model-name`) is required at `bootstrap-track` so results are attributed to a model in the aggregator.
 - The every-5-cycle checkpoint also writes `pending_reflection.md` to prompt the agent to record evidence-bound insights, and regenerates the playbook when new verified insights land.
+
+## Run-Scope Guard
+
+Within the repo working tree, runs are physically siblings under `artifacts/tracks/<track>/runs/<run-id>/`. The framework's own commands are already run-scoped, but an agent's *free-form* file access (shell `cat`/`grep`, file reads/edits) could still reach into a sibling run's folder and contaminate an otherwise independent experiment. A harness-level guard closes that channel.
+
+One shared decision script (`scripts/run_scope_guard.py`) is wired into all three agent harnesses as a pre-tool-use hook:
+
+- **Claude Code** — `.claude/settings.json` (stdin payload, exit code `2` denies)
+- **Codex** — `.codex/hooks.json` (same stdin/exit-code contract)
+- **OpenCode** — `.opencode/plugins/run-scope-guard.js` (a thin adapter that shells out to the same script and `throw`s to deny)
+
+Policy (**default-analyst**):
+
+- A session is **unbound** until it runs its first `autoresearch --track …` command, at which point it is automatically **bound** to exactly that run. Binding is keyed on the harness session id, so parallel runs in separate threads stay independent.
+- A **bound research** session is blocked from reading, grepping, or listing any *other* run's folder — in any track, including its own track's siblings — and from enumerating the `runs/` directory. Its own run, `src/`, data, configs, and tests stay fully accessible. The block is enforced by the harness and cannot be overridden by the model.
+- An **unbound** session (build work, before any `autoresearch` command) and an **analyst** session are unrestricted. Analyst mode is requested with `AUTORESEARCH_SCOPE=analyst` in the launch environment and is the supported way to run a deliberate cross-run analysis thread.
+- Because an unbound session is unrestricted, a research agent **must bootstrap before inspecting any artifacts** (an AGENT.md rule); this keeps the pre-bind window empty.
+
+Cross-run knowledge therefore reaches a research agent only through the memory aggregator (when enabled), never through raw reads. Session scope files and the guard log live under `artifacts/tracks/.scope/` (gitignored). The guard **fails open**: any internal error allows the call, so a guard bug can never block legitimate research.
 
 ## Holdout Vault
 

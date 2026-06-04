@@ -2,7 +2,7 @@ import json
 import re
 from pathlib import Path
 
-from autoresearch.config import _resolve_run_id, load_config
+from autoresearch.config import ProjectConfig, _resolve_run_id, ensure_project_dirs, load_config
 from autoresearch.controller.champion import initialise_official_champion
 from autoresearch.controller.handoff import export_context_bundle, inbox_status, ingest_proposals, write_proposal_template
 from autoresearch.controller.proposal_schema import allowed_search_space, validate_proposal
@@ -89,14 +89,23 @@ def test_default_config_uses_file_handoff() -> None:
 
 
 def test_tracked_config_scopes_artifacts_to_run() -> None:
-    config = load_config(track_id="codex", run_id="CodexTimeX")
+    config = load_config(track_id="codex", run_id="20260604T081500Z")
 
     assert config.track_id == "codex"
-    assert config.run_id == "CodexTimeX"
-    assert config.artifacts_dir.name == "CodexTimeX"
+    assert config.run_id == "20260604T081500Z"
+    assert config.artifacts_dir.name == "20260604T081500Z"
     assert config.artifacts_dir.parent.name == "runs"
     assert config.registry_path == config.artifacts_dir / "registry.sqlite"
     assert config.handoff_context_dir == config.artifacts_dir / "context"
+
+
+def test_agent_track_rejects_non_timestamp_run_id() -> None:
+    try:
+        load_config(track_id="codex", run_id="CodexTimeX")
+    except ValueError as exc:
+        assert "must be a UTC timestamp" in str(exc)
+    else:
+        raise AssertionError("Expected non-timestamp agent run_id to be rejected")
 
 
 def test_new_run_id_is_timestamp_even_when_latest_exists(tmp_path: Path) -> None:
@@ -108,6 +117,78 @@ def test_new_run_id_is_timestamp_even_when_latest_exists(tmp_path: Path) -> None
 
     assert run_id != "CC20260526_01"
     assert re.fullmatch(r"\d{8}T\d{6}Z", run_id)
+
+
+def test_explicit_run_id_does_not_move_latest_pointer(tmp_path: Path) -> None:
+    track_base = tmp_path / "artifacts" / "tracks" / "codex"
+    track_base.mkdir(parents=True)
+    latest = track_base / "latest_run.json"
+    latest.write_text(json.dumps({"track_id": "codex", "run_id": "newer"}), encoding="utf-8")
+
+    config = ProjectConfig(
+        root=tmp_path,
+        raw_data_dir=tmp_path / "raw",
+        processed_dir=tmp_path / "processed",
+        holdout_vault_dir=tmp_path / "holdout_vault",
+        metadata_dir=tmp_path / "metadata",
+        splits_dir=tmp_path / "splits",
+        artifacts_dir=track_base / "runs" / "older",
+        registry_path=track_base / "runs" / "older" / "registry.sqlite",
+        research_log_path=track_base / "runs" / "older" / "RESEARCH_LOG.md",
+        track_id="codex",
+        random_seed=1,
+        id_column="record_id",
+        agent_dataset_name="agent_dataset",
+        claim_capping_enabled=True,
+        claim_cap_threshold=100000,
+        split_ratios={"train": 0.64, "search_validation": 0.16, "milestone_holdout": 0.2},
+        ordinary_train_split="train",
+        ordinary_eval_splits=("search_validation",),
+        target_mode="burning_cost",
+        primary_metric="gini_weighted",
+        tweedie_power=1.5,
+        use_cv=False,
+        cv_folds=4,
+        cv_n_repeats=1,
+        cv_seed=1,
+        gate_mode="cv_bootstrap",
+        gate_primary_metric="gini_weighted",
+        bootstrap_per_fold=20,
+        escalation_win_rate_low=0.4,
+        escalation_win_rate_high=0.6,
+        escalation_partitions=2,
+        repeated_resamples=30,
+        bootstrap_iterations=100,
+        resample_fraction=1.0,
+        resampling_seed=1,
+        minimum_mean_lift=0.0,
+        min_relative_lift=0.0,
+        min_absolute_lift=0.0,
+        minimum_win_rate=0.5,
+        bootstrap_lower_bound=0.0,
+        bootstrap_lower_bound_relative=0.0,
+        confidence_level=0.9,
+        max_predicted_to_actual_drift=0.05,
+        require_diagnostics=False,
+        bonferroni_lookback=10,
+        handoff_base_dir=track_base / "runs" / "older",
+        handoff_context_dir=track_base / "runs" / "older" / "context",
+        handoff_proposal_inbox_dir=track_base / "runs" / "older" / "proposal_inbox",
+        handoff_proposal_processed_dir=track_base / "runs" / "older" / "proposal_processed",
+        handoff_results_dir=track_base / "runs" / "older" / "results",
+        handoff_handoffs_dir=track_base / "runs" / "older" / "handoffs",
+        proposal_inbox_file=track_base / "runs" / "older" / "proposal_inbox" / "manual_proposals.jsonl",
+        deduplication_policy="hash",
+        deduplication_lookback=10,
+        search_space={},
+        run_id="older",
+        track_base_dir=track_base,
+        update_latest_run=False,
+    )
+
+    ensure_project_dirs(config)
+
+    assert json.loads(latest.read_text(encoding="utf-8"))["run_id"] == "newer"
 
 
 def test_export_context_and_template(tmp_path: Path) -> None:

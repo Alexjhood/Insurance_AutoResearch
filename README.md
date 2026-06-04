@@ -111,6 +111,7 @@ flowchart LR
 Insurance_AutoResearch/
 ├── artifacts/
 │   ├── tracks/<track>/runs/<run-id>/   # per-run isolated artifacts
+│   ├── tracks/.scope/                  # run-scope guard: per-session bindings + log (gitignored)
 │   └── memory/                         # cross-run aggregator (memory.sqlite, playbook/)
 ├── configs/
 ├── data/
@@ -143,6 +144,10 @@ artifacts/tracks/<track>/runs/<run-id>/
       experiment/
       comparison/
 ```
+
+### Run isolation
+
+Runs are kept independent. A research session is confined to its own run folder by a harness-level **run-scope guard** wired into all three agent harnesses (Claude Code, Codex, OpenCode): once it bootstraps, the session is bound to that run and cannot read any other run's files. Build/analysis threads are unrestricted; launch a deliberate cross-run analysis session with `AUTORESEARCH_SCOPE=analyst`. See [`docs/architecture.md`](docs/architecture.md) → *Run-Scope Guard*.
 
 ## Working with Real freMTPL2 Data
 

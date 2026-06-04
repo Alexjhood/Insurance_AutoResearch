@@ -2,7 +2,13 @@
 
 You are the research agent for an autonomous insurance target-modelling loop on the French Motor dataset (freMTPL2, ~678K policies). Burning cost is the default target; claim frequency is used only when the user or run configuration explicitly selects `target_mode = "frequency"`. Your goal is to progressively improve predictions measured by **exposure-weighted Gini** on the search-validation split, ultimately assessed on a protected holdout on every promotion.
 
-Read this file at the start of every session. Keep it open as reference.
+Research run ids must be UTC timestamps in `YYYYMMDDTHHMMSSZ` form. Use
+`--new-run` to create that id; do not invent descriptive run ids.
+
+Read this file at the start of every session. Keep it open as reference. After
+reading this file only, your first shell command in any research run should be an
+`autoresearch --track ...` bootstrap or `start-session` command so the
+run-scope guard can bind the session before you inspect artifacts.
 
 ---
 
@@ -222,7 +228,7 @@ Before the expensive CV/bootstrap comparison, every valid challenger is screened
 
 ## Quick-start — how to interpret short user instructions
 
-Your default track is your current tool name: **`codex`** when running in Codex, **`claude`** when running in Claude Code. Your default cycle count is **3**.
+Your default track is your current tool name: **`codex`** when running in Codex, **`claude`** when running in Claude Code, and **`opencode`** when running in OpenCode. These are the only valid research-session track folders; `default` and custom track names are reserved for human/admin analyst work. Your default cycle count is **3**.
 
 For a **new run**, always pass `--new-run`; this creates a fresh timestamped folder such as `artifacts/tracks/codex/runs/20260527T211530Z/`. For **continue** instructions, omit both `--new-run` and `--run-id` so the framework picks up that track's latest run. Only pass `--run-id` when the user explicitly supplies one.
 
@@ -260,12 +266,19 @@ If the user supplies a specific `--run-id` (e.g. `CC20260526_01`), pass it to ev
 
 ---
 
-## Session start — always do these first
+## Session start — first shell command
+
+> **Bind before you look around.** After reading this file, do not run discovery
+> commands such as `ls`, `find`, `rg`, `cat`, `sed`, or `git status` against the
+> repository or `artifacts/` until you have run one of the `autoresearch --track
+> ...` commands below. That first `autoresearch` command binds your session to a
+> run; until it runs, the run-scope guard cannot tell which run is yours. (See
+> "Run-scope isolation" near the end of this file.)
 
 For a fresh run:
 
 ```bash
-autoresearch --track <codex-or-claude> --new-run bootstrap-track      # fresh run with timestamped folder
+autoresearch --track <codex-or-claude> --new-run bootstrap-track      # first command: bind to a fresh timestamped run
 autoresearch --track <codex-or-claude> start-session main             # idempotent name; required before run-session-cycles
 autoresearch --track <codex-or-claude> list-champion-history
 autoresearch --track <codex-or-claude> list-experiments
@@ -274,7 +287,7 @@ autoresearch --track <codex-or-claude> list-experiments
 For a continuing run, skip `bootstrap-track` and omit `--new-run`:
 
 ```bash
-autoresearch --track <codex-or-claude> start-session main
+autoresearch --track <codex-or-claude> start-session main             # first command: bind to the latest run for this track
 autoresearch --track <codex-or-claude> list-champion-history
 autoresearch --track <codex-or-claude> list-experiments
 ```
@@ -699,14 +712,51 @@ autoresearch list-tracks   # see all tracks and their current champion
 ### Safety rules for tracked sessions
 
 6. **Always pass `--track <your-agent-name>` to every command.** Use `codex`
-   for Codex and `claude` for Claude Code. Use `--new-run` only on the first
-   command of a fresh run, then omit `--run-id` to continue that track's latest
-   timestamped run unless the user explicitly gives a run id. Running without
-   `--track` writes to the shared default registry and is reserved for
-   human/admin operations.
+   for Codex, `claude` for Claude Code, and `opencode` for OpenCode. The
+   run-scope guard only binds research sessions to those three folders. Use
+   `--new-run` only on the first command of a fresh run, then omit `--run-id`
+   to continue that track's latest timestamped run unless the user explicitly
+   gives a run id. Running without `--track`, with `--track default`, or with a
+   custom track name is reserved for human/admin analyst operations.
 
 7. **Never read another track's context bundle.**  The files under
    `artifacts/tracks/<other-agent>/` are off-limits during your session.
+
+### Run-scope isolation (enforced — not just advice)
+
+To keep every run an *independent* experiment, a bound research session may only
+touch **its own** run folder. This is enforced at the harness layer by a shared
+guard (`scripts/run_scope_guard.py`) wired into **all three harnesses** —
+Claude Code (`.claude/settings.json`), Codex (`.codex/hooks.json`), and OpenCode
+(`.opencode/plugins/run-scope-guard.js`) — so the rule holds whichever agent runs
+the track, not left to good behaviour:
+
+- **Bootstrap binds you; confinement starts then.** The moment you run your first
+  `autoresearch --track <you> ... bootstrap-track` (or `start-session`) command,
+  the session is automatically *bound* to exactly that run. **From that point on**,
+  any attempt to `Read`/`Grep`/`Glob`/`ls`/`cat` a path under
+  `artifacts/tracks/<...>/runs/<other-run>/` — in *any* track, including your own
+  — is **blocked** by the harness, and enumerating the `runs/` directory is
+  blocked too (you cannot even list sibling runs).
+- **Before you bootstrap, nothing is blocked — so don't browse.** A session is
+  unrestricted until it binds (this is what lets plain build/analysis threads
+  work). That is exactly why the rule above is **bootstrap first**: if you poke
+  through `artifacts/` before your first `autoresearch` command, the guard cannot
+  protect you and you may contaminate your run. Bootstrap, *then* work.
+- **Everything else is unaffected.** Source (`src/`), data, configs, tests, and
+  your *own* run folder are fully accessible. The framework's `autoresearch`
+  commands are already run-scoped, so they keep working normally.
+- **Cross-run knowledge reaches you only through memory.** If you "know" about a
+  prior run, it is because the optional memory feature surfaced it — never
+  because you read another run's files. Do not try to; once bound, the attempt
+  will be denied.
+- **Parallel runs are safe.** Scope is keyed to the session, so two runs in two
+  threads never see each other.
+
+**Analysis sessions** (a human wanting to compare/inspect many runs) are exempt:
+launch Claude Code with `AUTORESEARCH_SCOPE=analyst` in the environment and the
+guard allows access to every run. Use this only for deliberate cross-run
+analysis, never for an experimental run.
 
 ---
 

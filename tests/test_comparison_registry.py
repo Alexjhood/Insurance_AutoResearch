@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from autoresearch.experiment_registry.registry import init_registry, list_comparisons, record_comparison
+from autoresearch.experiment_registry.registry import (
+    init_registry,
+    list_comparisons,
+    record_comparison,
+    update_comparison_decision,
+)
 
 
 def test_record_comparison_round_trips(tmp_path: Path) -> None:
@@ -24,3 +29,16 @@ def test_record_comparison_round_trips(tmp_path: Path) -> None:
     assert rows[0]["comparison_id"] == "cmp"
     assert rows[0]["mean_lift"] == 1.0
     assert rows[0]["promotion_decision"] == "promote"
+    assert rows[0]["final_decision"] == "promote"
+
+    update_comparison_decision(
+        registry_path,
+        "cmp",
+        decision="reject",
+        rationale="LLM rejected.",
+        decided_at="2026-06-04T00:00:00Z",
+    )
+
+    rows = list_comparisons(registry_path)
+    assert rows[0]["promotion_decision"] == "promote"
+    assert rows[0]["final_decision"] == "reject"

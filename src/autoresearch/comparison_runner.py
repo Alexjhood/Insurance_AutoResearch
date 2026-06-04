@@ -498,6 +498,24 @@ def record_decision(
     comp = next((c for c in all_comps if c["comparison_id"] == comparison_id), None)
     if comp is None:
         raise ValueError(f"Comparison {comparison_id!r} not found in registry")
+    existing_decision = (comp.get("decision") or "").lower().strip()
+    if existing_decision:
+        if existing_decision != decision:
+            raise ValueError(
+                f"Comparison {comparison_id!r} already has decision {existing_decision!r}; "
+                f"refusing to overwrite it with {decision!r}."
+            )
+        return {
+            "comparison_id": comparison_id,
+            "decision": existing_decision,
+            "rationale": comp.get("decision_rationale") or rationale,
+            "decided_by": comp.get("decided_by") or "llm",
+            "decided_at": comp.get("decided_at"),
+            "proposal_id": None,
+            "research_line_id": None,
+            "guardrail_result": _load_guardrail_status(comp),
+            "already_recorded": True,
+        }
 
     champion_id = comp["champion_id"]
     challenger_id = comp["challenger_id"]

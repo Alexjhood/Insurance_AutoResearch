@@ -536,7 +536,7 @@ def test_record_decision_promote_updates_champion(tmp_path: Path) -> None:
     """record_decision('promote') with passing guardrails updates the official champion."""
     from autoresearch.comparison_runner import record_decision
     from autoresearch.experiment_registry.registry import (
-        list_comparisons, get_official_champion, set_official_champion,
+        list_champion_history, list_comparisons, get_official_champion, set_official_champion,
     )
 
     config, champ_id, chal_id = _setup_two_experiments(tmp_path, "rdp")
@@ -555,6 +555,12 @@ def test_record_decision_promote_updates_champion(tmp_path: Path) -> None:
     comp = next(c for c in list_comparisons(config.registry_path) if c["comparison_id"] == comp_id)
     assert comp["decision"] == "promote"
     assert comp["decided_by"] == "llm"
+
+    history_count = len(list_champion_history(config.registry_path))
+    repeated = record_decision(config, comp_id, decision="promote", rationale="Clear improvement.")
+
+    assert repeated["already_recorded"] is True
+    assert len(list_champion_history(config.registry_path)) == history_count
 
 
 def test_record_decision_local_promote_updates_line_only(tmp_path: Path) -> None:

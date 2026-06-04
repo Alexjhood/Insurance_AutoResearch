@@ -70,6 +70,18 @@ autoresearch --track codex --new-run bootstrap-track \
 autoresearch --track codex run-session-cycles 3
 ```
 
+## Run Isolation and Analysis Sessions
+
+A **run-scope guard** keeps a research session inside its own run folder. It is wired into Codex as a pre-tool-use hook (`.codex/hooks.json`, sharing the same `scripts/run_scope_guard.py` used by Claude Code and OpenCode). Once you bootstrap, the session is bound to that run and Codex blocks any shell read (`cat`/`grep`) or `apply_patch` that targets another run's files under `artifacts/tracks/`; your own run, `src/`, data, and configs stay accessible. Because an un-bootstrapped session is unrestricted, **run the bootstrap command before inspecting the repository or any artifacts**.
+
+For a build or analysis thread that needs to read across runs, set the analyst override in the environment before launching Codex:
+
+```bash
+export AUTORESEARCH_SCOPE=analyst
+```
+
+This exempts the session from confinement. See [`docs/architecture.md`](architecture.md) → *Run-Scope Guard* for details.
+
 ## Optional: Enable Cross-Run Memory Access
 
 ```bash
