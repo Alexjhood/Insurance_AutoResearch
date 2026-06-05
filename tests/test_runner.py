@@ -379,7 +379,13 @@ claim_cap_threshold = 100000
 def test_record_decision_reject_persists_rationale(tmp_path: Path) -> None:
     """record_decision('reject') persists the rationale without promoting."""
     from autoresearch.comparison_runner import record_decision
-    from autoresearch.experiment_registry.registry import list_comparisons
+    from autoresearch.experiment_registry.registry import (
+        list_comparisons,
+        list_proposals,
+        record_proposal,
+        update_proposal_status,
+        upsert_research_node,
+    )
 
     config = replace(
         _make_config(tmp_path),
@@ -418,6 +424,43 @@ claim_cap_threshold = 100000
     artifacts = compare_experiments(config, champ_id, chal_id)
     report = json.loads(artifacts["promotion_report"].read_text())
     comp_id = report["comparison_id"]
+    record_proposal(
+        config.registry_path,
+        proposal_id="reject_prop",
+        status="awaiting_decision",
+        parent_experiment_id=champ_id,
+        parent_branch_id="main",
+        branch_id="main",
+        experiment_name="chal_rd",
+        rationale="test reject",
+        change_summary="test reject",
+        expected_benefit="none",
+        key_risk="none",
+        config={},
+        validation_errors=[],
+        llm_provider="test",
+        llm_model=None,
+        prompt_path=None,
+        response_path=None,
+        proposal_path=None,
+        notes="Awaiting decision.",
+    )
+    update_proposal_status(
+        config.registry_path,
+        "reject_prop",
+        "awaiting_decision",
+        experiment_id=chal_id,
+        comparison_id=comp_id,
+    )
+    upsert_research_node(
+        config.registry_path,
+        node_id="reject_prop",
+        line_id="reject_line",
+        proposal_id="reject_prop",
+        experiment_id=chal_id,
+        comparison_id=comp_id,
+        status="awaiting_decision",
+    )
 
     result = record_decision(config, comp_id, decision="reject", rationale="Insufficient evidence.")
 
@@ -429,6 +472,11 @@ claim_cap_threshold = 100000
     comp = next(c for c in comps if c["comparison_id"] == comp_id)
     assert comp["decision"] == "reject"
     assert comp["decision_rationale"] == "Insufficient evidence."
+    proposal = next(p for p in list_proposals(config.registry_path) if p["proposal_id"] == "reject_prop")
+    assert proposal["status"] == "rejected"
+    context = json.loads((config.handoff_context_dir / "latest_context.json").read_text())
+    compact = next(c for c in context["recent_comparisons"] if c["comparison_id"] == comp_id)
+    assert compact["final_decision"] == "reject"
 
 
 def _setup_two_experiments(tmp_path: Path, prefix: str):

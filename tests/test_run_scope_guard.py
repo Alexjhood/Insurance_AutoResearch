@@ -71,10 +71,11 @@ def test_runs_dir_enumeration_denied():
     assert not allow and "sibling runs" in reason
 
 
-def test_unbound_sees_everything():
-    # Default-analyst: before binding, a session is unrestricted (build/analysis).
+def test_unbound_denies_run_artifacts_until_bootstrap():
     for text in (OWN, FOREIGN_RUN, FOREIGN_TRACK, RUNS_DIR):
-        assert guard.decide(None, [text])[0]
+        allow, reason = guard.decide(None, [text])
+        assert not allow
+        assert "run not bound yet" in reason
 
 
 def test_analyst_sees_everything():
@@ -186,6 +187,8 @@ def test_binder_fires_only_on_real_invocation():
     # Real invocations (bare, venv path, after env-assign / cd) bind.
     assert guard.command_invokes_autoresearch("autoresearch --track codex list-experiments")
     assert guard.command_invokes_autoresearch(".venv/bin/autoresearch --track codex bootstrap-track")
+    assert guard.command_invokes_autoresearch("python3 -m src.autoresearch.cli --track opencode --new-run bootstrap-track")
+    assert guard.command_invokes_autoresearch("python -m autoresearch.cli --track opencode start-session main")
     assert guard.command_invokes_autoresearch("cd /repo && autoresearch --track claude start-session main")
     assert guard.command_invokes_autoresearch("AUTORESEARCH_X=1 autoresearch --track claude list-experiments")
     # Mere *mentions* must NOT bind (the footgun that bound the dev session).
@@ -202,12 +205,48 @@ def test_opencode_lowercase_and_camelcase_args():
     assert guard.extract_paths("bash", {"command": f"cat {FOREIGN_RUN}"}) == [f"cat {FOREIGN_RUN}"]
 
 
+def test_opencode_broad_glob_maps_to_run_enumeration():
+    paths = guard.extract_paths(
+        "glob",
+        {"path": str(Path(__file__).resolve().parents[1]), "pattern": "**/*"},
+    )
+
+    assert "artifacts/tracks/*/runs" in paths
+    allow, reason = guard.decide(None, paths)
+    assert not allow
+    assert "run not bound yet" in reason
+
+
+def test_python_module_autoresearch_allows_only_named_agent_tracks():
+    cmd = "python3 -m src.autoresearch.cli --track set3 --new-run bootstrap-track --model-provider manual --model-name user"
+    allow, reason = guard.decide(None, [cmd])
+
+    assert not allow
+    assert "set3" in reason
+
+
 def test_codex_apply_patch_scans_command():
     # Codex edits arrive as apply_patch with the path in the patch body.
     patch = "*** Begin Patch\n*** Update File: artifacts/tracks/codex/runs/RUN_X/model.py\n*** End Patch"
     paths = guard.extract_paths("apply_patch", {"command": patch})
-    assert paths == [patch]
+    assert paths == ["artifacts/tracks/codex/runs/RUN_X/model.py"]
     assert not guard.decide(BOUND, paths)[0]  # foreign run -> denied
+
+
+def test_codex_apply_patch_ignores_body_mentions():
+    patch = "\n".join(
+        [
+            "*** Begin Patch",
+            "*** Update File: tests/test_run_scope_guard.py",
+            "@@",
+            "+mentioned = 'artifacts/tracks/codex/runs/RUN_X/model.py'",
+            "*** End Patch",
+        ]
+    )
+    paths = guard.extract_paths("apply_patch", {"command": patch})
+
+    assert paths == ["tests/test_run_scope_guard.py"]
+    assert guard.decide(None, paths)[0]
 
 
 def test_env_analyst_fallback(monkeypatch):

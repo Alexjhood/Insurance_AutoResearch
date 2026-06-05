@@ -1,0 +1,11 @@
+experiment_name = "lgbm_tweedie_baseline"
+model_family = "scripted_challenger"
+target_strategy = "direct_pure_premium"
+parent_experiment_id = ""
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]
+script_path = "model_lgbm_tweedie.py"

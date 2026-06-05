@@ -9,6 +9,17 @@ dist/
 build/
 *.egg-info/
 
+# Frontend/generated local artifacts
+node_modules/
+.next/
+*.tsbuildinfo
+*.db
+
+# Model/runtime-generated outputs
+catboost_info/
+*.tfevents*
+*.tmp
+
 artifacts/*
 outputs/*
 data/*

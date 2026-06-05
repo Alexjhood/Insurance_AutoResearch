@@ -169,7 +169,17 @@ def _compact_experiments(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _compact_comparisons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    keys = ["comparison_id", "champion_id", "challenger_id", "mean_lift", "challenger_win_rate", "promotion_decision"]
+    keys = [
+        "comparison_id",
+        "champion_id",
+        "challenger_id",
+        "mean_lift",
+        "challenger_win_rate",
+        "promotion_decision",
+        "decision",
+        "final_decision",
+        "decision_rationale",
+    ]
     return [{key: row.get(key) for key in keys} for row in rows]
 
 
@@ -199,6 +209,8 @@ def _active_queue_summary(rows: list[dict[str, Any]], stale_minutes: int) -> dic
             "status": status,
             "experiment_name": row.get("experiment_name"),
             "parent_experiment_id": row.get("parent_experiment_id"),
+            "experiment_id": row.get("experiment_id"),
+            "comparison_id": row.get("comparison_id"),
             "updated_at": row.get("updated_at"),
         }
         if status == "running":

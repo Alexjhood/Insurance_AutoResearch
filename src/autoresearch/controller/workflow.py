@@ -27,6 +27,7 @@ from autoresearch.experiment_registry.registry import (
     get_research_line,
     get_official_champion,
     list_artifacts,
+    list_proposals,
     list_research_lines,
     list_research_nodes,
     next_queued_proposal,
@@ -165,10 +166,28 @@ def _compute_experiment_budget(config: ProjectConfig) -> float | None:
     return float(budget_minutes * 60)
 
 
+def _awaiting_decision_proposals(config: ProjectConfig) -> list[dict[str, Any]]:
+    """Return proposals whose comparison still needs an explicit decision."""
+
+    return [
+        proposal
+        for proposal in list_proposals(config.registry_path)
+        if proposal.get("status") == "awaiting_decision"
+    ]
+
+
 def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
     """Run the next validated proposal and gate it against the official champion."""
 
     _reconcile_stale_running_proposals(config)
+    unresolved = _awaiting_decision_proposals(config)
+    if unresolved:
+        first = unresolved[0]
+        raise ValueError(
+            "Cannot run another proposal while a comparison is awaiting decision: "
+            f"proposal {first.get('proposal_id')} / comparison {first.get('comparison_id')}. "
+            "Review the comparison and call `record-decision` before advancing the run."
+        )
     champion = _require_champion(config)
     proposal = next_queued_proposal(config.registry_path)
     if proposal is None:

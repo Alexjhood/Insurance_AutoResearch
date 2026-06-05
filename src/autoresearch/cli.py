@@ -15,7 +15,6 @@ from autoresearch.controller.handoff import (
     export_context_bundle,
     inbox_status,
     ingest_proposals,
-    run_latest_proposal_cycle,
     write_proposal_template,
 )
 from autoresearch.controller.session import (
@@ -332,7 +331,16 @@ def _cmd_ingest_proposals(config, args) -> int:
 
 
 def _cmd_run_latest_proposal_cycle(config, args) -> int:
-    print(json.dumps(run_latest_proposal_cycle(config), indent=2, sort_keys=True))
+    try:
+        print(json.dumps(run_session_cycle(config), indent=2, sort_keys=True))
+    except ValueError as exc:
+        if "No session exists" in str(exc):
+            raise ValueError(
+                "No supervised session exists. Run "
+                f"`autoresearch --track {config.track_id} --run-id {config.run_id} start-session main` "
+                "first, then use `run-session-cycle`."
+            ) from exc
+        raise
     return 0
 
 

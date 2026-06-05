@@ -9,19 +9,21 @@ The only contamination channel left is the *agent's own* free-form file access
 This guard closes that channel at the harness layer — a denied tool call cannot
 be overridden by the model.
 
-Policy (default-analyst):
-  * Only a *bound research* session is confined to its own run.
-  * An *unbound* session (before its first ``autoresearch`` command) and an
-    *analyst* session both see everything. A research agent must therefore
-    bootstrap before inspecting artifacts (enforced by AGENT.md convention).
+Policy (research by default for run artifacts):
+  * Only a *bound research* session may inspect a run folder, and only its own.
+  * An *unbound* session (before its first ``autoresearch`` command) may inspect
+    source/docs/configs but not run folders. A research agent must bootstrap
+    before inspecting artifacts.
+  * An *analyst* session sees everything.
 
 Events (dispatched on ``hook_event_name``; the JS adapter maps OpenCode's
 before/after hooks onto PreToolUse/PostToolUse):
   * SessionStart  — record analyst/research scope from env, if requested.
   * PostToolUse   — when the agent runs ``autoresearch --track <T> ...``, bind
     this session to the one run that command targets.
-  * PreToolUse    — for a bound research session, deny access to a foreign run
-    folder or to the ``runs/`` listing; allow everything else.
+  * PreToolUse    — deny run-folder access before binding; after binding, deny
+    access to a foreign run folder or to the ``runs/`` listing; allow everything
+    else.
 
 Scope is keyed on the harness session id, so parallel runs in separate threads
 each get their own scope with no global ambiguity. Analyst mode is also honoured
@@ -74,6 +76,8 @@ _GLOBAL_VALUE_FLAGS = {"--config", "--track", "--run-id", "--target-mode"}
 _GLOBAL_BOOL_FLAGS = {"--new-run"}
 ALLOWED_RESEARCH_TRACKS = {"codex", "claude", "opencode"}
 RUN_ID_TIMESTAMP = re.compile(r"^\d{8}T\d{6}Z$")
+_PYTHON_BIN = re.compile(r"^(?:python|python\d+(?:\.\d+)?)$")
+_AUTORESEARCH_MODULES = {"autoresearch.cli", "src.autoresearch.cli"}
 
 
 def command_invokes_autoresearch(command: str) -> bool:
@@ -82,16 +86,17 @@ def command_invokes_autoresearch(command: str) -> bool:
     Guards against false binding when a command merely *mentions* the string
     (e.g. inside an ``echo``/heredoc/grep). We split on shell separators and, for
     each segment, skip leading ``VAR=val`` env assignments and check whether the
-    first real token's basename is ``autoresearch``.
+    first real token invokes the CLI, either as an ``autoresearch`` executable or
+    as ``python -m autoresearch.cli`` / ``python -m src.autoresearch.cli``.
     """
     if not isinstance(command, str):
         return False
-    for segment in re.split(r"[;&|]+|&&|\|\|", command):
-        tokens = segment.strip().split()
-        idx = 0
-        while idx < len(tokens) and _ENV_ASSIGN.match(tokens[idx]):
-            idx += 1
-        if idx < len(tokens) and tokens[idx].split("/")[-1] == "autoresearch":
+    for segment in _shell_segments(command):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            tokens = segment.split()
+        if _normalise_autoresearch_tokens(tokens):
             return True
     return False
 
@@ -110,12 +115,28 @@ def _autoresearch_tokens(command: str) -> list[list[str]]:
             tokens = shlex.split(segment)
         except ValueError:
             tokens = segment.split()
-        idx = 0
-        while idx < len(tokens) and _ENV_ASSIGN.match(tokens[idx]):
-            idx += 1
-        if idx < len(tokens) and tokens[idx].split("/")[-1] == "autoresearch":
-            invocations.append(tokens[idx:])
+        normalised = _normalise_autoresearch_tokens(tokens)
+        if normalised:
+            invocations.append(normalised)
     return invocations
+
+
+def _normalise_autoresearch_tokens(tokens: list[str]) -> list[str]:
+    """Return tokens in ``autoresearch ...`` shape for supported CLI invocations."""
+    idx = 0
+    while idx < len(tokens) and _ENV_ASSIGN.match(tokens[idx]):
+        idx += 1
+    if idx < len(tokens) and tokens[idx].split("/")[-1] == "autoresearch":
+        return tokens[idx:]
+    if idx + 2 < len(tokens):
+        executable = tokens[idx].split("/")[-1]
+        if (
+            _PYTHON_BIN.fullmatch(executable)
+            and tokens[idx + 1] == "-m"
+            and tokens[idx + 2] in _AUTORESEARCH_MODULES
+        ):
+            return ["autoresearch", *tokens[idx + 3:]]
+    return []
 
 
 def _flag_value(tokens: list[str], flag: str) -> str:
@@ -329,13 +350,71 @@ def write_scope(session_id: str, scope: dict) -> None:
 
 def extract_paths(tool_name: str, tool_input: dict) -> list[str]:
     """Return the path-bearing strings a tool call would actually touch."""
-    fields = _PATH_FIELDS.get((tool_name or "").lower(), _DEFAULT_PATH_FIELDS)
+    tool_key = (tool_name or "").lower()
+    if tool_key == "apply_patch":
+        command = tool_input.get("command")
+        return _apply_patch_targets(command) if isinstance(command, str) else []
+    fields = _PATH_FIELDS.get(tool_key, _DEFAULT_PATH_FIELDS)
     out: list[str] = []
     for field in fields:
         value = tool_input.get(field)
         if isinstance(value, str) and value:
             out.append(value)
+    if tool_key == "glob":
+        out.extend(_glob_run_scope_targets(tool_input))
     return out
+
+
+def _apply_patch_targets(command: str) -> list[str]:
+    """Return only file paths from apply_patch headers, not mentioned content."""
+    targets: list[str] = []
+    prefixes = (
+        "*** Add File: ",
+        "*** Delete File: ",
+        "*** Update File: ",
+        "*** Move to: ",
+    )
+    for line in command.splitlines():
+        for prefix in prefixes:
+            if line.startswith(prefix):
+                targets.append(line[len(prefix):].strip())
+                break
+    return targets
+
+
+def _glob_run_scope_targets(tool_input: dict) -> list[str]:
+    """Map broad OpenCode glob calls to the run folders they would enumerate."""
+    path = tool_input.get("path")
+    pattern = tool_input.get("pattern")
+    if not isinstance(path, str) or not isinstance(pattern, str):
+        return []
+    if not _is_broad_glob(pattern):
+        return []
+    try:
+        target = Path(path).expanduser()
+        if not target.is_absolute():
+            target = ROOT / target
+        resolved = target.resolve()
+    except Exception:
+        return []
+
+    candidates = (ROOT, ROOT / "artifacts", TRACKS_DIR)
+    if any(_same_or_parent(candidate, resolved) for candidate in candidates):
+        return ["artifacts/tracks/*/runs"]
+    return []
+
+
+def _is_broad_glob(pattern: str) -> bool:
+    stripped = pattern.strip()
+    return stripped in {"*", "**", "**/*", "./**/*"} or stripped.startswith("**/")
+
+
+def _same_or_parent(parent: Path, child: Path) -> bool:
+    try:
+        child.relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def find_run_refs(text: str) -> list[tuple[str, str | None]]:
@@ -349,9 +428,8 @@ def decide(scope: dict | None, texts: list[str]) -> tuple[bool, str]:
     """Decide whether a tool call touching *texts* is allowed.
 
     Only a *bound research* session is confined to its own run. An unbound
-    session (before its first ``autoresearch`` command) and an analyst session
-    both see everything — so a research agent must bootstrap before it inspects
-    any artifacts (that ordering is enforced by AGENT.md convention, not here).
+    session (before its first ``autoresearch`` command) may inspect source,
+    docs, and configs, but not run artifacts. Analyst sessions see everything.
 
     Returns (allow, reason). ``reason`` is only meaningful when denied.
     """
@@ -375,8 +453,29 @@ def decide(scope: dict | None, texts: list[str]) -> tuple[bool, str]:
                         "Use `--new-run` to create one, or omit `--run-id` to continue the latest run.",
                     )
 
+    if scope.get("mode") == "analyst":
+        return True, ""
+
     if scope.get("mode") != "research":
-        return True, ""  # unbound or analyst -> unrestricted
+        refs: list[tuple[str, str | None]] = []
+        for text in texts:
+            refs.extend(find_run_refs(text))
+        if refs:
+            track, run = refs[0]
+            if run is None:
+                return (
+                    False,
+                    f"run not bound yet — enumerating artifacts/tracks/{track}/runs is not allowed. "
+                    "Run your `autoresearch --track <you> ... bootstrap-track` (or start-session) first; "
+                    "for deliberate cross-run analysis, relaunch with AUTORESEARCH_SCOPE=analyst.",
+                )
+            return (
+                False,
+                f"run not bound yet — path references {track}/{run}. "
+                "Run your `autoresearch --track <you> ... bootstrap-track` (or start-session) first; "
+                "for deliberate cross-run analysis, relaunch with AUTORESEARCH_SCOPE=analyst.",
+            )
+        return True, ""  # unbound, but not touching run artifacts
 
     bound_track = scope.get("track")
     bound_run = scope.get("run_id")

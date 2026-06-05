@@ -14,6 +14,7 @@ from autoresearch.controller.workflow import enqueue_proposal_from_file, run_nex
 from autoresearch.experiment_registry.registry import (
     get_official_champion,
     list_proposals,
+    list_sessions,
     record_proposal,
     update_proposal_status,
 )
@@ -409,7 +410,7 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "",
         f"- **Champion**: `{champion_id}` (branch `{branch_id}`{gini_str})",
         f"- **Inbox**: `{config.handoff_proposal_inbox_dir}`  ← write proposal JSON + model script here",
-        f"- **Next command**: `autoresearch --track {config.track_id} --run-id {config.run_id} run-latest-proposal-cycle`",
+        f"- **Next command**: `{_next_supervised_command(config, context)}`",
         "",
         "## Proposal quick-start",
         "",
@@ -511,6 +512,23 @@ def proposal_schema_document(config: ProjectConfig, context: dict[str, Any]) -> 
             "Do not reference milestone_holdout.",
         ],
     }
+
+
+def _next_supervised_command(config: ProjectConfig, context: dict[str, Any]) -> str:
+    active_queue = context.get("active_queue") or {}
+    for item in active_queue.get("items") or []:
+        if item.get("status") == "awaiting_decision":
+            comparison_id = item.get("comparison_id") or "<comparison_id>"
+            return (
+                f"autoresearch --track {config.track_id} --run-id {config.run_id} "
+                f"record-decision {comparison_id} --decision <promote|local_promote|reject> "
+                '--rationale "<why>"'
+            )
+
+    if not list_sessions(config.registry_path):
+        return f"autoresearch --track {config.track_id} --run-id {config.run_id} start-session main"
+
+    return f"autoresearch --track {config.track_id} --run-id {config.run_id} run-session-cycle"
 
 
 def _render_tree_node_lines(nodes: list[dict[str, Any]]) -> list[str]:

@@ -147,7 +147,7 @@ artifacts/tracks/<track>/runs/<run-id>/
 
 ### Run isolation
 
-Runs are kept independent. A research session is confined to its own run folder by a harness-level **run-scope guard** wired into all three agent harnesses (Claude Code, Codex, OpenCode): once it bootstraps, the session is bound to that run and cannot read any other run's files. Build/analysis threads are unrestricted; launch a deliberate cross-run analysis session with `AUTORESEARCH_SCOPE=analyst`. See [`docs/architecture.md`](docs/architecture.md) → *Run-Scope Guard*.
+Runs are kept independent. A research session is confined to its own run folder by a harness-level **run-scope guard** wired into all three agent harnesses (Claude Code, Codex, OpenCode): run artifacts are blocked before bootstrap, and once the session bootstraps it is bound to that run and cannot read any other run's files. Launch a deliberate cross-run analysis session with `AUTORESEARCH_SCOPE=analyst`. See [`docs/architecture.md`](docs/architecture.md) -> *Run-Scope Guard*.
 
 ## Working with Real freMTPL2 Data
 

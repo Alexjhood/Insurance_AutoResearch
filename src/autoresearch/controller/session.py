@@ -128,6 +128,29 @@ def run_session_cycle(config: ProjectConfig, session_id: str | None = None) -> d
         return _record_waiting(config, state, "Session is paused.")
     if state.get("stop_requested") or state["state"] == "completed":
         return _record_waiting(config, state, "Session is stopped or completed.")
+    awaiting = _awaiting_decision_status(config)
+    if awaiting:
+        state["state"] = "awaiting_decision"
+        state["latest_cycle_result"] = {
+            "proposal_id": awaiting.get("proposal_id"),
+            "experiment_id": awaiting.get("experiment_id"),
+            "comparison_id": awaiting.get("comparison_id"),
+            "decision": "pending_llm",
+        }
+        _persist_state(
+            config,
+            state,
+            event_type="awaiting_decision",
+            proposal_id=awaiting.get("proposal_id"),
+            experiment_id=awaiting.get("experiment_id"),
+            comparison_id=awaiting.get("comparison_id"),
+            message=(
+                f"Comparison {awaiting.get('comparison_id')} is awaiting `record-decision`; "
+                "session cycle did not advance."
+            ),
+        )
+        export_context_bundle(config)
+        return state
 
     state["state"] = "running"
     state.pop("latest_error", None)
@@ -238,6 +261,38 @@ def run_session_cycles(config: ProjectConfig, count: int, session_id: str | None
     return states
 
 
+def record_session_decision(
+    config: ProjectConfig,
+    *,
+    comparison_id: str,
+    decision: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Record that the latest supervised session received its LLM verdict."""
+
+    state = latest_session(config)
+    if state is None:
+        return None
+    latest = state.get("latest_cycle_result") or {}
+    if comparison_id and latest.get("comparison_id") not in {None, comparison_id}:
+        return None
+
+    state["state"] = "promoted" if decision in {"promote", "local_promote"} else "rejected"
+    state["latest_decision_result"] = details or {}
+    _persist_state(
+        config,
+        state,
+        event_type="decision_recorded",
+        proposal_id=(details or {}).get("proposal_id") or latest.get("proposal_id"),
+        experiment_id=latest.get("experiment_id"),
+        comparison_id=comparison_id,
+        message=f"Decision recorded: {decision}.",
+        details=details or {},
+    )
+    export_context_bundle(config)
+    return state
+
+
 def _base_state(session_id: str, name: str, max_cycles: int | None) -> dict[str, Any]:
     return {
         "session_id": session_id,
@@ -346,6 +401,13 @@ def _queued_count(config: ProjectConfig) -> int:
         for item in list_proposals(config.registry_path)
         if item["status"] in {"validated", "proposed", "needs_repair"}
     )
+
+
+def _awaiting_decision_status(config: ProjectConfig) -> dict[str, Any] | None:
+    for item in list_proposals(config.registry_path):
+        if item.get("status") == "awaiting_decision":
+            return item
+    return None
 
 
 def _session_id(name: str) -> str:

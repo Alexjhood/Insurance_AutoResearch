@@ -505,14 +505,59 @@ def record_decision(
                 f"Comparison {comparison_id!r} already has decision {existing_decision!r}; "
                 f"refusing to overwrite it with {decision!r}."
             )
+        proposal = next(
+            (p for p in list_proposals(config.registry_path) if p.get("comparison_id") == comparison_id),
+            None,
+        )
+        proposal_id = proposal.get("proposal_id") if proposal else None
+        challenger_id = comp["challenger_id"]
+        node = find_research_node_by_experiment(config.registry_path, challenger_id)
+        line_id = node.get("line_id") if node else None
+        if proposal_id and existing_decision == "reject" and proposal.get("status") != "rejected":
+            update_proposal_status(
+                config.registry_path,
+                proposal_id,
+                "rejected",
+                comparison_id=comparison_id,
+                notes=comp.get("decision_rationale") or rationale,
+            )
+            upsert_research_node(
+                config.registry_path,
+                node_id=proposal_id,
+                line_id=line_id,
+                proposal_id=proposal_id,
+                experiment_id=challenger_id,
+                comparison_id=comparison_id,
+                status="rejected",
+                outcome_type="llm_rejected",
+                guidance=comp.get("decision_rationale") or rationale,
+            )
+        existing_result = {
+            "comparison_id": comparison_id,
+            "decision": existing_decision,
+            "rationale": comp.get("decision_rationale") or rationale,
+            "decided_by": comp.get("decided_by") or "llm",
+            "decided_at": comp.get("decided_at"),
+            "proposal_id": proposal_id,
+            "research_line_id": line_id,
+            "guardrail_result": _load_guardrail_status(comp),
+        }
+        _refresh_decision_outputs(
+            config,
+            comparison_id=comparison_id,
+            decision=existing_decision,
+            rationale=existing_result["rationale"],
+            proposal_id=proposal_id,
+            result=existing_result,
+        )
         return {
             "comparison_id": comparison_id,
             "decision": existing_decision,
             "rationale": comp.get("decision_rationale") or rationale,
             "decided_by": comp.get("decided_by") or "llm",
             "decided_at": comp.get("decided_at"),
-            "proposal_id": None,
-            "research_line_id": None,
+            "proposal_id": proposal_id,
+            "research_line_id": line_id,
             "guardrail_result": _load_guardrail_status(comp),
             "already_recorded": True,
         }
@@ -620,7 +665,7 @@ def record_decision(
         )
         if proposal_id:
             update_proposal_status(
-                config.registry_path, proposal_id, "inconclusive",
+                config.registry_path, proposal_id, "rejected",
                 comparison_id=comparison_id, notes=rationale,
             )
             upsert_research_node(
@@ -666,6 +711,23 @@ def record_decision(
 
     # Re-render the HTML comparison report so the verdict + rationale are captured.
     _finalise_comparison_report(config, comp, final_decision)
+    _refresh_decision_outputs(
+        config,
+        comparison_id=comparison_id,
+        decision=decision,
+        rationale=rationale,
+        proposal_id=proposal_id,
+        result={
+            "comparison_id": comparison_id,
+            "decision": decision,
+            "rationale": rationale,
+            "decided_by": "llm",
+            "decided_at": decided_at,
+            "proposal_id": proposal_id,
+            "research_line_id": line_id,
+            "guardrail_result": guardrail_result,
+        },
+    )
 
     return {
         "comparison_id": comparison_id,
@@ -677,6 +739,67 @@ def record_decision(
         "research_line_id": line_id,
         "guardrail_result": guardrail_result,
     }
+
+
+def _refresh_decision_outputs(
+    config: ProjectConfig,
+    *,
+    comparison_id: str,
+    decision: str,
+    rationale: str,
+    proposal_id: str | None,
+    result: dict[str, Any],
+) -> None:
+    """Keep session state, latest cycle output, and handoff context in sync."""
+
+    try:
+        latest_cycle_path = config.handoff_results_dir / "latest_cycle_result.json"
+        if latest_cycle_path.exists():
+            latest = read_json(latest_cycle_path)
+            cycle = latest.get("cycle_result") or {}
+            if cycle.get("comparison_id") == comparison_id:
+                cycle["decision"] = decision
+                cycle["decision_rationale"] = rationale
+                latest["cycle_result"] = cycle
+                latest["decision_recorded_at"] = result.get("decided_at")
+                write_json(latest_cycle_path, latest)
+    except Exception:
+        pass
+
+    try:
+        if decision == "reject" and proposal_id:
+            from autoresearch.controller.handoff import write_nonpromotion_summary
+
+            write_nonpromotion_summary(
+                config,
+                proposal_id=proposal_id,
+                outcome_type="llm_rejected",
+                reason=rationale,
+                quantitative_signal={"comparison_id": comparison_id},
+            )
+    except Exception:
+        pass
+
+    try:
+        from autoresearch.controller.session import record_session_decision
+
+        state = record_session_decision(
+            config,
+            comparison_id=comparison_id,
+            decision=decision,
+            details=result,
+        )
+        if state is None:
+            from autoresearch.controller.handoff import export_context_bundle
+
+            export_context_bundle(config)
+    except Exception:
+        try:
+            from autoresearch.controller.handoff import export_context_bundle
+
+            export_context_bundle(config)
+        except Exception:
+            pass
 
 
 def _finalise_comparison_report(

@@ -2,6 +2,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from autoresearch.config import ProjectConfig, _resolve_run_id, ensure_project_dirs, load_config
 from autoresearch.controller.champion import initialise_official_champion
 from autoresearch.controller.handoff import export_context_bundle, inbox_status, ingest_proposals, write_proposal_template
@@ -13,8 +15,10 @@ from autoresearch.experiment_registry.registry import (
     list_proposals,
     list_research_lines,
     list_research_nodes,
+    record_proposal,
     record_experiment,
     set_official_champion,
+    update_proposal_status,
     upsert_research_line,
     upsert_research_node,
 )
@@ -610,6 +614,43 @@ def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=Non
     assert get_official_champion(config.registry_path)["champion_id"] == challenger_id
     record = next(p for p in list_proposals(config.registry_path) if p["proposal_id"] == proposal["proposal_id"])
     assert record["status"] == "promoted"
+
+
+def test_run_next_blocks_when_comparison_awaits_decision(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _record_direct(config, "champion")
+    initialise_official_champion(config, "champion")
+    record_proposal(
+        config.registry_path,
+        proposal_id="pending_decision",
+        status="awaiting_decision",
+        parent_experiment_id="champion",
+        parent_branch_id="main",
+        branch_id="main",
+        experiment_name="pending",
+        rationale="pending",
+        change_summary="pending",
+        expected_benefit="pending",
+        key_risk="pending",
+        config={},
+        validation_errors=[],
+        llm_provider="test",
+        llm_model=None,
+        prompt_path=None,
+        response_path=None,
+        proposal_path=None,
+        notes="Awaiting decision.",
+    )
+    update_proposal_status(
+        config.registry_path,
+        "pending_decision",
+        "awaiting_decision",
+        experiment_id="challenger",
+        comparison_id="cmp_pending",
+    )
+
+    with pytest.raises(ValueError, match="record-decision"):
+        run_next_queued_proposal(config)
 
 
 def test_clear_loser_is_auto_rejected_after_single_split_screen(tmp_path: Path) -> None:

@@ -242,7 +242,7 @@ For a **new run**, always pass `--new-run`; this creates a fresh timestamped fol
 
 **Bootstrap** — run once at the start of every fresh conversation. Model identity is required for run attribution:
 ```bash
-autoresearch --track <codex-or-claude> --new-run bootstrap-track \
+autoresearch --track <your-agent-name> --new-run bootstrap-track \
   --model-provider <provider> --model-name <model-name>
 # e.g. --model-provider anthropic --model-name claude-sonnet-4-6
 # e.g. --model-provider openai   --model-name codex-mini-latest
@@ -256,8 +256,8 @@ autoresearch --track <codex-or-claude> --new-run bootstrap-track \
 
 **Run N cycles** — `run-session-cycles` requires an active session. On a fresh run, create one first (idempotent name is fine):
 ```bash
-autoresearch --track <codex-or-claude> start-session main         # only needed once per run
-autoresearch --track <codex-or-claude> run-session-cycles <N>
+autoresearch --track <your-agent-name> start-session main         # only needed once per run
+autoresearch --track <your-agent-name> run-session-cycles <N>
 ```
 
 **Each cycle now pauses for your decision.** `run-session-cycles` runs a proposal through experiment + comparison and then **stops in the `awaiting_decision` state** — it does not auto-promote. You must review the metric summary and call `record-decision` (see "You own the decision") before the next cycle. So to run N experiments you loop: `run-session-cycles 1` → review → `record-decision …` → repeat. A larger N still stops after the first comparison that needs a verdict.
@@ -278,18 +278,18 @@ If the user supplies a specific `--run-id` (e.g. `CC20260526_01`), pass it to ev
 For a fresh run:
 
 ```bash
-autoresearch --track <codex-or-claude> --new-run bootstrap-track      # first command: bind to a fresh timestamped run
-autoresearch --track <codex-or-claude> start-session main             # idempotent name; required before run-session-cycles
-autoresearch --track <codex-or-claude> list-champion-history
-autoresearch --track <codex-or-claude> list-experiments
+autoresearch --track <your-agent-name> --new-run bootstrap-track      # first command: bind to a fresh timestamped run
+autoresearch --track <your-agent-name> start-session main             # idempotent name; required before run-session-cycles
+autoresearch --track <your-agent-name> list-champion-history
+autoresearch --track <your-agent-name> list-experiments
 ```
 
 For a continuing run, skip `bootstrap-track` and omit `--new-run`:
 
 ```bash
-autoresearch --track <codex-or-claude> start-session main             # first command: bind to the latest run for this track
-autoresearch --track <codex-or-claude> list-champion-history
-autoresearch --track <codex-or-claude> list-experiments
+autoresearch --track <your-agent-name> start-session main             # first command: bind to the latest run for this track
+autoresearch --track <your-agent-name> list-champion-history
+autoresearch --track <your-agent-name> list-experiments
 ```
 
 Then read the handoff file printed by bootstrap (or the latest handoff for a continuing run) and this run's `RESEARCH_LOG.md` before forming any hypothesis.
@@ -639,16 +639,16 @@ experiments, champion history, or metrics of any other track.
 
 ```bash
 # One-command setup for a new isolated run (model identity flags required)
-autoresearch --track <codex-or-claude> --new-run bootstrap-track \
+autoresearch --track <your-agent-name> --new-run bootstrap-track \
   --model-provider <provider> --model-name <model-name>
 
 # Replace 'claude' with the agent identifier for your session
-autoresearch --track <codex-or-claude> init-registry
-autoresearch --track <codex-or-claude> run-all-baselines
-autoresearch --track <codex-or-claude> init-official-champion
-autoresearch --track <codex-or-claude> export-context   # read this at session start
-autoresearch --track <codex-or-claude> start-session main
-autoresearch --track <codex-or-claude> run-session-cycles 10
+autoresearch --track <your-agent-name> init-registry
+autoresearch --track <your-agent-name> run-all-baselines
+autoresearch --track <your-agent-name> init-official-champion
+autoresearch --track <your-agent-name> export-context   # read this at session start
+autoresearch --track <your-agent-name> start-session main
+autoresearch --track <your-agent-name> run-session-cycles 10
 ```
 
 `bootstrap-track` is idempotent. It prepares shared data if needed, creates or
@@ -738,11 +738,11 @@ the track, not left to good behaviour:
   `artifacts/tracks/<...>/runs/<other-run>/` — in *any* track, including your own
   — is **blocked** by the harness, and enumerating the `runs/` directory is
   blocked too (you cannot even list sibling runs).
-- **Before you bootstrap, nothing is blocked — so don't browse.** A session is
-  unrestricted until it binds (this is what lets plain build/analysis threads
-  work). That is exactly why the rule above is **bootstrap first**: if you poke
-  through `artifacts/` before your first `autoresearch` command, the guard cannot
-  protect you and you may contaminate your run. Bootstrap, *then* work.
+- **Before you bootstrap, run artifacts are blocked.** A session may inspect
+  source, docs, configs, and tests before it binds, but raw access to
+  `artifacts/tracks/<...>/runs` is denied until the first valid
+  `autoresearch --track <you> ... bootstrap-track` (or `start-session`) command
+  binds the session. Bootstrap, *then* inspect your own run artifacts.
 - **Everything else is unaffected.** Source (`src/`), data, configs, tests, and
   your *own* run folder are fully accessible. The framework's `autoresearch`
   commands are already run-scoped, so they keep working normally.
@@ -754,7 +754,7 @@ the track, not left to good behaviour:
   threads never see each other.
 
 **Analysis sessions** (a human wanting to compare/inspect many runs) are exempt:
-launch Claude Code with `AUTORESEARCH_SCOPE=analyst` in the environment and the
+launch the agent with `AUTORESEARCH_SCOPE=analyst` in the environment and the
 guard allows access to every run. Use this only for deliberate cross-run
 analysis, never for an experimental run.
 

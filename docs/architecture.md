@@ -96,12 +96,12 @@ One shared decision script (`scripts/run_scope_guard.py`) is wired into all thre
 - **Codex** — `.codex/hooks.json` (same stdin/exit-code contract)
 - **OpenCode** — `.opencode/plugins/run-scope-guard.js` (a thin adapter that shells out to the same script and `throw`s to deny)
 
-Policy (**default-analyst**):
+Policy:
 
-- A session is **unbound** until it runs its first `autoresearch --track …` command, at which point it is automatically **bound** to exactly that run. Binding is keyed on the harness session id, so parallel runs in separate threads stay independent.
+- A session is **unbound** until it runs its first valid `autoresearch --track …` command, at which point it is automatically **bound** to exactly that run. Binding is keyed on the harness session id, so parallel runs in separate threads stay independent.
 - A **bound research** session is blocked from reading, grepping, or listing any *other* run's folder — in any track, including its own track's siblings — and from enumerating the `runs/` directory. Its own run, `src/`, data, configs, and tests stay fully accessible. The block is enforced by the harness and cannot be overridden by the model.
-- An **unbound** session (build work, before any `autoresearch` command) and an **analyst** session are unrestricted. Analyst mode is requested with `AUTORESEARCH_SCOPE=analyst` in the launch environment and is the supported way to run a deliberate cross-run analysis thread.
-- Because an unbound session is unrestricted, a research agent **must bootstrap before inspecting any artifacts** (an AGENT.md rule); this keeps the pre-bind window empty.
+- An **unbound** session may inspect source, docs, configs, data, and tests, but raw run artifacts under `artifacts/tracks/<track>/runs` are blocked until binding. Analyst mode is requested with `AUTORESEARCH_SCOPE=analyst` in the launch environment and is the supported way to run a deliberate cross-run analysis thread.
+- Because run artifacts are blocked before binding, a research agent must bootstrap before inspecting its own run outputs.
 
 Cross-run knowledge therefore reaches a research agent only through the memory aggregator (when enabled), never through raw reads. Session scope files and the guard log live under `artifacts/tracks/.scope/` (gitignored). The guard **fails open**: any internal error allows the call, so a guard bug can never block legitimate research.
 

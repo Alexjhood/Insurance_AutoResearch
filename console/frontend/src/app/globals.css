@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-mono: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
+}
+
+body {
+  @apply bg-gray-950 text-gray-100 font-mono text-sm;
+}
+
+.card {
+  @apply bg-gray-900 border border-gray-800 rounded-lg p-4;
+}
+
+.badge {
+  @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium;
+}
+
+.badge-green  { @apply bg-green-900 text-green-300; }
+.badge-red    { @apply bg-red-900 text-red-300; }
+.badge-yellow { @apply bg-yellow-900 text-yellow-300; }
+.badge-gray   { @apply bg-gray-800 text-gray-400; }
+.badge-blue   { @apply bg-blue-900 text-blue-300; }
+
+.table-base {
+  @apply w-full text-left text-xs;
+}
+.table-base th {
+  @apply px-3 py-2 text-gray-500 uppercase tracking-wide border-b border-gray-800 font-normal;
+}
+.table-base td {
+  @apply px-3 py-2 border-b border-gray-800/50;
+}
+.table-base tr:hover td {
+  @apply bg-gray-800/50;
+}
+
+.input {
+  @apply bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 outline-none transition-colors;
+}
+.input:focus {
+  border-color: #0ea5e9;
+}
