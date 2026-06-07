@@ -28,6 +28,7 @@ class ModelResult:
 
     predictions: pd.DataFrame
     model_notes: dict[str, Any]
+    interpret_fn: Any | None = None  # optional callable(feature_df) -> predicted_rates
 
 
 def dispatch_model(
@@ -81,7 +82,7 @@ def dispatch_model(
     if score.empty:
         raise ValueError("No rows available for scoring")
 
-    predicted_target, notes = _call_model(
+    predicted_target, notes, interpret_fn = _call_model(
         model_family,
         target_strategy,
         train,
@@ -125,7 +126,7 @@ def dispatch_model(
     predictions["predicted_pure_premium"] = predictions["predicted_claim_cost"] / exp
     predictions["actual_frequency"] = predictions["actual_claim_count"] / exp
     predictions["predicted_frequency"] = predictions["predicted_claim_count"] / exp
-    return ModelResult(predictions=predictions, model_notes=notes)
+    return ModelResult(predictions=predictions, model_notes=notes, interpret_fn=interpret_fn)
 
 
 def dispatch_model_on_explicit_frames(
@@ -171,7 +172,7 @@ def dispatch_model_on_explicit_frames(
     _val["split"] = "_cv_val"
     score = pd.concat([_train, _val], ignore_index=True)
 
-    predicted_target, notes = _call_model(
+    predicted_target, notes, interpret_fn = _call_model(
         model_family,
         target_strategy,
         _train,
@@ -217,7 +218,7 @@ def dispatch_model_on_explicit_frames(
     predictions["predicted_pure_premium"] = predictions["predicted_claim_cost"] / exp
     predictions["actual_frequency"] = predictions["actual_claim_count"] / exp
     predictions["predicted_frequency"] = predictions["predicted_claim_count"] / exp
-    return ModelResult(predictions=predictions, model_notes=notes)
+    return ModelResult(predictions=predictions, model_notes=notes, interpret_fn=interpret_fn)
 
 
 def _call_model(
@@ -229,8 +230,14 @@ def _call_model(
     feature_inclusions: list[str] | None,
     feature_exclusions: list[str] | None,
     model_script_path: Path | None = None,
-) -> tuple[np.ndarray, dict[str, Any]]:
-    """Dispatch to the correct model implementation, returning (predicted_cost, notes)."""
+) -> tuple[np.ndarray, dict[str, Any], Any]:
+    """Dispatch to the correct model implementation.
+
+    Returns ``(predicted, notes, interpret_fn)`` where ``interpret_fn`` is an
+    optional callable ``(feature_df: pd.DataFrame) -> np.ndarray`` that returns
+    predicted *rates* (not totals) for arbitrary feature inputs.  Models that
+    do not return a third value get ``interpret_fn=None``.
+    """
 
     if model_script_path is not None:
         return _call_script_model(
@@ -244,11 +251,13 @@ def _call_model(
 
     if model_family == "global_mean":
         from autoresearch.models.global_mean import fit_predict
-        return fit_predict(train, score, feature_inclusions=feature_inclusions, feature_exclusions=feature_exclusions, **hp)
+        return _normalise_fit_predict_result(
+            fit_predict(train, score, feature_inclusions=feature_inclusions, feature_exclusions=feature_exclusions, **hp)
+        )
 
     # Open registry: try to import autoresearch.models.<model_family>
     # The module must expose fit_predict(train, score, *, feature_inclusions,
-    # feature_exclusions, **hyperparameters) -> (np.ndarray, dict).
+    # feature_exclusions, **hyperparameters) -> (np.ndarray, dict[, callable]).
     import importlib
     try:
         mod = importlib.import_module(f"autoresearch.models.{model_family}")
@@ -262,12 +271,35 @@ def _call_model(
         raise ValueError(
             f"Module autoresearch.models.{model_family} must expose a fit_predict() function."
         )
-    return mod.fit_predict(
-        train, score,
-        feature_inclusions=feature_inclusions,
-        feature_exclusions=feature_exclusions,
-        **hp,
+    return _normalise_fit_predict_result(
+        mod.fit_predict(
+            train, score,
+            feature_inclusions=feature_inclusions,
+            feature_exclusions=feature_exclusions,
+            **hp,
+        )
     )
+
+
+def _normalise_fit_predict_result(result: Any) -> tuple[np.ndarray, dict[str, Any], Any]:
+    """Normalise a fit_predict return value to always have 3 elements."""
+    if isinstance(result, tuple):
+        if len(result) == 3:
+            predicted, notes, interpret_fn = result
+        elif len(result) == 2:
+            predicted, notes = result
+            interpret_fn = None
+        else:
+            raise ValueError(
+                f"fit_predict must return 2 or 3 values (predicted, notes[, interpret_fn]), got {len(result)}"
+            )
+    else:
+        raise ValueError("fit_predict must return a tuple")
+    if notes is None:
+        notes = {}
+    if not isinstance(notes, dict):
+        raise ValueError("fit_predict() notes must be a dict")
+    return predicted, dict(notes), interpret_fn
 
 
 def _call_script_model(
@@ -278,7 +310,7 @@ def _call_script_model(
     feature_inclusions: list[str] | None,
     feature_exclusions: list[str] | None,
     hyperparameters: dict[str, Any],
-) -> tuple[np.ndarray, dict[str, Any]]:
+) -> tuple[np.ndarray, dict[str, Any], Any]:
     """Load a run-local modelling script and execute its fit_predict hook."""
 
     if not path.exists():
@@ -291,18 +323,15 @@ def _call_script_model(
     spec.loader.exec_module(module)
     if not hasattr(module, "fit_predict"):
         raise ValueError(f"Model script must expose fit_predict(): {path}")
-    predicted, notes = module.fit_predict(
-        train,
-        score,
-        feature_inclusions=feature_inclusions,
-        feature_exclusions=feature_exclusions,
-        **hyperparameters,
+    predicted, notes, interpret_fn = _normalise_fit_predict_result(
+        module.fit_predict(
+            train,
+            score,
+            feature_inclusions=feature_inclusions,
+            feature_exclusions=feature_exclusions,
+            **hyperparameters,
+        )
     )
-    if notes is None:
-        notes = {}
-    if not isinstance(notes, dict):
-        raise ValueError("Model script fit_predict() must return notes as a dict")
-    notes = dict(notes)
     notes.setdefault("model_script_path", str(path))
     notes.setdefault("uses_run_local_script", True)
-    return predicted, notes
+    return predicted, notes, interpret_fn

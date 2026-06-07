@@ -56,7 +56,15 @@ from autoresearch.data.holdout_vault import load_search_dataset
 from autoresearch.data.preprocessing import apply_claim_capping
 from autoresearch.evaluation.metrics import evaluate_predictions
 from autoresearch.experiment_registry.registry import init_registry, record_experiment
-from autoresearch.models.dispatcher import RAW_CLAIM_COST, dispatch_model
+from autoresearch.models.dispatcher import (
+    CLAIM_COST,
+    CLAIM_COUNT,
+    CLAIM_EVENTS,
+    EXPOSURE,
+    RAW_CLAIM_COST,
+    RECORD_ID,
+    dispatch_model,
+)
 from autoresearch.run_artifacts import next_iteration_dir
 from autoresearch.utils.environment import capture_environment
 from autoresearch.utils.integrity import (
@@ -269,6 +277,19 @@ def run_experiment(
     fit_wall_seconds = time.perf_counter() - t_wall_start
     fit_cpu_seconds = time.process_time() - t_cpu_start
 
+    # ── Join feature columns into predictions ─────────────────────────────────
+    # Columns that are targets, system identifiers, or already in predictions
+    # are excluded from the feature join.  Everything else in the original frame
+    # is treated as a potential predictor and joined so that diagnostics and
+    # interpretation exhibits can reference factor values.
+    _LEAKAGE = {RECORD_ID, EXPOSURE, CLAIM_COST, RAW_CLAIM_COST, CLAIM_COUNT, CLAIM_EVENTS}
+    _feature_cols = [c for c in frame.columns if c not in _LEAKAGE]
+    if _feature_cols:
+        _feat_df = frame[["record_id"] + _feature_cols].copy()
+        predictions_enriched = result.predictions.merge(_feat_df, on="record_id", how="left")
+    else:
+        predictions_enriched = result.predictions
+
     metrics = evaluate_predictions(
         result.predictions,
         config.ordinary_eval_splits,
@@ -277,11 +298,25 @@ def run_experiment(
         target_mode=config.target_mode,
     )
 
-    # Diagnostics
+    # Diagnostics — pass enriched frame so segment analysis sees feature columns
     from autoresearch.evaluation.diagnostics import compute_diagnostics
     diagnostics = compute_diagnostics(
-        result.predictions,
+        predictions_enriched,
         eval_split=config.ordinary_eval_splits[0],
+        target_mode=config.target_mode,
+    )
+
+    # Automatic interpretation — computed from predictions + features, no model needed
+    from autoresearch.models.interpretation import compute_automatic_interpretation
+    _eval_split = config.ordinary_eval_splits[0]
+    _train_split = config.ordinary_train_split
+    _eval_enriched = predictions_enriched[predictions_enriched["split"] == _eval_split].copy()
+    _train_enriched = predictions_enriched[predictions_enriched["split"] == _train_split].copy()
+    interpretation = compute_automatic_interpretation(
+        eval_df=_eval_enriched,
+        feature_cols=_feature_cols,
+        interpret_fn=result.interpret_fn,
+        train_df=_train_enriched if not _train_enriched.empty else None,
         target_mode=config.target_mode,
     )
 
@@ -342,12 +377,14 @@ def run_experiment(
     predictions_path = run_dir / "predictions.parquet"
     capping_path = run_dir / "capping_diagnostics.json"
     diagnostics_path = run_dir / "diagnostics.json"
+    interpretation_path = run_dir / "interpretation.json"
     env_path = run_dir / "environment_manifest.json"
 
     write_json(config_path, config_snapshot)
     write_json(metrics_path, metrics_payload)
     write_json(capping_path, capping_diagnostics)
     write_json(diagnostics_path, diagnostics)
+    write_json(interpretation_path, interpretation)
     write_json(env_path, env_manifest)
     pd.DataFrame(metrics["split_metrics"]).to_csv(split_metrics_path, index=False)
     result.predictions.to_parquet(predictions_path, index=False)
@@ -359,6 +396,7 @@ def run_experiment(
         "predictions": predictions_path,
         "capping_diagnostics": capping_path,
         "diagnostics": diagnostics_path,
+        "interpretation": interpretation_path,
         "environment_manifest": env_path,
     }
     if model_script_path is not None:

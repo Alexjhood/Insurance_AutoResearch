@@ -147,6 +147,28 @@ def write_comparison_html_report(
     champion_timing = _load_timing(config, champion_id)
     challenger_timing = _load_timing(config, challenger_id)
 
+    champion_diag = _load_diagnostics(config, champion_id)
+    challenger_diag = _load_diagnostics(config, challenger_id)
+    diag_data = {
+        "champion": {
+            "calibration_by_pred_decile": champion_diag.get("calibration_by_pred_decile") or [],
+            "segment_loss_ratio": champion_diag.get("segment_loss_ratio") or {},
+            "calibration_pass": champion_diag.get("calibration_pass"),
+        },
+        "challenger": {
+            "calibration_by_pred_decile": challenger_diag.get("calibration_by_pred_decile") or [],
+            "segment_loss_ratio": challenger_diag.get("segment_loss_ratio") or {},
+            "calibration_pass": challenger_diag.get("calibration_pass"),
+        },
+    }
+
+    champion_interp = _load_interpretation(config, champion_id)
+    challenger_interp = _load_interpretation(config, challenger_id)
+    interp_data = {
+        "champion": champion_interp,
+        "challenger": challenger_interp,
+    }
+
     gate_metric = getattr(config, "gate_primary_metric", "rank_gini_weighted")
     gate_mode = comparison_summary.get("gate_mode", "single_partition")
 
@@ -177,6 +199,8 @@ def write_comparison_html_report(
         history_points=history_points,
         line_history_points=line_history_points,
         metric_lift_table=metric_lift_table or [],
+        diag_data=diag_data,
+        interp_data=interp_data,
     )
     output_path.write_text(html, encoding="utf-8")
     return output_path
@@ -205,6 +229,34 @@ def _load_proposal_for_experiment(config: ProjectConfig, experiment_id: str) -> 
     except Exception:
         pass
     return None
+
+
+def _load_diagnostics(config: ProjectConfig, experiment_id: str) -> dict[str, Any]:
+    """Load diagnostics.json for an experiment, returning empty dict on failure."""
+    try:
+        return read_json(_artifact_path(config, experiment_id, "diagnostics"))
+    except Exception:
+        return {}
+
+
+def _load_interpretation(config: ProjectConfig, experiment_id: str) -> dict[str, Any]:
+    """Load interpretation.json artifact, with fallback to model_notes.interpretation.
+
+    New experiments produce a full interpretation.json via the automatic framework
+    pipeline.  Older experiments are served from the legacy model_notes path for
+    backward compatibility.
+    """
+    # Primary: automatic interpretation artifact saved by experiment_runner
+    try:
+        return read_json(_artifact_path(config, experiment_id, "interpretation"))
+    except Exception:
+        pass
+    # Fallback: opt-in model_notes.interpretation written by model scripts
+    try:
+        metrics = read_json(_artifact_path(config, experiment_id, "metrics"))
+        return (metrics.get("model_notes") or {}).get("interpretation") or {}
+    except Exception:
+        return {}
 
 
 def _load_timing(config: ProjectConfig, experiment_id: str) -> dict[str, Any]:
@@ -679,6 +731,8 @@ def _render_html(
     history_points: list,
     line_history_points: list,
     metric_lift_table: list[dict[str, Any]] | None = None,
+    diag_data: dict | None = None,
+    interp_data: dict | None = None,
 ) -> str:
     decision_str = decision.get("decision", "?")
     # pending_llm → amber; promote/promoted → green; reject/rejected → red
@@ -737,6 +791,8 @@ def _render_html(
         n_partitions_label = f"{n_resamples} bootstrap resamples"
 
     _metric_table = metric_lift_table or []
+    _diag_data = diag_data or {"champion": {}, "challenger": {}}
+    _interp_data = interp_data or {"champion": {}, "challenger": {}}
     data_script = (
         "const LIFT=" + json.dumps(lift_data, separators=(",", ":")) + ";"
         "const DL=" + json.dumps(double_lift_data, separators=(",", ":")) + ";"
@@ -748,6 +804,8 @@ def _render_html(
         "const METRIC_TABLE=" + json.dumps(_metric_table, separators=(",", ":")) + ";"
         f"const GATE_METRIC={json.dumps(gate_primary_metric)};"
         f"const GATE_MODE={json.dumps(gate_mode)};"
+        "const DIAG=" + json.dumps(_diag_data, separators=(",", ":")) + ";"
+        "const INTERP=" + json.dumps(_interp_data, separators=(",", ":")) + ";"
     )
 
     band_options = "\n".join(
@@ -1223,7 +1281,461 @@ function renderLineHistory(){
   }),CFG);
 }
 
+/* ── Calibration by predicted decile ─────────────────────────────────── */
+function renderCalibDecile(){
+  const view=document.querySelector('input[name="calib-view"]:checked').value;
+  const champ=DIAG.champion.calibration_by_pred_decile||[];
+  const chall=DIAG.challenger.calibration_by_pred_decile||[];
+  if(champ.length===0&&chall.length===0){
+    Plotly.react('calib-decile-chart',[],mkLayout({title:{text:'No calibration decile data available'}}),CFG);
+    return;
+  }
+  let traces,layout;
+  const maxDecile=Math.max(...champ.map(d=>d.decile||0),...chall.map(d=>d.decile||0),10);
+  if(view==='ae'){
+    traces=[
+      {name:'Champion A/E',
+       x:champ.map(d=>d.decile),y:champ.map(d=>d.ratio),
+       mode:'lines+markers',line:{color:CHAMP_COLOR,width:2},marker:{size:7},
+       customdata:champ.map(d=>[d.actual_rate,d.pred_rate,d.n,d.exposure]),
+       hovertemplate:'Decile %{x}<br>A/E: %{y:.3f}<br>Actual: %{customdata[0]:.4f}<br>Predicted: %{customdata[1]:.4f}<br>n: %{customdata[2]:.0f}<extra>Champion</extra>'},
+      {name:'Challenger A/E',
+       x:chall.map(d=>d.decile),y:chall.map(d=>d.ratio),
+       mode:'lines+markers',line:{color:CHALL_COLOR,width:2},marker:{size:7},
+       customdata:chall.map(d=>[d.actual_rate,d.pred_rate,d.n,d.exposure]),
+       hovertemplate:'Decile %{x}<br>A/E: %{y:.3f}<br>Actual: %{customdata[0]:.4f}<br>Predicted: %{customdata[1]:.4f}<br>n: %{customdata[2]:.0f}<extra>Challenger</extra>'},
+      {name:'Perfect calibration (1.0)',
+       x:[1,maxDecile],y:[1,1],mode:'lines',
+       line:{color:'#868e96',width:1.5,dash:'dot'},hoverinfo:'skip'},
+    ];
+    layout=mkLayout({
+      title:{text:'Actual / Expected Ratio by Predicted Decile',font:{size:14}},
+      xaxis:{title:'Predicted Rate Decile (1 = lowest risk)',dtick:1},
+      yaxis:{title:'A/E Ratio (Actual ÷ Predicted)'},
+    });
+  } else {
+    const all=[...champ,...chall];
+    const maxExpBand=all.reduce((s,d)=>s+d.exposure,0)/Math.max(all.length,1)*2;
+    traces=[
+      {name:'Champion — Actual',
+       x:champ.map(d=>d.decile),y:champ.map(d=>d.actual_rate),
+       mode:'lines+markers',line:{color:CHAMP_COLOR,width:2,dash:'dash'},marker:{size:7,symbol:'circle-open'},
+       hovertemplate:'Decile %{x}<br>Actual: %{y:.4f}<extra>Champion Actual</extra>'},
+      {name:'Champion — Predicted',
+       x:champ.map(d=>d.decile),y:champ.map(d=>d.pred_rate),
+       mode:'lines+markers',line:{color:CHAMP_COLOR,width:2},marker:{size:6},
+       hovertemplate:'Decile %{x}<br>Predicted: %{y:.4f}<extra>Champion Predicted</extra>'},
+      {name:'Challenger — Actual',
+       x:chall.map(d=>d.decile),y:chall.map(d=>d.actual_rate),
+       mode:'lines+markers',line:{color:CHALL_COLOR,width:2,dash:'dash'},marker:{size:7,symbol:'circle-open'},
+       hovertemplate:'Decile %{x}<br>Actual: %{y:.4f}<extra>Challenger Actual</extra>'},
+      {name:'Challenger — Predicted',
+       x:chall.map(d=>d.decile),y:chall.map(d=>d.pred_rate),
+       mode:'lines+markers',line:{color:CHALL_COLOR,width:2},marker:{size:6},
+       hovertemplate:'Decile %{x}<br>Predicted: %{y:.4f}<extra>Challenger Predicted</extra>'},
+    ];
+    layout=mkLayout({
+      title:{text:'Actual vs Predicted Rate by Predicted Decile',font:{size:14}},
+      xaxis:{title:'Predicted Rate Decile (1 = lowest risk)',dtick:1},
+      yaxis:{title:'Rate'},
+    });
+  }
+  Plotly.react('calib-decile-chart',traces,layout,CFG);
+}
+
+/* ── Segment A/E ─────────────────────────────────────────────────────── */
+function _allSegmentKeys(){
+  // Prefer one-way analysis from INTERP (all features, with actual + predicted)
+  const ow=new Set([
+    ...(INTERP.champion.pdp_data||[]).filter(d=>d.source==='one_way').map(d=>d.feature),
+    ...(INTERP.challenger.pdp_data||[]).filter(d=>d.source==='one_way').map(d=>d.feature),
+  ]);
+  if(ow.size>0)return Array.from(ow).sort();
+  // Fallback: DIAG segment_loss_ratio keys
+  const keys=new Set([
+    ...Object.keys(DIAG.champion.segment_loss_ratio||{}),
+    ...Object.keys(DIAG.challenger.segment_loss_ratio||{}),
+  ]);
+  return Array.from(keys).sort();
+}
+function _owEntry(model,feat){
+  return((INTERP[model].pdp_data||[]).find(d=>d.feature===feat&&d.source==='one_way'));
+}
+function renderSegment(){
+  const sel=document.getElementById('segment-select');
+  if(!sel)return;
+  const key=sel.value;
+  const view=document.querySelector('input[name="seg-view"]:checked').value;
+
+  // ── One-way path (preferred — comes from automatic interpretation pipeline) ──
+  const champOW=_owEntry('champion',key);
+  const challOW=_owEntry('challenger',key);
+  if(champOW||challOW){
+    _renderSegmentOneWay(key,champOW,challOW,view);
+    return;
+  }
+
+  // ── Legacy DIAG path ──────────────────────────────────────────────────────
+  const champ=(DIAG.champion.segment_loss_ratio||{})[key]||[];
+  const chall=(DIAG.challenger.segment_loss_ratio||{})[key]||[];
+  if(champ.length===0&&chall.length===0){
+    Plotly.react('segment-chart',[],mkLayout({title:{text:`No data for ${key}`}}),CFG);
+    return;
+  }
+  const allBands=Array.from(new Set([...champ.map(d=>d.band),...chall.map(d=>d.band)])).sort();
+  const champByBand=Object.fromEntries(champ.map(d=>[d.band,d]));
+  const challByBand=Object.fromEntries(chall.map(d=>[d.band,d]));
+  let traces,layout;
+  if(view==='exposure'){
+    const champExp=allBands.map(b=>(champByBand[b]||{}).exposure||0);
+    const challExp=allBands.map(b=>(challByBand[b]||{}).exposure||0);
+    traces=[
+      {name:'Champion',x:allBands,y:champExp,type:'bar',marker:{color:CHAMP_COLOR,opacity:0.7},
+       hovertemplate:'%{x}<br>Exposure: %{y:,.1f}<extra>Champion</extra>'},
+      {name:'Challenger',x:allBands,y:challExp,type:'bar',marker:{color:CHALL_COLOR,opacity:0.7},
+       hovertemplate:'%{x}<br>Exposure: %{y:,.1f}<extra>Challenger</extra>'},
+    ];
+    layout=mkLayout({barmode:'group',title:{text:`Exposure by Band — ${key}`,font:{size:14}},
+      xaxis:{title:key,type:'category'},yaxis:{title:'Exposure'}});
+  } else if(view==='ae'){
+    const champAE=allBands.map(b=>(champByBand[b]||{}).ratio||null);
+    const challAE=allBands.map(b=>(challByBand[b]||{}).ratio||null);
+    const champExp=allBands.map(b=>(champByBand[b]||{}).exposure||0);
+    traces=[
+      expBarTrace(allBands.map((_,i)=>({band:allBands[i],exposure:champExp[i]})),'band'),
+      {name:'Champion A/E',x:allBands,y:champAE,mode:'lines+markers',
+       line:{color:CHAMP_COLOR,width:2},marker:{size:8},type:'scatter',yaxis:'y',
+       customdata:allBands.map(b=>[(champByBand[b]||{}).actual_pp,(champByBand[b]||{}).pred_pp]),
+       hovertemplate:'%{x}<br>A/E: %{y:.3f}<br>Actual: %{customdata[0]:.4f}<br>Predicted: %{customdata[1]:.4f}<extra>Champion</extra>'},
+      {name:'Challenger A/E',x:allBands,y:challAE,mode:'lines+markers',
+       line:{color:CHALL_COLOR,width:2},marker:{size:8},type:'scatter',yaxis:'y',
+       customdata:allBands.map(b=>[(challByBand[b]||{}).actual_pp,(challByBand[b]||{}).pred_pp]),
+       hovertemplate:'%{x}<br>A/E: %{y:.3f}<br>Actual: %{customdata[0]:.4f}<br>Predicted: %{customdata[1]:.4f}<extra>Challenger</extra>'},
+    ];
+    layout=mkLayout({title:{text:`A/E Ratio by Band — ${key}`,font:{size:14}},
+      xaxis:{title:key,type:'category'},yaxis:{title:'A/E Ratio (Actual ÷ Predicted)'},
+      yaxis2:expAxis(),
+      shapes:[{type:'line',xref:'paper',x0:0,x1:1,yref:'y',y0:1,y1:1,
+               line:{color:'#868e96',width:1.5,dash:'dot'}}]});
+  } else {
+    const champExp=allBands.map(b=>(champByBand[b]||{}).exposure||0);
+    traces=[
+      expBarTrace(allBands.map((_,i)=>({band:allBands[i],exposure:champExp[i]})),'band'),
+      {name:'Champion — Actual',x:allBands,y:allBands.map(b=>(champByBand[b]||{}).actual_pp||null),
+       mode:'lines+markers',line:{color:CHAMP_COLOR,width:2,dash:'dash'},marker:{size:7,symbol:'circle-open'},
+       hovertemplate:'%{x}<br>Actual: %{y:.4f}<extra>Champion Actual</extra>'},
+      {name:'Champion — Predicted',x:allBands,y:allBands.map(b=>(champByBand[b]||{}).pred_pp||null),
+       mode:'lines+markers',line:{color:CHAMP_COLOR,width:2},marker:{size:6},
+       hovertemplate:'%{x}<br>Predicted: %{y:.4f}<extra>Champion Predicted</extra>'},
+      {name:'Challenger — Actual',x:allBands,y:allBands.map(b=>(challByBand[b]||{}).actual_pp||null),
+       mode:'lines+markers',line:{color:CHALL_COLOR,width:2,dash:'dash'},marker:{size:7,symbol:'circle-open'},
+       hovertemplate:'%{x}<br>Actual: %{y:.4f}<extra>Challenger Actual</extra>'},
+      {name:'Challenger — Predicted',x:allBands,y:allBands.map(b=>(challByBand[b]||{}).pred_pp||null),
+       mode:'lines+markers',line:{color:CHALL_COLOR,width:2},marker:{size:6},
+       hovertemplate:'%{x}<br>Predicted: %{y:.4f}<extra>Challenger Predicted</extra>'},
+    ];
+    layout=mkLayout({title:{text:`Actual vs Predicted Rate by Band — ${key}`,font:{size:14}},
+      xaxis:{title:key,type:'category'},yaxis:{title:'Rate'},yaxis2:expAxis()});
+  }
+  Plotly.react('segment-chart',traces,layout,CFG);
+}
+/* Render segment chart from one-way analysis (INTERP.pdp_data, source="one_way") */
+function _renderSegmentOneWay(key,champOW,challOW,view){
+  // Build a merged x-axis across both models
+  const allX=Array.from(new Set([
+    ...(champOW?champOW.x:[]),
+    ...(challOW?challOW.x:[]),
+  ]));
+  const isNum=champOW?champOW.x_is_numeric:(challOW?challOW.x_is_numeric:false);
+  if(isNum)allX.sort((a,b)=>a-b); else allX.sort();
+  const champIdx=champOW?Object.fromEntries(champOW.x.map((v,i)=>[v,i])):{};
+  const challIdx=challOW?Object.fromEntries(challOW.x.map((v,i)=>[v,i])):{};
+
+  let traces,layout;
+  if(view==='exposure'){
+    traces=[
+      champOW?{name:'Champion',x:champOW.x,y:champOW.exposure,type:'bar',
+        marker:{color:CHAMP_COLOR,opacity:0.7},
+        hovertemplate:'%{x}<br>Exposure: %{y:,.1f}<extra>Champion</extra>'}:null,
+      challOW?{name:'Challenger',x:challOW.x,y:challOW.exposure,type:'bar',
+        marker:{color:CHALL_COLOR,opacity:0.7},
+        hovertemplate:'%{x}<br>Exposure: %{y:,.1f}<extra>Challenger</extra>'}:null,
+    ].filter(Boolean);
+    layout=mkLayout({barmode:'group',title:{text:`Exposure by Band — ${key}`,font:{size:14}},
+      xaxis:{title:key,type:isNum?'linear':'category'},yaxis:{title:'Exposure'}});
+  } else if(view==='ae'){
+    const champAE=allX.map(v=>{const i=champIdx[v];return champOW&&i!=null?champOW.ae_ratio[i]:null;});
+    const challAE=allX.map(v=>{const i=challIdx[v];return challOW&&i!=null?challOW.ae_ratio[i]:null;});
+    const champExp=allX.map(v=>{const i=champIdx[v];return champOW&&i!=null?champOW.exposure[i]:0;});
+    const champPred=allX.map(v=>{const i=champIdx[v];return champOW&&i!=null?champOW.y_pred[i]:null;});
+    const champAct=allX.map(v=>{const i=champIdx[v];return champOW&&i!=null?champOW.y_actual[i]:null;});
+    const challPred=allX.map(v=>{const i=challIdx[v];return challOW&&i!=null?challOW.y_pred[i]:null;});
+    const challAct=allX.map(v=>{const i=challIdx[v];return challOW&&i!=null?challOW.y_actual[i]:null;});
+    traces=[
+      expBarTrace(allX.map((v,i)=>({band:v,exposure:champExp[i]})),'band'),
+      champOW?{name:'Champion A/E',x:allX,y:champAE,mode:'lines+markers',
+        line:{color:CHAMP_COLOR,width:2},marker:{size:8},yaxis:'y',
+        customdata:allX.map((_,i)=>[champAct[i],champPred[i]]),
+        hovertemplate:'%{x}<br>A/E: %{y:.3f}<br>Actual: %{customdata[0]:.4f}<br>Predicted: %{customdata[1]:.4f}<extra>Champion</extra>'}:null,
+      challOW?{name:'Challenger A/E',x:allX,y:challAE,mode:'lines+markers',
+        line:{color:CHALL_COLOR,width:2},marker:{size:8},yaxis:'y',
+        customdata:allX.map((_,i)=>[challAct[i],challPred[i]]),
+        hovertemplate:'%{x}<br>A/E: %{y:.3f}<br>Actual: %{customdata[0]:.4f}<br>Predicted: %{customdata[1]:.4f}<extra>Challenger</extra>'}:null,
+    ].filter(Boolean);
+    layout=mkLayout({title:{text:`A/E Ratio by Band — ${key}`,font:{size:14}},
+      xaxis:{title:key,type:isNum?'linear':'category'},
+      yaxis:{title:'A/E Ratio (Actual ÷ Predicted)'},yaxis2:expAxis(),
+      shapes:[{type:'line',xref:'paper',x0:0,x1:1,yref:'y',y0:1,y1:1,
+               line:{color:'#868e96',width:1.5,dash:'dot'}}]});
+  } else {
+    // absolute: actual vs predicted for both models
+    const champAct=allX.map(v=>{const i=champIdx[v];return champOW&&i!=null?champOW.y_actual[i]:null;});
+    const champPred=allX.map(v=>{const i=champIdx[v];return champOW&&i!=null?champOW.y_pred[i]:null;});
+    const challAct=allX.map(v=>{const i=challIdx[v];return challOW&&i!=null?challOW.y_actual[i]:null;});
+    const challPred=allX.map(v=>{const i=challIdx[v];return challOW&&i!=null?challOW.y_pred[i]:null;});
+    const champExp=allX.map(v=>{const i=champIdx[v];return champOW&&i!=null?champOW.exposure[i]:0;});
+    traces=[
+      expBarTrace(allX.map((v,i)=>({band:v,exposure:champExp[i]})),'band'),
+      champOW?{name:'Champion — Actual',x:allX,y:champAct,mode:'lines+markers',
+        line:{color:CHAMP_COLOR,width:2,dash:'dash'},marker:{size:7,symbol:'circle-open'},
+        hovertemplate:'%{x}<br>Actual: %{y:.4f}<extra>Champion Actual</extra>'}:null,
+      champOW?{name:'Champion — Predicted',x:allX,y:champPred,mode:'lines+markers',
+        line:{color:CHAMP_COLOR,width:2},marker:{size:6},
+        hovertemplate:'%{x}<br>Predicted: %{y:.4f}<extra>Champion Predicted</extra>'}:null,
+      challOW?{name:'Challenger — Actual',x:allX,y:challAct,mode:'lines+markers',
+        line:{color:CHALL_COLOR,width:2,dash:'dash'},marker:{size:7,symbol:'circle-open'},
+        hovertemplate:'%{x}<br>Actual: %{y:.4f}<extra>Challenger Actual</extra>'}:null,
+      challOW?{name:'Challenger — Predicted',x:allX,y:challPred,mode:'lines+markers',
+        line:{color:CHALL_COLOR,width:2},marker:{size:6},
+        hovertemplate:'%{x}<br>Predicted: %{y:.4f}<extra>Challenger Predicted</extra>'}:null,
+    ].filter(Boolean);
+    layout=mkLayout({title:{text:`Actual vs Predicted Rate by Band — ${key}`,font:{size:14}},
+      xaxis:{title:key,type:isNum?'linear':'category'},yaxis:{title:'Rate'},yaxis2:expAxis()});
+  }
+  Plotly.react('segment-chart',traces,layout,CFG);
+}
+
+/* ── Feature Importance ──────────────────────────────────────────────── */
+function renderFeatureImportance(){
+  const modelSel=document.querySelector('input[name="fi-model"]:checked').value;
+  const topN=parseInt(document.getElementById('fi-top-n').value)||0;
+
+  function _sliceFI(fi,n){
+    if(!fi||fi.length===0)return[];
+    return n>0?fi.slice(0,n):fi;
+  }
+  const champFI=_sliceFI(INTERP.champion.feature_importance,topN);
+  const challFI=_sliceFI(INTERP.challenger.feature_importance,topN);
+
+  if(champFI.length===0&&challFI.length===0){
+    Plotly.react('fi-chart',[],mkLayout({title:{text:'No feature importance data'}}),CFG);
+    return;
+  }
+
+  let traces,layout;
+  if(modelSel==='both'&&champFI.length>0&&challFI.length>0){
+    // Build a merged feature set preserving challenger order as primary
+    const challFeats=challFI.map(d=>d.feature);
+    const champFeats=champFI.map(d=>d.feature);
+    const allFeats=Array.from(new Set([...challFeats,...champFeats]));
+    const challMap=Object.fromEntries(challFI.map(d=>[d.feature,d.importance]));
+    const champMap=Object.fromEntries(champFI.map(d=>[d.feature,d.importance]));
+    // Sort by challenger importance descending, with fallback to champion
+    allFeats.sort((a,b)=>(challMap[b]||0)-(challMap[a]||0));
+    const feats=topN>0?allFeats.slice(0,topN):allFeats;
+    const impType=challFI[0].importance_type||'importance';
+    traces=[
+      {name:'Champion',y:feats,x:feats.map(f=>champMap[f]||0),
+       type:'bar',orientation:'h',marker:{color:CHAMP_COLOR,opacity:0.75},
+       hovertemplate:'%{y}<br>'+impType+': %{x:.5g}<extra>Champion</extra>'},
+      {name:'Challenger',y:feats,x:feats.map(f=>challMap[f]||0),
+       type:'bar',orientation:'h',marker:{color:CHALL_COLOR,opacity:0.75},
+       hovertemplate:'%{y}<br>'+impType+': %{x:.5g}<extra>Challenger</extra>'},
+    ];
+    layout=Object.assign({},BASE_LAYOUT,{
+      barmode:'group',
+      title:{text:`Feature Importance (${impType}) — Champion vs Challenger`,font:{size:14}},
+      xaxis:{title:impType,gridcolor:'#f0f0f0'},
+      yaxis:{title:'',autorange:'reversed',tickfont:{size:11}},
+      margin:{l:180,r:40,t:52,b:52},
+      legend:{orientation:'h',yanchor:'bottom',y:1.02,xanchor:'right',x:1},
+    });
+  } else {
+    const fi=modelSel==='champion'?champFI:challFI;
+    const color=modelSel==='champion'?CHAMP_COLOR:CHALL_COLOR;
+    const label=modelSel==='champion'?'Champion':'Challenger';
+    if(fi.length===0){
+      Plotly.react('fi-chart',[],mkLayout({title:{text:`No feature importance data for ${label}`}}),CFG);
+      return;
+    }
+    const impType=fi[0].importance_type||'importance';
+    traces=[{
+      name:label,y:fi.map(d=>d.feature),x:fi.map(d=>d.importance),
+      type:'bar',orientation:'h',marker:{color:color,opacity:0.8},
+      hovertemplate:'%{y}<br>'+impType+': %{x:.5g}<extra>'+label+'</extra>',
+    }];
+    layout=Object.assign({},BASE_LAYOUT,{
+      title:{text:`Feature Importance (${impType}) — ${label}`,font:{size:14}},
+      xaxis:{title:impType,gridcolor:'#f0f0f0'},
+      yaxis:{title:'',autorange:'reversed',tickfont:{size:11}},
+      margin:{l:180,r:40,t:52,b:52},
+    });
+  }
+  Plotly.react('fi-chart',traces,layout,CFG);
+}
+
+/* ── Variable Response / PDP ─────────────────────────────────────────── */
+function renderPDP(){
+  const featSel=document.getElementById('pdp-feature-select');
+  const modelSel=document.querySelector('input[name="pdp-model"]:checked').value;
+  if(!featSel)return;
+  const feat=featSel.value;
+  const champPDPs=INTERP.champion.pdp_data||[];
+  const challPDPs=INTERP.challenger.pdp_data||[];
+  const champEntry=champPDPs.find(d=>d.feature===feat);
+  const challEntry=challPDPs.find(d=>d.feature===feat);
+  const refEntry=challEntry||champEntry;
+  if(!refEntry){
+    Plotly.react('pdp-chart',[],mkLayout({title:{text:`No variable analysis data for ${feat}`}}),CFG);
+    return;
+  }
+
+  const isOneWay=refEntry.source==='one_way';
+  const isNum=refEntry.x_is_numeric;
+  const chartTitle=isOneWay
+    ?`One-way Analysis — ${feat}`
+    :`Partial Dependence — ${feat}`;
+  const rateLabel=isOneWay?'Rate':'Predicted Rate (marginalised)';
+
+  const traces=[];
+  const expEntry=challEntry||champEntry;
+  traces.push({
+    name:'Exposure',x:expEntry.x,y:expEntry.exposure,
+    type:'bar',yaxis:'y2',marker:{color:EXP_BAR_COLOR},
+    hovertemplate:'%{x}<br>Exposure: %{y:,.1f}<extra>Exposure</extra>',
+    showlegend:true,
+  });
+
+  // Actual experience line (one-way analysis only) — show once (challenger preferred)
+  if(isOneWay&&(modelSel==='challenger'||modelSel==='both')&&challEntry&&challEntry.y_actual){
+    traces.push({
+      name:'Actual (Challenger)',x:challEntry.x,y:challEntry.y_actual,
+      mode:'lines+markers',line:{color:'#2ca02c',width:2,dash:'dot'},marker:{size:7,symbol:'square'},
+      hovertemplate:'%{x}<br>Actual: %{y:.4f}<extra>Actual</extra>',
+    });
+  } else if(isOneWay&&modelSel==='champion'&&champEntry&&champEntry.y_actual){
+    traces.push({
+      name:'Actual (Champion)',x:champEntry.x,y:champEntry.y_actual,
+      mode:'lines+markers',line:{color:'#2ca02c',width:2,dash:'dot'},marker:{size:7,symbol:'square'},
+      hovertemplate:'%{x}<br>Actual: %{y:.4f}<extra>Actual</extra>',
+    });
+  }
+
+  // Predicted lines
+  if((modelSel==='challenger'||modelSel==='both')&&challEntry){
+    traces.push({
+      name:'Challenger',x:challEntry.x,y:challEntry.y_pred,
+      mode:'lines+markers',line:{color:CHALL_COLOR,width:2.5},marker:{size:7},
+      hovertemplate:'%{x}<br>Predicted: %{y:.4f}'+(isOneWay&&challEntry.ae_ratio
+        ?'<br>A/E: %{customdata:.3f}':'')+'<extra>Challenger</extra>',
+      customdata:isOneWay&&challEntry.ae_ratio?challEntry.ae_ratio:undefined,
+    });
+  }
+  if((modelSel==='champion'||modelSel==='both')&&champEntry){
+    traces.push({
+      name:'Champion',x:champEntry.x,y:champEntry.y_pred,
+      mode:'lines+markers',line:{color:CHAMP_COLOR,width:2,dash:'dash'},marker:{size:7,symbol:'circle-open'},
+      hovertemplate:'%{x}<br>Predicted: %{y:.4f}'+(isOneWay&&champEntry.ae_ratio
+        ?'<br>A/E: %{customdata:.3f}':'')+'<extra>Champion</extra>',
+      customdata:isOneWay&&champEntry.ae_ratio?champEntry.ae_ratio:undefined,
+    });
+  }
+
+  Plotly.react('pdp-chart',traces,mkLayout({
+    title:{text:chartTitle,font:{size:14}},
+    xaxis:{title:feat,type:isNum?'linear':'category'},
+    yaxis:{title:rateLabel},
+    yaxis2:expAxis(),
+  }),CFG);
+}
+
+/* ── SHAP summary ─────────────────────────────────────────────────────── */
+function renderShap(){
+  const modelSel=document.querySelector('input[name="shap-model"]:checked').value;
+  const shap=(modelSel==='champion'?INTERP.champion:INTERP.challenger).shap_summary;
+  const color=modelSel==='champion'?CHAMP_COLOR:CHALL_COLOR;
+  const label=modelSel==='champion'?'Champion':'Challenger';
+  if(!shap||shap.features.length===0){
+    Plotly.react('shap-chart',[],mkLayout({title:{text:`No SHAP data for ${label}`}}),CFG);
+    return;
+  }
+  const srcLabel=shap.source?` [${shap.source}]`:'';
+  Plotly.react('shap-chart',[{
+    name:label,y:shap.features,x:shap.mean_abs_shap,
+    type:'bar',orientation:'h',marker:{color:color,opacity:0.8},
+    hovertemplate:'%{y}<br>Mean |SHAP|: %{x:.5g}<extra>'+label+'</extra>',
+  }],Object.assign({},BASE_LAYOUT,{
+    title:{text:`SHAP Feature Importance${srcLabel} — ${label}`,font:{size:14}},
+    xaxis:{title:'Mean |SHAP value|',gridcolor:'#f0f0f0'},
+    yaxis:{title:'',autorange:'reversed',tickfont:{size:11}},
+    margin:{l:180,r:40,t:52,b:52},
+  }),CFG);
+}
+
 /* ── Init ────────────────────────────────────────────────────────────── */
+/* ── Factor calibration init ─────────────────────────────────────────── */
+document.querySelectorAll('input[name="calib-view"]').forEach(r=>r.addEventListener('change',renderCalibDecile));
+
+// Populate segment selector from available keys
+const segSel=document.getElementById('segment-select');
+if(segSel){
+  const segKeys=_allSegmentKeys();
+  segKeys.forEach(k=>{const o=document.createElement('option');o.value=k;o.textContent=k;segSel.appendChild(o);});
+  if(segKeys.length>0){segSel.value=segKeys[0];}
+  segSel.addEventListener('change',renderSegment);
+  document.querySelectorAll('input[name="seg-view"]').forEach(r=>r.addEventListener('change',renderSegment));
+}
+
+/* ── Interpretation section init ─────────────────────────────────────── */
+(function initInterpretation(){
+  const hasFI=(INTERP.challenger.feature_importance||[]).length>0
+            ||(INTERP.champion.feature_importance||[]).length>0;
+  const hasPDP=(INTERP.challenger.pdp_data||[]).length>0
+             ||(INTERP.champion.pdp_data||[]).length>0;
+  const hasShap=!!(INTERP.challenger.shap_summary||INTERP.champion.shap_summary);
+  const hasAny=hasFI||hasPDP||hasShap;
+
+  if(hasAny){
+    const sec=document.getElementById('interp-section');
+    if(sec)sec.style.display='';
+  }
+  if(hasFI){
+    document.getElementById('fi-container').style.display='';
+    document.getElementById('fi-top-n').addEventListener('change',renderFeatureImportance);
+    document.querySelectorAll('input[name="fi-model"]').forEach(r=>r.addEventListener('change',renderFeatureImportance));
+  }
+  if(hasPDP){
+    document.getElementById('pdp-container').style.display='';
+    // Populate feature selector from union of available features
+    const pdpSel=document.getElementById('pdp-feature-select');
+    const challFeats=(INTERP.challenger.pdp_data||[]).map(d=>d.feature);
+    const champFeats=(INTERP.champion.pdp_data||[]).map(d=>d.feature);
+    const allPDPFeats=Array.from(new Set([...challFeats,...champFeats]));
+    allPDPFeats.forEach(f=>{const o=document.createElement('option');o.value=f;o.textContent=f;pdpSel.appendChild(o);});
+    if(allPDPFeats.length>0)pdpSel.value=allPDPFeats[0];
+    pdpSel.addEventListener('change',renderPDP);
+    document.querySelectorAll('input[name="pdp-model"]').forEach(r=>r.addEventListener('change',renderPDP));
+  }
+  if(hasShap){
+    document.getElementById('shap-container').style.display='';
+    document.querySelectorAll('input[name="shap-model"]').forEach(r=>r.addEventListener('change',renderShap));
+  }
+
+  if(hasFI)renderFeatureImportance();
+  if(hasPDP)renderPDP();
+  if(hasShap)renderShap();
+})();
+
 document.getElementById('lift-bands').addEventListener('change',renderLift);
 document.querySelectorAll('input[name="lift-mode"]').forEach(r=>r.addEventListener('change',renderLift));
 document.getElementById('dl-bands').addEventListener('change',renderDoubleLift);
@@ -1270,6 +1782,7 @@ if(lineHistMetricSel){
   lineHistMetricSel.addEventListener('change',renderLineHistory);
 }
 document.querySelectorAll('input[name="line-history-x"]').forEach(r=>r.addEventListener('change',renderLineHistory));
+renderCalibDecile();renderSegment();
 renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();renderLineHistory();
 """
     if target_mode != "burning_cost":
@@ -1322,7 +1835,13 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();render
     th{{background:#f3f5f7;font-weight:600}}
     tr:nth-child(even) td{{background:#fafbfc}}
     .pass{{color:#0a5c2e;font-weight:600}}.fail{{color:#7a1a1a;font-weight:600}}
-    .section{{margin-bottom:32px}}
+    .section{{margin-bottom:28px}}
+    .report-group{{margin-bottom:4px}}
+    .report-group>summary{{cursor:pointer;user-select:none;list-style:none;padding:10px 16px;margin:0 0 12px;border-radius:6px;background:#eef2f7;border-left:4px solid #6c9bc5;font-size:15px;font-weight:700;color:#1a3a5c;display:flex;align-items:center;gap:8px}}
+    .report-group>summary::-webkit-details-marker{{display:none}}
+    .report-group>summary::before{{content:'▶';font-size:10px;color:#6c9bc5;transition:transform .15s;flex-shrink:0}}
+    .report-group[open]>summary::before{{transform:rotate(90deg)}}
+    .report-group-body{{padding:0 4px}}
     .controls{{display:flex;align-items:center;gap:18px;margin-bottom:10px;flex-wrap:wrap}}
     .controls label{{font-size:13px;color:#495057;display:flex;align-items:center;gap:6px;cursor:pointer}}
     select{{font-size:13px;padding:4px 8px;border:1px solid #ced4da;border-radius:4px;cursor:pointer;background:#fff}}
@@ -1397,135 +1916,255 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();render
     <div class="card" style="padding:12px">{compute_html}</div>
   </div>
 
-  <div class="section">
-    <h2>Validation Metrics</h2>
-    <div class="card" style="padding:12px">{metrics_html}</div>
-  </div>
+  <!-- ══ VALIDATION GROUP ══════════════════════════════════════════════════ -->
+  <details class="report-group" open>
+    <summary>Validation</summary>
+    <div class="report-group-body">
 
-  <!-- ── LIFT CURVES ── -->
-  <div class="section">
-    <h2>Lift Curves — Actual vs Predicted by Risk Band</h2>
-    <p class="chart-note">
-      Policies sorted ascending by each model's own predicted pure premium (Band 1 = lowest risk,
-      Band N = highest). Bands contain equal total exposure; grey bars show exposure per band (right axis).
-      Solid lines = predicted PP; dashed = actual PP. A well-discriminating model shows a steep monotone
-      rise with predicted and actual tracking closely.
-    </p>
-    <div class="controls">
-      <label>Bands: <select id="lift-bands">{band_options}</select></label>
-      <label><input type="radio" name="lift-mode" value="absolute" checked> Absolute PP (£)</label>
-      <label><input type="radio" name="lift-mode" value="ae"> A/E Ratio</label>
-      <label><input type="radio" name="lift-mode" value="rescaled"> Rescaled to champion mean</label>
+      <div class="section">
+        <h2>Validation Metrics</h2>
+        <div class="card" style="padding:12px">{metrics_html}</div>
+      </div>
+
+      <!-- ── LIFT CURVES ── -->
+      <div class="section">
+        <h2>Lift Curves — Actual vs Predicted by Risk Band</h2>
+        <p class="chart-note">
+          Policies sorted ascending by each model's own predicted pure premium (Band 1 = lowest risk,
+          Band N = highest). Bands contain equal total exposure; grey bars show exposure per band (right axis).
+          Solid lines = predicted PP; dashed = actual PP. A well-discriminating model shows a steep monotone
+          rise with predicted and actual tracking closely.
+        </p>
+        <div class="controls">
+          <label>Bands: <select id="lift-bands">{band_options}</select></label>
+          <label><input type="radio" name="lift-mode" value="absolute" checked> Absolute PP (£)</label>
+          <label><input type="radio" name="lift-mode" value="ae"> A/E Ratio</label>
+          <label><input type="radio" name="lift-mode" value="rescaled"> Rescaled to champion mean</label>
+        </div>
+        <div class="chart-wrap"><div id="lift-chart" style="height:440px"></div></div>
+      </div>
+
+      <!-- ── DOUBLE LIFT ── -->
+      <div class="section">
+        <h2>Double Lift Curve</h2>
+        <p class="chart-note">
+          Policies sorted ascending by Challenger ÷ Champion predicted PP ratio.
+          Grey bars show exposure per band (right axis).
+          <strong>Equal exposure:</strong> N bands of equal total exposure; x-axis = band ordinal.
+          <strong>Equal width:</strong> N bands of equal ratio-interval width (2nd–98th percentile range);
+          x-axis = the actual ratio midpoint — spacing reflects where the models truly disagree.
+        </p>
+        <div class="controls">
+          <label>Bands: <select id="dl-bands">{band_options}</select></label>
+          <label><input type="radio" name="dl-mode" value="equal_exposure" checked> Equal exposure</label>
+          <label><input type="radio" name="dl-mode" value="equal_width"> Equal width</label>
+          <label><input type="checkbox" id="dl-rescale"> Rescale to champion (champion&nbsp;=&nbsp;1.0)</label>
+        </div>
+        <div class="chart-wrap"><div id="double-lift-chart" style="height:440px"></div></div>
+      </div>
+
+      <!-- ── GINI EXHIBIT ── -->
+      <div class="section">
+        <h2>Gini Lorenz Curves</h2>
+        <p class="chart-note">
+          Policies ranked by predicted pure premium <strong>ascending</strong>. X = cumulative exposure share;
+          Y = cumulative actual claim cost share. A well-discriminating model curves <em>below</em> the diagonal.
+          Gini values match the reported <code>gini_weighted</code> metric exactly.
+        </p>
+        <div class="chart-wrap"><div id="gini-chart" style="height:460px"></div></div>
+      </div>
+
+      <!-- ── PREDICTION DISTRIBUTION ── -->
+      <div class="section">
+        <h2>Predicted Pure Premium Distribution</h2>
+        <p class="chart-note">
+          Three views of the predicted pure premium spread.
+          <strong>Distribution:</strong> exposure-weighted histogram per model (1st–99th pct).
+          <strong>% Diff:</strong> exposure-weighted histogram of (Challenger − Champion) / Champion per policy.
+          <strong>Scatter:</strong> champion vs challenger PP per policy; axes capped at 99th percentile.
+          Use the sample size selector to control density.
+        </p>
+        <div class="controls">
+          <label><input type="radio" name="hist-view" value="dist" checked> Distribution</label>
+          <label><input type="radio" name="hist-view" value="pctdiff"> % Diff</label>
+          <label><input type="radio" name="hist-view" value="scatter"> Scatter</label>
+          <span style="color:#adb5bd;margin:0 4px">|</span>
+          <label><input type="radio" name="scatter-pct" value="1pct"> 1%</label>
+          <label><input type="radio" name="scatter-pct" value="5pct"> 5%</label>
+          <label><input type="radio" name="scatter-pct" value="25pct" checked> 25%</label>
+          <label><input type="radio" name="scatter-pct" value="100pct"> 100%</label>
+        </div>
+        <div class="chart-wrap"><div id="hist-chart" style="height:380px"></div></div>
+      </div>
+
+      <!-- ── MULTI-METRIC EXHIBIT ── -->
+      <div class="section">
+        <h2>Multi-Metric Comparison</h2>
+        <p class="chart-note">
+          Select any metric from the panel to compare champion vs challenger.
+          <strong>🔒 gate</strong> = the primary gate metric (<code>{escape(gate_primary_metric)}</code>).
+          <strong>★ KPI</strong> = the reported business KPI (<code>gini_weighted</code>).
+          <strong>asym_pricing_loss</strong> penalises under-pricing 4× over-pricing (lower is better).
+          Left panel: score bars. Right panel: lift distribution across
+          {escape(n_partitions_label)} — box shows median/IQR, dots show individual samples.
+          A metric that consistently favours the challenger is more reliable than one that varies widely.
+        </p>
+        <div class="controls">
+          <label style="font-weight:600">Metric:&nbsp;<select id="metric-select" style="min-width:280px"></select></label>
+          <span id="metric-lift-display" style="margin-left:16px;font-size:14px"></span>
+        </div>
+        <div class="chart-wrap"><div id="metric-exhibit-chart" style="height:400px"></div></div>
+      </div>
+
     </div>
-    <div class="chart-wrap"><div id="lift-chart" style="height:440px"></div></div>
-  </div>
+  </details>
 
-  <!-- ── DOUBLE LIFT ── -->
-  <div class="section">
-    <h2>Double Lift Curve</h2>
-    <p class="chart-note">
-      Policies sorted ascending by Challenger ÷ Champion predicted PP ratio.
-      Grey bars show exposure per band (right axis).
-      <strong>Equal exposure:</strong> N bands of equal total exposure; x-axis = band ordinal.
-      <strong>Equal width:</strong> N bands of equal ratio-interval width (2nd–98th percentile range);
-      x-axis = the actual ratio midpoint — spacing reflects where the models truly disagree.
-    </p>
-    <div class="controls">
-      <label>Bands: <select id="dl-bands">{band_options}</select></label>
-      <label><input type="radio" name="dl-mode" value="equal_exposure" checked> Equal exposure</label>
-      <label><input type="radio" name="dl-mode" value="equal_width"> Equal width</label>
-      <label><input type="checkbox" id="dl-rescale"> Rescale to champion (champion&nbsp;=&nbsp;1.0)</label>
+  <!-- ══ FACTOR ANALYSIS GROUP ═════════════════════════════════════════════ -->
+  <details class="report-group" open>
+    <summary>Factor Analysis</summary>
+    <div class="report-group-body">
+
+      <!-- ── FACTOR CALIBRATION ── -->
+      <div class="section">
+        <h2>Factor Calibration</h2>
+
+        <h3 style="margin-top:16px">Calibration by Predicted Decile</h3>
+        <p class="chart-note">
+          Actual vs predicted {rate_label.lower()} split into 10 equal-frequency deciles of predicted rate
+          (Decile 1 = lowest risk, Decile 10 = highest).
+          A well-calibrated model has A/E ratios close to 1.0 across all deciles.
+        </p>
+        <div class="controls">
+          <label><input type="radio" name="calib-view" value="ae" checked> A/E Ratio</label>
+          <label><input type="radio" name="calib-view" value="absolute"> Actual vs Predicted</label>
+        </div>
+        <div class="chart-wrap"><div id="calib-decile-chart" style="height:380px"></div></div>
+
+        <h3 style="margin-top:24px">Segment A/E Breakdown</h3>
+        <p class="chart-note">
+          Actual vs predicted {rate_label.lower()} by factor band for key rating variables.
+          Bars show A/E ratio per band; dotted line = perfect calibration (1.0).
+          Good calibration requires A/E close to 1.0 <em>within</em> each band, not just in aggregate.
+          Systematic over/under by band indicates the model has not fully captured that factor's effect.
+        </p>
+        <div class="controls">
+          <label>Factor: <select id="segment-select" style="min-width:200px"></select></label>
+          <label><input type="radio" name="seg-view" value="ae" checked> A/E Ratio</label>
+          <label><input type="radio" name="seg-view" value="absolute"> Actual vs Predicted</label>
+          <label><input type="radio" name="seg-view" value="exposure"> Exposure Mix</label>
+        </div>
+        <div class="chart-wrap"><div id="segment-chart" style="height:420px"></div></div>
+      </div>
+
+      <!-- ── MODEL INTERPRETATION ── -->
+      <div class="section" id="interp-section" style="display:none">
+        <h2>Model Interpretation</h2>
+
+        <!-- Feature Importance -->
+        <div id="fi-container" style="display:none">
+          <h3 style="margin-top:16px">Feature Importance</h3>
+          <p class="chart-note">
+            Relative contribution of each feature to the model's predictions.
+            The importance type (gain, split, permutation, coefficient magnitude) depends on the model family
+            and is shown in the axis label. Challenger is shown by default; switch to compare both models.
+          </p>
+          <div class="controls">
+            <label>Top features: <select id="fi-top-n">
+              <option value="10">10</option>
+              <option value="20" selected>20</option>
+              <option value="50">50</option>
+              <option value="0">All</option>
+            </select></label>
+            <label><input type="radio" name="fi-model" value="challenger" checked> Challenger only</label>
+            <label><input type="radio" name="fi-model" value="champion"> Champion only</label>
+            <label><input type="radio" name="fi-model" value="both"> Both</label>
+          </div>
+          <div class="chart-wrap"><div id="fi-chart" style="height:480px"></div></div>
+        </div>
+
+        <!-- Variable Response / PDP -->
+        <div id="pdp-container" style="display:none">
+          <h3 style="margin-top:24px">Variable Analysis</h3>
+          <p class="chart-note">
+            For each feature: the model's predicted {rate_label.lower()} (solid line) vs actual experience (dotted green)
+            across factor bands — the standard actuarial one-way exhibit.
+            A/E ratio and exposure are available in the hover tooltip.
+            If the model supplies a predict function, marginalised PDPs are shown instead (averaged over the
+            joint distribution of other features).
+            Grey bars show relative exposure on the right axis.
+          </p>
+          <div class="controls">
+            <label>Feature: <select id="pdp-feature-select" style="min-width:220px"></select></label>
+            <label><input type="radio" name="pdp-model" value="challenger" checked> Challenger only</label>
+            <label><input type="radio" name="pdp-model" value="champion"> Champion only</label>
+            <label><input type="radio" name="pdp-model" value="both"> Both</label>
+          </div>
+          <div class="chart-wrap"><div id="pdp-chart" style="height:400px"></div></div>
+        </div>
+
+        <!-- SHAP -->
+        <div id="shap-container" style="display:none">
+          <h3 style="margin-top:24px">SHAP Feature Importance</h3>
+          <p class="chart-note">
+            Mean absolute SHAP value per feature — a model-agnostic measure of feature contribution.
+            Computed automatically by fitting a fast gradient-boosting surrogate to the model's own predictions
+            and running TreeSHAP on the surrogate. The surrogate faithfully approximates the original model's
+            prediction surface without requiring access to the model object.
+            Larger values indicate features with greater average impact on individual predictions.
+          </p>
+          <div class="controls">
+            <label><input type="radio" name="shap-model" value="challenger" checked> Challenger</label>
+            <label><input type="radio" name="shap-model" value="champion"> Champion</label>
+          </div>
+          <div class="chart-wrap"><div id="shap-chart" style="height:460px"></div></div>
+        </div>
+      </div>
+
     </div>
-    <div class="chart-wrap"><div id="double-lift-chart" style="height:440px"></div></div>
-  </div>
+  </details>
 
-  <!-- ── GINI EXHIBIT ── -->
-  <div class="section">
-    <h2>Gini Lorenz Curves</h2>
-    <p class="chart-note">
-      Policies ranked by predicted pure premium <strong>ascending</strong>. X = cumulative exposure share;
-      Y = cumulative actual claim cost share. A well-discriminating model curves <em>below</em> the diagonal.
-      Gini values match the reported <code>gini_weighted</code> metric exactly.
-    </p>
-    <div class="chart-wrap"><div id="gini-chart" style="height:460px"></div></div>
-  </div>
+  <!-- ══ PROGRESSION GROUP ═════════════════════════════════════════════════ -->
+  <details class="report-group" open>
+    <summary>Progression</summary>
+    <div class="report-group-body">
 
-  <!-- ── PREDICTION DISTRIBUTION ── -->
-  <div class="section">
-    <h2>Predicted Pure Premium Distribution</h2>
-    <p class="chart-note">
-      Three views of the predicted pure premium spread.
-      <strong>Distribution:</strong> exposure-weighted histogram per model (1st–99th pct).
-      <strong>% Diff:</strong> exposure-weighted histogram of (Challenger − Champion) / Champion per policy.
-      <strong>Scatter:</strong> champion vs challenger PP per policy; axes capped at 99th percentile.
-      Use the sample size selector to control density.
-    </p>
-    <div class="controls">
-      <label><input type="radio" name="hist-view" value="dist" checked> Distribution</label>
-      <label><input type="radio" name="hist-view" value="pctdiff"> % Diff</label>
-      <label><input type="radio" name="hist-view" value="scatter"> Scatter</label>
-      <span style="color:#adb5bd;margin:0 4px">|</span>
-      <label><input type="radio" name="scatter-pct" value="1pct"> 1%</label>
-      <label><input type="radio" name="scatter-pct" value="5pct"> 5%</label>
-      <label><input type="radio" name="scatter-pct" value="25pct" checked> 25%</label>
-      <label><input type="radio" name="scatter-pct" value="100pct"> 100%</label>
+      <!-- ── CHAMPION HISTORY ── -->
+      <div class="section">
+        <h2>Champion Metric Progression</h2>
+        <p class="chart-note">
+          Selected metric for every experiment in this run.
+          <span style="color:#0a5c2e;font-weight:600">Green filled = promoted</span>;
+          <span style="color:#d62728;font-weight:600">red open = not promoted</span>.
+          The connected line traces only the champion lineage.
+        </p>
+        <div class="controls">
+          <label style="font-weight:600">Metric:&nbsp;
+            <select id="history-metric-select" style="min-width:220px"></select>
+          </label>
+        </div>
+        <div class="chart-wrap"><div id="history-chart" style="height:360px"></div></div>
+      </div>
+
+      <!-- ── RESEARCH LINE HISTORY ── -->
+      <div class="section">
+        <h2>Research Line Metric Progression</h2>
+        <p class="chart-note">
+          Selected metric for experiments grouped by declared research line.
+          Filled markers with a star indicate experiments locally promoted within their line.
+          Use the x-axis selector to view chronology across the whole run or progress inside each line.
+        </p>
+        <div class="controls">
+          <label style="font-weight:600">Metric:&nbsp;
+            <select id="line-history-metric-select" style="min-width:220px"></select>
+          </label>
+          <label><input type="radio" name="line-history-x" value="global_step" checked> Run experiment step</label>
+          <label><input type="radio" name="line-history-x" value="line_step"> Experiment number within line</label>
+        </div>
+        <div class="chart-wrap"><div id="line-history-chart" style="height:420px"></div></div>
+      </div>
+
     </div>
-    <div class="chart-wrap"><div id="hist-chart" style="height:380px"></div></div>
-  </div>
-
-  <!-- ── MULTI-METRIC EXHIBIT ── -->
-  <div class="section">
-    <h2>Multi-Metric Comparison</h2>
-    <p class="chart-note">
-      Select any metric from the panel to compare champion vs challenger.
-      <strong>🔒 gate</strong> = the primary gate metric (<code>{escape(gate_primary_metric)}</code>).
-      <strong>★ KPI</strong> = the reported business KPI (<code>gini_weighted</code>).
-      <strong>asym_pricing_loss</strong> penalises under-pricing 4× over-pricing (lower is better).
-      Left panel: score bars. Right panel: lift distribution across
-      {escape(n_partitions_label)} — box shows median/IQR, dots show individual samples.
-      A metric that consistently favours the challenger is more reliable than one that varies widely.
-    </p>
-    <div class="controls">
-      <label style="font-weight:600">Metric:&nbsp;<select id="metric-select" style="min-width:280px"></select></label>
-      <span id="metric-lift-display" style="margin-left:16px;font-size:14px"></span>
-    </div>
-    <div class="chart-wrap"><div id="metric-exhibit-chart" style="height:400px"></div></div>
-  </div>
-
-  <!-- ── CHAMPION HISTORY ── -->
-  <div class="section">
-    <h2>Champion Metric Progression</h2>
-    <p class="chart-note">
-      Selected metric for every experiment in this run.
-      <span style="color:#0a5c2e;font-weight:600">Green filled = promoted</span>;
-      <span style="color:#d62728;font-weight:600">red open = not promoted</span>.
-      The connected line traces only the champion lineage.
-    </p>
-    <div class="controls">
-      <label style="font-weight:600">Metric:&nbsp;
-        <select id="history-metric-select" style="min-width:220px"></select>
-      </label>
-    </div>
-    <div class="chart-wrap"><div id="history-chart" style="height:360px"></div></div>
-  </div>
-
-  <!-- ── RESEARCH LINE HISTORY ── -->
-  <div class="section">
-    <h2>Research Line Metric Progression</h2>
-    <p class="chart-note">
-      Selected metric for experiments grouped by declared research line.
-      Filled markers with a star indicate experiments locally promoted within their line.
-      Use the x-axis selector to view chronology across the whole run or progress inside each line.
-    </p>
-    <div class="controls">
-      <label style="font-weight:600">Metric:&nbsp;
-        <select id="line-history-metric-select" style="min-width:220px"></select>
-      </label>
-      <label><input type="radio" name="line-history-x" value="global_step" checked> Run experiment step</label>
-      <label><input type="radio" name="line-history-x" value="line_step"> Experiment number within line</label>
-    </div>
-    <div class="chart-wrap"><div id="line-history-chart" style="height:420px"></div></div>
-  </div>
+  </details>
 
 </div>
 

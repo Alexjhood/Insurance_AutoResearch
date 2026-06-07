@@ -15,12 +15,20 @@ from autoresearch.evaluation.metrics import infer_target_mode, prediction_target
 from autoresearch.targets import target_spec
 
 
-_SEGMENT_COLS = [
-    "risk_score_index_e",
-    "vehicle_age_band_c",
-    "driver_age_band_d",
-    "territory_band_h",
-]
+# System and target columns that should never be treated as segment variables.
+# Any column NOT in this set that appears in the predictions frame is assumed
+# to be a feature and will be used for segment A/E analysis.
+_PREDICTION_SYSTEM_COLS = {
+    "record_id", "split", "target_mode", "exposure",
+    "actual_claim_cost", "actual_claim_cost_uncapped",
+    "actual_claim_count", "actual_claim_event_count",
+    "actual_target", "predicted_target",
+    "predicted_claim_cost", "predicted_claim_count",
+    "actual_pure_premium", "predicted_pure_premium",
+    "actual_frequency", "predicted_frequency",
+    # transient computed columns
+    "_pred_rate", "decile", "exp_band",
+}
 
 
 def compute_diagnostics(
@@ -129,12 +137,24 @@ def _exposure_band_calibration(frame: pd.DataFrame, *, target_mode: str) -> list
 
 
 def _segment_diagnostics(frame: pd.DataFrame, *, target_mode: str) -> dict[str, list[dict[str, Any]]]:
-    """Loss ratio by known segment columns (if present in predictions)."""
+    """Loss ratio by feature columns present in the predictions frame.
+
+    Any column that is not a system/prediction column is treated as a potential
+    segment variable.  This replaces the previous hardcoded list and automatically
+    picks up whatever features were joined into the predictions frame by the runner.
+    """
 
     result = {}
     actual_col, predicted_col = prediction_target_columns(frame, target_mode)
-    for col in _SEGMENT_COLS:
-        if col not in frame.columns:
+    segment_cols = [c for c in frame.columns if c not in _PREDICTION_SYSTEM_COLS]
+
+    for col in segment_cols:
+        try:
+            n_unique = frame[col].nunique()
+        except Exception:
+            continue
+        # Skip very high-cardinality columns (raw IDs etc.) — cap at 100 categories
+        if n_unique > 100 or n_unique < 2:
             continue
         rows = []
         for val, grp in frame.groupby(col, sort=True):
