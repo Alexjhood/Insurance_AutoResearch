@@ -57,7 +57,7 @@ Then open http://localhost:3000.
 |---|---|---|
 | `/` | 1 | Dashboard: track summary, top experiments |
 | `/runs` | 1 | All runs with track selector |
-| `/runs/[track]/[runId]` | 1 | Full run detail: experiments, comparisons, research lines, artifact browser |
+| `/runs/[track]/[runId]` | 1 | Full run detail: LLM telemetry, experiments, comparisons, research lines, artifact browser |
 | `/leaderboard` | 1 | Cross-run search-split leaderboard + gated holdout panel |
 | `/launch` | 2 | Launch form — creates a git worktree and starts an agent job |
 | `/monitor` | 2 | Job roster |

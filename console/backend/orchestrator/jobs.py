@@ -11,7 +11,7 @@ from textwrap import dedent
 from typing import Any
 
 from console.backend import config as cfg
-from console.backend.orchestrator import db
+from console.backend.orchestrator import db, telemetry
 from console.backend.orchestrator.adapters.base import EventType, SteerResult
 from console.backend.orchestrator.runner import get_runner
 
@@ -61,14 +61,12 @@ def _build_env(job: dict) -> dict:
         env["CODEX_BIN"] = cfg.CODEX_BIN
     if cfg.OPENCODE_BIN:
         env["OPENCODE_BIN"] = cfg.OPENCODE_BIN
-    # OpenCode takes the model as a `provider/model` string via -m.
-    if job.get("surface") == "opencode":
-        prov = job.get("model_provider") or ""
-        name = job.get("model_name") or ""
-        if prov and name:
-            env["OPENCODE_MODEL"] = f"{prov}/{name}"
-        elif name:
-            env["OPENCODE_MODEL"] = name
+    # Agent model + thinking/reasoning effort — each adapter translates these
+    # to the right CLI flag (--model/--effort, -m/-c model_reasoning_effort, -m/--variant).
+    if job.get("agent_model"):
+        env["AGENT_MODEL"] = job["agent_model"]
+    if job.get("agent_effort"):
+        env["AGENT_EFFORT"] = job["agent_effort"]
     return env
 
 
@@ -140,6 +138,28 @@ def reattach_running_jobs() -> None:
 
 def _start_drain(job_id: str, adapter: Any) -> None:
     def _drain():
+        job = db.get_job(job_id) or {}
+        turn_id: int | None = None
+        output_chars = 0
+        session_id = job.get("agent_session_id")
+        model = job.get("agent_model")
+
+        def ensure_turn() -> int:
+            nonlocal turn_id
+            if turn_id is None:
+                turn_id = db.start_telemetry_turn(
+                    job_id,
+                    surface=job.get("surface") or "unknown",
+                    session_id=session_id,
+                    model=model,
+                    effort=job.get("agent_effort"),
+                )
+            return turn_id
+
+        def record_signals(payload: dict[str, Any]) -> None:
+            for signal in telemetry.extract_signals(payload):
+                db.record_telemetry_signal(job_id, turn_id, **signal)
+
         for event in adapter.stream():
             payload = event.payload
 
@@ -147,11 +167,80 @@ def _start_drain(job_id: str, adapter: Any) -> None:
             if event.type in (EventType.SYSTEM, EventType.TURN_END, EventType.AGENT_EXIT):
                 sid = payload.get("session_id")
                 if sid:
-                    job = db.get_job(job_id)
-                    if job and not job.get("agent_session_id"):
+                    session_id = sid
+                    current_job = db.get_job(job_id)
+                    if current_job and not current_job.get("agent_session_id"):
                         db.update_job(job_id, agent_session_id=sid)
 
             db.record_event(job_id, event.type.value, payload)
+            try:
+                if event.type == EventType.SYSTEM:
+                    if payload.get("model"):
+                        model = payload["model"]
+                    record_signals(payload)
+                elif event.type == EventType.TOKEN:
+                    ensure_turn()
+                    output_chars += len(str(payload.get("text") or ""))
+                elif event.type == EventType.TOOL_USE:
+                    current_turn = ensure_turn()
+                    normalized = telemetry.normalize_tool_payload(payload)
+                    db.record_telemetry_tool_call(
+                        job_id,
+                        current_turn,
+                        normalized=normalized,
+                        raw_payload=payload,
+                    )
+                    record_signals(payload)
+                elif event.type == EventType.TOOL_RESULT:
+                    current_turn = ensure_turn()
+                    normalized = telemetry.normalize_tool_payload(payload)
+                    db.finish_telemetry_tool_call(
+                        job_id,
+                        current_turn,
+                        normalized=normalized,
+                        raw_payload=payload,
+                    )
+                    record_signals(payload)
+                elif event.type == EventType.TURN_END:
+                    current_turn = ensure_turn()
+                    raw_usage = payload.get("usage")
+                    usage = telemetry.normalize_usage(raw_usage, raw_result=payload)
+                    db.finish_telemetry_turn(
+                        current_turn,
+                        session_id=session_id,
+                        duration_ms=_optional_float(payload.get("duration_ms")),
+                        is_error=payload.get("is_error")
+                        if isinstance(payload.get("is_error"), bool)
+                        else None,
+                        output_chars=output_chars,
+                        usage=usage,
+                        raw_usage=raw_usage,
+                        raw_result=payload,
+                    )
+                    record_signals(payload)
+                    turn_id = None
+                    output_chars = 0
+                elif event.type == EventType.AGENT_EXIT and turn_id is not None:
+                    returncode = payload.get("returncode")
+                    db.finish_telemetry_turn(
+                        turn_id,
+                        session_id=session_id,
+                        duration_ms=None,
+                        is_error=returncode != 0 if isinstance(returncode, int) else None,
+                        output_chars=output_chars,
+                        usage=telemetry.normalize_usage(None),
+                        raw_usage=None,
+                        raw_result=payload,
+                    )
+                    turn_id = None
+                    output_chars = 0
+            except Exception as exc:
+                # Telemetry must never break the agent stream or alter run status.
+                db.record_event(job_id, "system", {
+                    "msg": "Telemetry capture failed",
+                    "event_type": event.type.value,
+                    "error": str(exc),
+                })
 
         # Finalize — but don't clobber a terminal status a user action already
         # set (stop/pause). Only move running → done when the stream ends on
@@ -165,6 +254,15 @@ def _start_drain(job_id: str, adapter: Any) -> None:
     threading.Thread(target=_drain, daemon=True, name=f"drain-{job_id}").start()
 
 
+def _optional_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 # ── Launch ────────────────────────────────────────────────────────────────────
 
 def launch_job(
@@ -176,6 +274,8 @@ def launch_job(
     memory_access: str,
     scope: str,
     guidance: str,
+    agent_model: str = "",
+    agent_effort: str = "",
 ) -> str:
     run_id = _make_run_id()
     seed_prompt = SEED_TEMPLATES[surface].format(
@@ -199,6 +299,8 @@ def launch_job(
         guidance=guidance,
         seed_prompt=seed_prompt,
         env={"AUTORESEARCH_SCOPE": scope, "AUTORESEARCH_MEMORY_ACCESS": memory_access},
+        agent_model=agent_model,
+        agent_effort=agent_effort,
     )
 
     try:

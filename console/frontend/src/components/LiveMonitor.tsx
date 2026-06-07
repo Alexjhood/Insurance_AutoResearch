@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { Job, JobEvent } from "@/lib/api";
+import type { Job, JobEvent, JobTelemetry } from "@/lib/api";
 import { api } from "@/lib/api";
 import { WS_BASE } from "@/lib/config";
 
@@ -17,6 +17,7 @@ export function LiveMonitor({ job, initialEvents }: Props) {
   const [steerInterrupt, setSteerInterrupt] = useState(true);
   const [steerResult, setSteerResult] = useState<string | null>(null);
   const [actioning, setActioning] = useState<string | null>(null);
+  const [telemetry, setTelemetry] = useState<JobTelemetry | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Track the highest event id we've appended, in a ref so the polling
@@ -85,6 +86,23 @@ export function LiveMonitor({ job, initialEvents }: Props) {
       if (ws) ws.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job.id, isTerminal]);
+
+  useEffect(() => {
+    let closed = false;
+    const refresh = async () => {
+      const next = await api.jobTelemetry(job.id).catch(() => null);
+      if (!closed && next) setTelemetry(next);
+    };
+    refresh();
+    if (isTerminal) {
+      return () => { closed = true; };
+    }
+    const timer = setInterval(refresh, 2000);
+    return () => {
+      closed = true;
+      clearInterval(timer);
+    };
   }, [job.id, isTerminal]);
 
   // Auto-scroll
@@ -185,6 +203,52 @@ export function LiveMonitor({ job, initialEvents }: Props) {
 
       {/* Right panel */}
       <div className="space-y-4">
+        {/* Cost telemetry */}
+        <div className="card space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-semibold text-gray-300">Run Telemetry</div>
+            <div className="text-xs text-gray-600">
+              {telemetry?.summary.turn_count ?? 0} turns
+            </div>
+          </div>
+          {telemetry ? (
+            <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+              <Metric label="Input tokens" value={formatCount(telemetry.summary.input_tokens)} />
+              <Metric label="Output tokens" value={formatCount(telemetry.summary.output_tokens)} />
+              <Metric
+                label="Cache hits"
+                value={formatPercent(telemetry.summary.cache_hit_ratio)}
+              />
+              <Metric
+                label="Reasoning"
+                value={formatCount(telemetry.summary.reasoning_tokens)}
+              />
+              <Metric
+                label="Tool failures"
+                value={`${telemetry.summary.tool_failure_count}/${telemetry.summary.completed_tool_call_count}`}
+              />
+              <Metric
+                label="Repair signals"
+                value={String(telemetry.summary.signal_count)}
+              />
+              <Metric
+                label="Reported cost"
+                value={
+                  telemetry.summary.provider_reported_cost_usd == null
+                    ? "Not reported"
+                    : `$${telemetry.summary.provider_reported_cost_usd.toFixed(4)}`
+                }
+              />
+              <Metric
+                label="Cost coverage"
+                value={`${telemetry.summary.cost_coverage_turns}/${telemetry.summary.turn_count}`}
+              />
+            </div>
+          ) : (
+            <div className="text-xs text-gray-600">Waiting for telemetry.</div>
+          )}
+        </div>
+
         {/* Controls */}
         <div className="card space-y-3">
           <div className="text-sm font-semibold text-gray-300">Controls</div>
@@ -304,4 +368,21 @@ export function LiveMonitor({ job, initialEvents }: Props) {
       </div>
     </div>
   );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-gray-600">{label}</div>
+      <div className="font-mono text-gray-300">{value}</div>
+    </div>
+  );
+}
+
+function formatCount(value: number): string {
+  return new Intl.NumberFormat("en-US", { notation: "compact" }).format(value);
+}
+
+function formatPercent(value: number | null): string {
+  return value == null ? "Not reported" : `${(value * 100).toFixed(1)}%`;
 }

@@ -1,21 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api } from "@/lib/api";
-
-const SURFACES = ["claude", "codex", "opencode"] as const;
-const BIN_KEY: Record<string, string> = {
-  claude: "claude_bin",
-  codex: "codex_bin",
-  opencode: "opencode_bin",
-};
-
-const MODEL_DEFAULTS: Record<string, { provider: string; name: string }> = {
-  claude: { provider: "anthropic", name: "claude-sonnet-4-6" },
-  codex: { provider: "openai", name: "codex-mini-latest" },
-  opencode: { provider: "openai", name: "gpt-4o" },
-};
+import { api, type SurfaceInfo } from "@/lib/api";
 
 const MEMORY_OPTIONS = [
   { value: "none", label: "None — fully isolated (default)" },
@@ -25,45 +12,45 @@ const MEMORY_OPTIONS = [
 
 export default function LaunchPage() {
   const router = useRouter();
+  const [surfaces, setSurfaces] = useState<SurfaceInfo[]>([]);
   const [surface, setSurface] = useState<string>("claude");
   const [track, setTrack] = useState("claude");
-  const [modelProvider, setModelProvider] = useState("anthropic");
-  const [modelName, setModelName] = useState("claude-sonnet-4-6");
+  const [model, setModel] = useState("");
+  const [effort, setEffort] = useState("");
   const [cycles, setCycles] = useState(3);
   const [memoryAccess, setMemoryAccess] = useState("none");
   const [scope, setScope] = useState("research");
   const [guidance, setGuidance] = useState("");
   const [launching, setLaunching] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [bins, setBins] = useState<Record<string, string | null>>({});
 
-  // Check which agent binaries the orchestrator can find
+  // Load the per-surface model + effort catalog once
   useEffect(() => {
-    (async () => {
-      try {
-        const { API_BASE } = await import("@/lib/config");
-        const h = await fetch(`${API_BASE}/api/health`).then((r) => r.json());
-        setBins({
-          claude_bin: h.claude_bin,
-          codex_bin: h.codex_bin,
-          opencode_bin: h.opencode_bin,
-        });
-      } catch {
-        /* health unavailable — leave bins empty */
+    api.surfaces().then((s) => {
+      setSurfaces(s);
+      const first = s.find((x) => x.available) ?? s[0];
+      if (first) {
+        setSurface(first.surface);
+        setTrack(first.surface);
+        setModel(first.default_model);
+        setEffort("");
       }
-    })();
+    }).catch(() => {});
   }, []);
 
-  const surfaceAvailable = (s: string) => Boolean(bins[BIN_KEY[s]]);
+  const current = useMemo(
+    () => surfaces.find((s) => s.surface === surface),
+    [surfaces, surface]
+  );
+  const surfaceAvailable = (s: string) =>
+    Boolean(surfaces.find((x) => x.surface === s)?.available);
 
   function onSurfaceChange(s: string) {
     setSurface(s);
-    const defaults = MODEL_DEFAULTS[s];
-    if (defaults) {
-      setModelProvider(defaults.provider);
-      setModelName(defaults.name);
-    }
     setTrack(s);
+    const info = surfaces.find((x) => x.surface === s);
+    setModel(info?.default_model ?? "");
+    setEffort("");
   }
 
   async function launch() {
@@ -73,8 +60,8 @@ export default function LaunchPage() {
       const { job_id } = await api.launchJob({
         track,
         surface,
-        model_provider: modelProvider,
-        model_name: modelName,
+        model,
+        effort,
         cycles,
         memory_access: memoryAccess,
         scope,
@@ -99,29 +86,26 @@ export default function LaunchPage() {
       {/* Surface */}
       <Field label="Agent surface" hint="Greyed-out surfaces aren't installed on the orchestrator host.">
         <div className="flex gap-2">
-          {SURFACES.map((s) => {
-            const available = surfaceAvailable(s);
-            return (
-              <button
-                key={s}
-                onClick={() => onSurfaceChange(s)}
-                disabled={!available}
-                title={available ? "" : `${s} CLI not found on the server`}
-                className={`px-4 py-2 rounded text-sm font-medium transition-colors ${
-                  surface === s
-                    ? "bg-brand text-white"
-                    : "bg-gray-800 text-gray-400 hover:bg-gray-700"
-                } ${!available ? "opacity-40 cursor-not-allowed line-through" : ""}`}
-              >
-                {s}
-              </button>
-            );
-          })}
+          {surfaces.map((s) => (
+            <button
+              key={s.surface}
+              onClick={() => onSurfaceChange(s.surface)}
+              disabled={!s.available}
+              title={s.available ? "" : `${s.surface} CLI not found on the server`}
+              className={`px-4 py-2 rounded text-sm font-medium transition-colors ${
+                surface === s.surface
+                  ? "bg-brand text-white"
+                  : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+              } ${!s.available ? "opacity-40 cursor-not-allowed line-through" : ""}`}
+            >
+              {s.surface}
+            </button>
+          ))}
         </div>
-        {!surfaceAvailable(surface) && (
+        {current && !current.available && (
           <p className="text-yellow-600 text-xs mt-2">
             ⚠ The <strong>{surface}</strong> CLI was not found on the orchestrator host.
-            Install it (and ensure it&apos;s authenticated) before launching, or set the{" "}
+            Install it (and ensure it&apos;s authenticated), or set the{" "}
             <code>{surface.toUpperCase()}_BIN</code> env var.
           </p>
         )}
@@ -137,28 +121,50 @@ export default function LaunchPage() {
         />
       </Field>
 
-      {/* Model */}
-      <Field label="Model">
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="text-xs text-gray-500 mb-1 block">Provider</label>
-            <input
-              value={modelProvider}
-              onChange={(e) => setModelProvider(e.target.value)}
-              className="input"
-              placeholder="anthropic"
-            />
-          </div>
-          <div>
-            <label className="text-xs text-gray-500 mb-1 block">Model name</label>
-            <input
-              value={modelName}
-              onChange={(e) => setModelName(e.target.value)}
-              className="input"
-              placeholder="claude-sonnet-4-6"
-            />
-          </div>
-        </div>
+      {/* Agent model — datalist gives type-to-filter + custom entry */}
+      <Field
+        label="Agent model"
+        hint={
+          current?.allows_custom_model
+            ? "Pick a suggestion or type any model the CLI accepts."
+            : `Choose from ${current?.models.length ?? 0} models the CLI reports.`
+        }
+      >
+        <input
+          list="model-options"
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+          className="input w-full"
+          placeholder={current?.default_model || "default model"}
+        />
+        <datalist id="model-options">
+          {(current?.models ?? []).map((m) => (
+            <option key={m} value={m} />
+          ))}
+        </datalist>
+        {model === "" && (
+          <p className="text-gray-600 text-xs mt-1">
+            Empty = let the {surface} CLI use its configured default model.
+          </p>
+        )}
+      </Field>
+
+      {/* Thinking / reasoning effort */}
+      <Field
+        label={current?.effort_label ?? "Thinking effort"}
+        hint="Higher effort = more reasoning/thinking budget (and cost). Default leaves it to the model."
+      >
+        <select
+          value={effort}
+          onChange={(e) => setEffort(e.target.value)}
+          className="input w-48"
+        >
+          {(current?.efforts ?? [""]).map((e) => (
+            <option key={e} value={e}>
+              {e === "" ? "Default" : e}
+            </option>
+          ))}
+        </select>
       </Field>
 
       {/* Cycles */}

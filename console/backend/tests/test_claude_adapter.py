@@ -117,13 +117,40 @@ def test_tool_use_event():
     lines = [
         json.dumps({"type": "system", "subtype": "init", "session_id": "s1"}),
         json.dumps({"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "name": "Bash", "input": {"command": "autoresearch bootstrap-track"}}]}}),
+            {"type": "tool_use", "id": "tool-1", "name": "Bash",
+             "input": {"command": "autoresearch bootstrap-track"}}]}}),
+        json.dumps({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tool-1",
+             "content": "ok", "is_error": False}]}}),
         json.dumps({"type": "result", "subtype": "success", "session_id": "s1"}),
     ]
     events, _ = _drain_lines(lines)
     tools = [e for e in events if e.type == EventType.TOOL_USE]
     assert len(tools) == 1
     assert tools[0].payload["name"] == "Bash"
+    assert tools[0].payload["provider_call_id"] == "tool-1"
+    results = [e for e in events if e.type == EventType.TOOL_RESULT]
+    assert len(results) == 1
+    assert results[0].payload["provider_call_id"] == "tool-1"
+
+
+def test_usage_and_cost_are_preserved_on_turn_end():
+    usage = {
+        "input_tokens": 100,
+        "cache_creation_input_tokens": 20,
+        "cache_read_input_tokens": 300,
+        "output_tokens": 40,
+    }
+    lines = [
+        json.dumps({"type": "system", "subtype": "init", "session_id": "s1"}),
+        json.dumps({"type": "assistant", "message": {"content": [], "usage": usage}}),
+        json.dumps({"type": "result", "subtype": "success", "session_id": "s1",
+                    "total_cost_usd": 0.123}),
+    ]
+    events, _ = _drain_lines(lines)
+    turn = [e for e in events if e.type == EventType.TURN_END][0]
+    assert turn.payload["usage"] == usage
+    assert turn.payload["total_cost_usd"] == 0.123
 
 
 def test_hook_noise_is_skipped():

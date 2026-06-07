@@ -1,0 +1,16 @@
+experiment_name = "enet_simplified_categoricals"
+model_family = "scripted_elasticnet"
+target_strategy = "direct_pure_premium"
+parent_experiment_id = ""
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]
+script_path = "model_glm_elasticnet.py"
+estimator_family = "elasticnet"
+alpha = 0.05
+l1_ratio = 0.25
+max_iter = 10000
+feature_exclusions = ["vehicle_make_group_f", "region_cluster_j"]

@@ -27,7 +27,10 @@ Writes: `data/processed/agent_dataset_search.parquet`, `data/holdout_vault/agent
 
 ### `bootstrap-track`
 
-Idempotently prepare data, registry, baselines, champion, templates, and context for a named track. Safe to run at the start of every new session.
+Idempotently prepare data, registry, the global-mean starting baseline, champion,
+templates, and context for a named track. Bootstrap always runs exactly
+`configs/experiments/global_mean.toml`; other experiment configs are ignored.
+Safe to run at the start of every new session.
 
 **Model identity is required.** Pass `--model-provider` and `--model-name` so results can be attributed in the cross-run memory aggregator.
 
@@ -49,9 +52,11 @@ Flags:
 | `--harness` | No | Agent harness name (e.g. `claude-code`, `codex`, `opencode`) |
 | `--skip-data` | No | Skip `prepare-data` even if shared data is missing |
 | `--force-data` | No | Rebuild shared data artifacts before bootstrapping |
-| `--skip-baselines` | No | Do not run baseline experiments if the registry is empty |
+| `--skip-baselines` | No | Do not run the global-mean starting baseline if the registry is empty |
 
-Writes: `model_identity` into `run_manifest.json`; registry, baseline experiments, official champion, proposal templates, and handoff context under the run directory.
+Writes: `model_identity` into `run_manifest.json`; registry, the global-mean
+starting experiment, official champion, proposal templates, and handoff context
+under the run directory.
 
 ### `init-registry`
 
@@ -79,6 +84,10 @@ autoresearch list-tracks
 
 Run one deterministic baseline experiment from a TOML config.
 
+This is a direct diagnostic command. It does not register a proposal, create a
+champion comparison, or pause for a research decision. Use the proposal
+workflow for ordinary research experiments.
+
 ```bash
 autoresearch --track demo --run-id quickstart run-baseline configs/experiments/global_mean.toml
 ```
@@ -86,6 +95,10 @@ autoresearch --track demo --run-id quickstart run-baseline configs/experiments/g
 Writes: experiment artifacts under the run's `iterations/` directory.
 
 ### `run-all-baselines`
+
+Run every TOML config under `configs/experiments/` directly. This command is
+intended for diagnostics and compatibility checks, not autonomous research
+cycles; it bypasses proposals, comparisons, and decisions.
 
 Run all baseline configs under `configs/experiments/`.
 
@@ -538,3 +551,40 @@ autoresearch memory build-playbook --model-filter anthropic/claude-sonnet-4-6
 ```
 
 The playbook is automatically regenerated at every 5-cycle checkpoint when new verified insights have landed. When `AUTORESEARCH_MEMORY_ACCESS` is `own` or `all`, the handoff bundle links the playbook (or the filtered own-model variant). When access is `none`, the handoff is unchanged.
+
+## Desktop LLM telemetry
+
+Claude Code Desktop and Codex Desktop sessions are automatically imported at
+the end of each turn once the native session is bound to a research run. Stop
+hooks launch a short deferred import so provider completion records written
+after the hook returns are included. The
+run-scoped `telemetry.sqlite` contains normalized token, cache, reasoning,
+tool-call, timing, error, and workflow-attribution records. Raw prompts and
+full tool output are not copied into the run.
+
+Each recorded experiment also updates `LLM_USAGE.md` in the run directory.
+The compact table reports incremental and cumulative tokens, model calls, tool
+calls, failures, and cache usage at every experiment checkpoint. Later
+transcript imports refresh the same file as additional provider records arrive.
+
+```bash
+# Human-readable JSON report
+autoresearch --track codex --run-id 20260607T081407Z telemetry report
+
+# Manual recovery/backfill. Transcript discovery is automatic by session id.
+autoresearch --track codex --run-id 20260607T081407Z telemetry sync \
+  --surface codex --session-id <codex-thread-id> --finalize-turn
+
+autoresearch --track claude --run-id 20260604T064305Z telemetry sync \
+  --surface claude --session-id <claude-session-id> --finalize-turn
+```
+
+Imports are incremental and idempotent. Re-running `telemetry sync` reads only
+new complete JSONL records and does not double-count provider requests or tool
+calls. Workflow attribution is rebuilt deterministically on every import.
+Provider-reported dollar cost remains `null` when the desktop product
+does not expose it; the system does not guess a cost.
+
+Use `--rebuild` after upgrading an importer if an existing run should be
+reparsed from byte zero. Stable provider request and tool IDs keep the rebuild
+idempotent.

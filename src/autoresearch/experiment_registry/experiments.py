@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +90,21 @@ def record_experiment(
             """,
             [(experiment_id, artifact_type, str(artifact_path)) for artifact_type, artifact_path in artifacts.items()],
         )
+    try:
+        from autoresearch.telemetry.store import record_experiment_checkpoint
+        from autoresearch.telemetry.usage_report import write_usage_report
+
+        run_dir = Path(path).parent
+        record_experiment_checkpoint(
+            run_dir,
+            experiment_id=experiment_id,
+            experiment_name=experiment_name,
+            status=status,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        write_usage_report(run_dir)
+    except Exception:
+        pass
 
 
 def record_experiment_artifacts(path: Path, experiment_id: str, artifacts: dict[str, Path]) -> None:

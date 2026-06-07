@@ -26,6 +26,7 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "src")):
         sys.path.insert(0, _p)
 
 from console.backend import config as cfg
+from console.backend import surfaces as surface_catalog
 from console.backend.auth import AuthMiddleware
 from console.backend.readers import runs as run_reader
 from console.backend.readers import memory as mem_reader
@@ -116,6 +117,11 @@ def sessions(track: str, run_id: str) -> list[dict]:
 @app.get("/api/tracks/{track}/runs/{run_id}/research-lines")
 def research_lines(track: str, run_id: str) -> list[dict]:
     return run_reader.get_research_lines(track, run_id)
+
+
+@app.get("/api/tracks/{track}/runs/{run_id}/telemetry")
+def run_telemetry(track: str, run_id: str) -> dict:
+    return run_reader.get_run_telemetry(track, run_id)
 
 
 @app.get("/api/tracks/{track}/runs/{run_id}/artifact-paths")
@@ -216,31 +222,49 @@ def harvest_memory() -> dict:
         raise HTTPException(500, str(exc))
 
 
+# ── Surfaces (agent model + effort catalog) ──────────────────────────────────
+
+@app.get("/api/surfaces")
+def surfaces() -> list[dict]:
+    return surface_catalog.all_surfaces()
+
+
 # ── Jobs ──────────────────────────────────────────────────────────────────────
 
 class LaunchRequest(BaseModel):
     track: str
     surface: str                   # claude | codex | opencode
-    model_provider: str
-    model_name: str
+    model: str = ""                # agent model driving the run (CLI --model/-m)
+    effort: str = ""               # thinking/reasoning effort (surface-specific)
     cycles: int = 3
     memory_access: str = "none"    # none | own | all
     scope: str = "research"        # research | analyst
     guidance: str = ""
+    # Optional explicit attribution override; otherwise derived from surface+model
+    model_provider: str = ""
+    model_name: str = ""
 
 
 @app.post("/api/jobs", status_code=201)
 def launch_job(req: LaunchRequest) -> dict:
     try:
+        # Derive memory-aggregator attribution from the chosen agent model
+        # unless the caller supplied explicit overrides.
+        provider, name = surface_catalog.attribution_for(req.surface, req.model)
+        model_provider = req.model_provider or provider
+        model_name = req.model_name or name
+
         job_id = job_mgr.launch_job(
             track=req.track,
             surface=req.surface,
-            model_provider=req.model_provider,
-            model_name=req.model_name,
+            model_provider=model_provider,
+            model_name=model_name,
             cycles=req.cycles,
             memory_access=req.memory_access,
             scope=req.scope,
             guidance=req.guidance,
+            agent_model=req.model,
+            agent_effort=req.effort,
         )
         return {"job_id": job_id}
     except Exception as exc:
@@ -263,6 +287,13 @@ def get_job(job_id: str) -> dict:
 @app.get("/api/jobs/{job_id}/events")
 def get_events(job_id: str, after: int = 0) -> list[dict]:
     return db.get_events(job_id, after_id=after)
+
+
+@app.get("/api/jobs/{job_id}/telemetry")
+def get_telemetry(job_id: str) -> dict:
+    if not db.get_job(job_id):
+        raise HTTPException(404, "Job not found")
+    return db.get_job_telemetry(job_id)
 
 
 class SteerRequest(BaseModel):

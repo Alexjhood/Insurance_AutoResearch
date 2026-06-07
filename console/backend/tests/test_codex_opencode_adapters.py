@@ -81,6 +81,10 @@ def test_codex_command_execution_is_tool():
     assert len(tools) == 1
     assert tools[0].payload["name"] == "shell"
     assert "echo hello" in tools[0].payload["input"]["command"]
+    results = [e for e in events if e.type == EventType.TOOL_RESULT]
+    assert len(results) == 1
+    assert results[0].payload["provider_call_id"] == "item_0"
+    assert results[0].payload["output_bytes"] == 6
 
 
 def test_codex_turn_and_exit():
@@ -91,6 +95,8 @@ def test_codex_turn_and_exit():
     # session_id propagated on exit
     exit_ev = [e for e in events if e.type == EventType.AGENT_EXIT][0]
     assert exit_ev.payload["session_id"] == "019e976f-3dab-79e1-819d-01f7bf1684f6"
+    turn = [e for e in events if e.type == EventType.TURN_END][0]
+    assert turn.payload["usage"]["input_tokens"] == 56064
 
 
 # ── OpenCode (real format) ──────────────────────────────────────────────────────
@@ -103,7 +109,10 @@ OPENCODE_LINES = [
                 "part": {"type": "text", "text": "PONG"}}),
     json.dumps({"type": "message", "sessionID": "ses_1688f2113ffeyxoff1X0WE4ueV",
                 "part": {"type": "tool", "tool": "bash", "state": {"command": "ls"}}}),
-    json.dumps({"type": "step_finish", "sessionID": "ses_1688f2113ffeyxoff1X0WE4ueV"}),
+    json.dumps({"type": "step_finish", "sessionID": "ses_1688f2113ffeyxoff1X0WE4ueV",
+                "tokens": {"input": 20, "output": 5, "reasoning": 3,
+                           "cache": {"read": 10, "write": 2}},
+                "cost": 0.002}),
 ]
 
 
@@ -133,6 +142,9 @@ def test_opencode_step_finish_is_turn_end():
     events = _drain(adapter, OPENCODE_LINES)
     assert any(e.type == EventType.TURN_END for e in events)
     assert any(e.type == EventType.AGENT_EXIT for e in events)
+    turn = [e for e in events if e.type == EventType.TURN_END][0]
+    assert turn.payload["usage"]["cache"]["read"] == 10
+    assert turn.payload["cost"] == 0.002
 
 
 def test_opencode_sparse_output_does_not_crash():

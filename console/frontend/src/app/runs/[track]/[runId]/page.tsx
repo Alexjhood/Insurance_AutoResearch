@@ -2,6 +2,7 @@ import Link from "next/link";
 import { api } from "@/lib/api";
 import { ArtifactViewer } from "@/components/ArtifactViewer";
 import { ResearchLog } from "@/components/ResearchLog";
+import { RunTelemetry } from "@/components/RunTelemetry";
 
 export const dynamic = "force-dynamic";
 
@@ -12,7 +13,7 @@ export default async function RunDetailPage({
 }) {
   const { track, runId } = params;
 
-  const [summary, experiments, comparisons, researchLines, proposals, sessions] =
+  const [summary, experiments, comparisons, researchLines, proposals, sessions, telemetry] =
     await Promise.allSettled([
       api.runSummary(track, runId),
       api.experiments(track, runId),
@@ -20,6 +21,7 @@ export default async function RunDetailPage({
       api.researchLines(track, runId),
       api.proposals(track, runId),
       api.sessions(track, runId),
+      api.runTelemetry(track, runId),
     ]);
 
   const s = summary.status === "fulfilled" ? summary.value : null;
@@ -28,6 +30,37 @@ export default async function RunDetailPage({
   const lines = researchLines.status === "fulfilled" ? researchLines.value : [];
   const props = proposals.status === "fulfilled" ? proposals.value : [];
   const sess = sessions.status === "fulfilled" ? sessions.value : [];
+  const llmTelemetry =
+    telemetry.status === "fulfilled"
+      ? telemetry.value
+      : {
+          available: false,
+          summary: {
+            turn_count: 0,
+            input_tokens: 0,
+            cached_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            uncached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: 0,
+            total_tokens: 0,
+            output_chars: 0,
+            cache_hit_ratio: null,
+            provider_reported_cost_usd: null,
+            cost_coverage_turns: 0,
+            tool_call_count: 0,
+            completed_tool_call_count: 0,
+            tool_failure_count: 0,
+            tool_duration_ms: null,
+            signal_count: 0,
+          },
+          turns: [],
+          tool_calls: [],
+          signals: [],
+          sessions: [],
+          workflow_events: [],
+          coverage: [],
+        };
 
   return (
     <div className="space-y-8">
@@ -61,6 +94,8 @@ export default async function RunDetailPage({
           <ChampionCard champ={s.champion as Record<string, unknown>} />
         </section>
       )}
+
+      <RunTelemetry track={track} runId={runId} initial={llmTelemetry} />
 
       {/* Research lines */}
       {lines.length > 0 && (

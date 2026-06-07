@@ -48,6 +48,27 @@ from autoresearch.milestone import manual_evaluate_on_holdout
 from autoresearch.utils.integrity import write_integrity_manifest
 
 
+_TELEMETRY_WORKFLOW_COMMANDS = {
+    "bootstrap-track",
+    "run-baseline",
+    "run-all-baselines",
+    "run-repeated-evaluation",
+    "compare-experiments",
+    "compare-to-champion",
+    "record-decision",
+    "init-official-champion",
+    "enqueue-proposal",
+    "run-next-proposal",
+    "ingest-proposals",
+    "enqueue-ingested-proposals",
+    "run-latest-proposal-cycle",
+    "start-session",
+    "run-session-cycle",
+    "run-session-cycles",
+    "export-context",
+}
+
+
 def _cmd_prepare_data(config, args) -> int:
     outputs = prepare_data(config)
     for name, path in outputs.items():
@@ -407,6 +428,38 @@ def _cmd_compare_tracks(config, args) -> int:
     return 0 if result.get("status") != "error" else 1
 
 
+def _cmd_telemetry(config, args) -> int:
+    from autoresearch.telemetry.importer import find_transcript, sync_session
+    from autoresearch.telemetry.store import get_run_telemetry
+
+    subcommand = getattr(args, "telemetry_subcommand", None)
+    if subcommand == "report":
+        print(json.dumps(get_run_telemetry(config.artifacts_dir), indent=2, sort_keys=True))
+        return 0
+    if subcommand == "sync":
+        transcript = find_transcript(
+            surface=args.surface,
+            native_session_id=args.session_id,
+            cwd=config.root,
+            explicit_path=args.transcript_path,
+        )
+        if transcript is None:
+            print(f"Transcript not found for {args.surface} session {args.session_id}.")
+            return 1
+        result = sync_session(
+            run_dir=config.artifacts_dir,
+            surface=args.surface,
+            native_session_id=args.session_id,
+            transcript_path=transcript,
+            finalize_turn=args.finalize_turn,
+            rebuild=args.rebuild,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print(f"Unknown telemetry subcommand: {subcommand}")
+    return 2
+
+
 def _cmd_memory(config, args) -> int:
     """Dispatch memory sub-commands."""
     from autoresearch.memory.harvester import harvest_all, harvest_run
@@ -744,6 +797,7 @@ COMMANDS = {
     "compare-tracks": _cmd_compare_tracks,
     "list-tracks": _cmd_list_tracks,
     "memory": _cmd_memory,
+    "telemetry": _cmd_telemetry,
 }
 
 
@@ -790,19 +844,25 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("prepare-data", help="Build Phase 1 data artifacts.")
     bootstrap = subparsers.add_parser(
         "bootstrap-track",
-        help="Idempotently prepare data, registry, baselines, champion, templates, and context for a named track.",
+        help="Prepare data, the global-mean starting baseline, champion, templates, and context for a named track.",
     )
     bootstrap.add_argument("--skip-data", action="store_true", help="Do not run prepare-data even if shared data is missing.")
     bootstrap.add_argument("--force-data", action="store_true", help="Rebuild shared data artifacts before bootstrapping.")
-    bootstrap.add_argument("--skip-baselines", action="store_true", help="Do not run baseline experiments if the registry is empty.")
+    bootstrap.add_argument("--skip-baselines", action="store_true", help="Do not run the global-mean starting baseline if the registry is empty.")
     bootstrap.add_argument("--model-provider", default=None, metavar="PROVIDER", help="LLM provider (e.g. anthropic, openai). Required.")
     bootstrap.add_argument("--model-name", default=None, metavar="NAME", help="LLM model name (e.g. claude-sonnet-4-6). Required.")
     bootstrap.add_argument("--model-version", default=None, metavar="VERSION", help="LLM model version string (optional).")
     bootstrap.add_argument("--harness", default=None, metavar="HARNESS", help="Agent harness name (e.g. claude-code, codex, opencode).")
     subparsers.add_parser("init-registry", help="Create the SQLite experiment registry.")
-    run_parser = subparsers.add_parser("run-baseline", help="Run one deterministic baseline experiment.")
+    run_parser = subparsers.add_parser(
+        "run-baseline",
+        help="Run one config directly, bypassing the proposal, comparison, and decision workflow.",
+    )
     run_parser.add_argument("experiment_config", help="Path to an experiment TOML config.")
-    subparsers.add_parser("run-all-baselines", help="Run all baseline configs under configs/experiments.")
+    subparsers.add_parser(
+        "run-all-baselines",
+        help="Run every config under configs/experiments directly; intended for diagnostics, not research cycles.",
+    )
     subparsers.add_parser("list-experiments", help="Print registered experiment summaries.")
     repeated_parser = subparsers.add_parser("run-repeated-evaluation", help="Resample one experiment's search-time predictions.")
     repeated_parser.add_argument("experiment_id")
@@ -888,6 +948,26 @@ def build_parser() -> argparse.ArgumentParser:
     compare_tracks_parser.add_argument("track_a", help="First track name (e.g. 'claude').")
     compare_tracks_parser.add_argument("track_b", help="Second track name (e.g. 'codex').")
     subparsers.add_parser("list-tracks", help="List all tracks that have a registry under artifacts/tracks/.")
+
+    telemetry_parser = subparsers.add_parser(
+        "telemetry",
+        help="Import or report run-scoped Claude Code/Codex Desktop telemetry.",
+    )
+    telemetry_subs = telemetry_parser.add_subparsers(dest="telemetry_subcommand", required=True)
+    telemetry_sync = telemetry_subs.add_parser(
+        "sync",
+        help="Import one native desktop session transcript into the selected run.",
+    )
+    telemetry_sync.add_argument("--surface", required=True, choices=("claude", "codex"))
+    telemetry_sync.add_argument("--session-id", required=True)
+    telemetry_sync.add_argument("--transcript-path", default=None)
+    telemetry_sync.add_argument("--finalize-turn", action="store_true")
+    telemetry_sync.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Reparse the transcript from byte zero without duplicating existing records.",
+    )
+    telemetry_subs.add_parser("report", help="Print normalized telemetry for the selected run.")
 
     # Memory subcommand group
     memory_parser = subparsers.add_parser(
@@ -1016,6 +1096,13 @@ def main(argv: list[str] | None = None) -> int:
     if handler is None:
         parser.error(f"Unknown command: {args.command}")
         return 2
+    if args.command in _TELEMETRY_WORKFLOW_COMMANDS:
+        from autoresearch.telemetry.workflow import track_command
+
+        with track_command(config, args.command) as workflow:
+            result = handler(config, args)
+            workflow["return_code"] = result
+            return result
     return handler(config, args)
 
 

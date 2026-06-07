@@ -78,10 +78,10 @@ def bootstrap_track(
 
     experiments = list_experiments(config.registry_path)
     if run_baselines and not experiments:
-        baseline_runs, baseline_errors = _run_baselines_resilient(config)
+        baseline_runs, baseline_errors = _run_starting_baseline(config)
         steps.append(
             {
-                "step": "run-all-baselines",
+                "step": "run-starting-baseline",
                 "status": "ran_with_errors" if baseline_errors else "ran",
                 "runs": [
                     {name: str(path) for name, path in outputs.items()}
@@ -91,17 +91,17 @@ def bootstrap_track(
             }
         )
         if baseline_errors and not list_experiments(config.registry_path):
-            raise ValueError("No baseline experiments completed during bootstrap: " + "; ".join(baseline_errors))
+            raise ValueError("The global-mean starting baseline did not complete during bootstrap: " + "; ".join(baseline_errors))
     elif run_baselines:
         steps.append(
             {
-                "step": "run-all-baselines",
+                "step": "run-starting-baseline",
                 "status": "skipped",
                 "reason": f"{len(experiments)} experiment(s) already registered",
             }
         )
     else:
-        steps.append({"step": "run-all-baselines", "status": "skipped", "reason": "disabled by caller"})
+        steps.append({"step": "run-starting-baseline", "status": "skipped", "reason": "disabled by caller"})
 
     champion = get_official_champion(config.registry_path)
     if champion is None:
@@ -163,16 +163,18 @@ def _required_prepared_data_paths(config: ProjectConfig) -> tuple[Path, ...]:
     )
 
 
-def _run_baselines_resilient(config: ProjectConfig) -> tuple[list[dict[str, Path]], list[str]]:
-    """Run checked-in baselines, preserving successful runs if one fails."""
+def _run_starting_baseline(config: ProjectConfig) -> tuple[list[dict[str, Path]], list[str]]:
+    """Run only the global-mean model used to initialise every research run."""
 
     runs: list[dict[str, Path]] = []
     errors: list[str] = []
-    exp_dir = config.root / "configs" / "experiments"
+    path = config.root / "configs" / "experiments" / "global_mean.toml"
     base_dir = bootstrap_iteration_dir(config) / "baseline_experiments"
-    for path in sorted(exp_dir.glob("*.toml")):
-        try:
-            runs.append(run_experiment(config, path, output_dir=base_dir / path.stem))
-        except Exception as exc:
-            errors.append(f"{path.name}: {exc}")
+    if not path.is_file():
+        return runs, [f"{path.name}: starting baseline config not found at {path}"]
+
+    try:
+        runs.append(run_experiment(config, path, output_dir=base_dir / path.stem))
+    except Exception as exc:
+        errors.append(f"{path.name}: {exc}")
     return runs, errors

@@ -35,6 +35,7 @@ class OpenCodeAdapter:
         self._env: dict | None = None
         self._session_id: str | None = None
         self._model: str | None = None
+        self._variant: str = ""
         self._pending_steer: list[str] = []
         self._event_queue: queue.Queue[AgentEvent | None] = queue.Queue()
 
@@ -43,12 +44,14 @@ class OpenCodeAdapter:
         return self._session_id
 
     def launch(self, *, cwd: Path, env: dict, seed_prompt: str) -> SessionHandle:
-        # Model is provided via env (provider/model form), set by the job manager.
-        self._model = env.get("OPENCODE_MODEL")
+        # Model as `provider/model` string; AGENT_MODEL is the unified key.
+        self._model = env.get("AGENT_MODEL") or env.get("OPENCODE_MODEL")
+        self._variant = env.get("AGENT_EFFORT", "").strip()
         return self._spawn(cwd=cwd, env=env, message=seed_prompt, session_id=None)
 
     def resume(self, *, cwd: Path, env: dict, session_id: str, extra_prompt: str = "") -> SessionHandle:
-        self._model = env.get("OPENCODE_MODEL") or self._model
+        self._model = env.get("AGENT_MODEL") or env.get("OPENCODE_MODEL") or self._model
+        self._variant = env.get("AGENT_EFFORT", "").strip() or getattr(self, "_variant", "")
         return self._spawn(cwd=cwd, env=env, message=extra_prompt or "continue",
                            session_id=session_id)
 
@@ -99,6 +102,8 @@ class OpenCodeAdapter:
         cmd = [bin_path, "run", "--format", "json"]
         if self._model:
             cmd += ["-m", self._model]
+        if self._variant:
+            cmd += ["--variant", self._variant]
         if session_id:
             cmd += ["-s", session_id]
         cmd.append(message)
@@ -146,13 +151,38 @@ class OpenCodeAdapter:
                 if text:
                     self._event_queue.put(AgentEvent(type=EventType.TOKEN, payload={"text": text}))
             elif ptype in ("tool", "tool-invocation", "tool_use") or "tool" in str(ptype):
-                self._event_queue.put(AgentEvent(type=EventType.TOOL_USE, payload={
+                state = part.get("state") if isinstance(part.get("state"), dict) else {}
+                status = state.get("status") or part.get("status")
+                completed = str(status or "").lower() in {
+                    "completed", "success", "succeeded", "done",
+                    "failed", "error", "cancelled", "canceled",
+                }
+                tool_input = state.get("input") or part.get("input")
+                tool_output = state.get("output") or part.get("output")
+                self._event_queue.put(AgentEvent(
+                    type=EventType.TOOL_RESULT if completed else EventType.TOOL_USE,
+                    payload={
+                    "provider_call_id": (
+                        part.get("callID") or part.get("callId")
+                        or part.get("id") or state.get("id")
+                    ),
                     "name": part.get("tool") or part.get("name") or "tool",
-                    "input": part.get("state") or part.get("input") or part,
+                    "input": _preview(tool_input),
+                    "input_bytes": _byte_size(tool_input),
+                    "output": _preview(tool_output),
+                    "output_bytes": _byte_size(tool_output),
+                    "status": status,
+                    "duration_ms": state.get("duration") or part.get("duration"),
+                    "error": state.get("error") or part.get("error"),
                 }))
             elif obj.get("type") in ("step_finish", "step-finish"):
+                usage = obj.get("usage") or part.get("usage") or obj.get("tokens") or part.get("tokens")
                 self._event_queue.put(AgentEvent(type=EventType.TURN_END, payload={
                     "session_id": self._session_id,
+                    "usage": usage,
+                    "cost": obj.get("cost") or part.get("cost"),
+                    "duration_ms": obj.get("duration_ms") or part.get("duration_ms"),
+                    "is_error": obj.get("is_error") or part.get("is_error"),
                 }))
             # step_start and other lifecycle events are ignored for display
 
@@ -162,3 +192,20 @@ class OpenCodeAdapter:
             payload={"returncode": self._proc.returncode, "session_id": self._session_id},
         ))
         self._event_queue.put(None)
+
+
+def _byte_size(value: object) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    return len(json.dumps(value, ensure_ascii=True, default=str).encode("utf-8"))
+
+
+def _preview(value: object, limit: int = 4000) -> object:
+    if _byte_size(value) <= limit:
+        return value
+    if isinstance(value, str):
+        return value.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+    encoded = json.dumps(value, ensure_ascii=True, default=str)
+    return encoded[:limit]

@@ -48,7 +48,7 @@ def test_bootstrap_track_reuses_existing_baseline_and_exports_context(tmp_path: 
     assert [step["step"] for step in result["steps"]] == [
         "prepare-data",
         "init-registry",
-        "run-all-baselines",
+        "run-starting-baseline",
         "init-official-champion",
         "write-proposal-template",
         "export-context",
@@ -80,16 +80,17 @@ def test_bootstrap_reruns_prepare_data_when_holdout_missing(tmp_path: Path, monk
     assert result["steps"][0]["status"] == "ran"
 
 
-def test_bootstrap_track_keeps_successful_baseline_when_another_fails(tmp_path: Path, monkeypatch) -> None:
+def test_bootstrap_track_runs_only_global_mean_config(tmp_path: Path, monkeypatch) -> None:
     config = _config(tmp_path)
     _write_prepared_data_markers(config)
-    (config.root / "configs" / "experiments").mkdir(parents=True)
-    (config.root / "configs" / "experiments" / "01_good.toml").write_text("", encoding="utf-8")
-    (config.root / "configs" / "experiments" / "02_bad.toml").write_text("", encoding="utf-8")
+    experiment_dir = config.root / "configs" / "experiments"
+    experiment_dir.mkdir(parents=True)
+    (experiment_dir / "global_mean.toml").write_text("", encoding="utf-8")
+    (experiment_dir / "challenger.toml").write_text("", encoding="utf-8")
+    calls: list[str] = []
 
     def fake_run_experiment(cfg, path, *, output_dir=None):
-        if path.name == "02_bad.toml":
-            raise ValueError("bad baseline")
+        calls.append(path.name)
         _record_direct(cfg, "direct")
         return {"metrics": cfg.artifacts_dir / "direct" / "metrics.json"}
 
@@ -97,9 +98,36 @@ def test_bootstrap_track_keeps_successful_baseline_when_another_fails(tmp_path: 
 
     result = bootstrap_track(config)
 
-    assert result["steps"][2]["status"] == "ran_with_errors"
-    assert "02_bad.toml: bad baseline" in result["steps"][2]["errors"]
+    assert result["steps"][2]["status"] == "ran"
+    assert calls == ["global_mean.toml"]
     assert get_official_champion(config.registry_path)["champion_id"] == "direct"
+
+
+def test_bootstrap_track_fails_when_global_mean_config_is_missing(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _write_prepared_data_markers(config)
+    experiment_dir = config.root / "configs" / "experiments"
+    experiment_dir.mkdir(parents=True)
+    (experiment_dir / "challenger.toml").write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="global-mean starting baseline did not complete"):
+        bootstrap_track(config)
+
+
+def test_bootstrap_track_reports_global_mean_failure(tmp_path: Path, monkeypatch) -> None:
+    config = _config(tmp_path)
+    _write_prepared_data_markers(config)
+    experiment_dir = config.root / "configs" / "experiments"
+    experiment_dir.mkdir(parents=True)
+    (experiment_dir / "global_mean.toml").write_text("", encoding="utf-8")
+
+    def fake_run_experiment(cfg, path, *, output_dir=None):
+        raise ValueError("broken baseline")
+
+    monkeypatch.setattr("autoresearch.bootstrap.run_experiment", fake_run_experiment)
+
+    with pytest.raises(ValueError, match=r"global_mean\.toml: broken baseline"):
+        bootstrap_track(config)
 
 
 def test_bootstrap_track_requires_named_track(tmp_path: Path) -> None:

@@ -106,12 +106,21 @@ class CodexAdapter:
         self._cwd = cwd
         self._env = {**os.environ, **env}
 
+        # Agent model + reasoning effort (exec-level options, before subcommand/prompt)
+        model = env.get("AGENT_MODEL", "").strip()
+        effort = env.get("AGENT_EFFORT", "").strip()
+        me_flags: list[str] = []
+        if model:
+            me_flags += ["-m", model]
+        if effort:
+            me_flags += ["-c", f'model_reasoning_effort="{effort}"']
+
         if resume:
-            # codex exec resume <id> [prompt]
+            # codex exec [opts] resume <id> [prompt]
             cmd = [bin_path, "exec", "--json", "--sandbox", "workspace-write",
-                   "--skip-git-repo-check", *args]
+                   "--skip-git-repo-check", *me_flags, *args]
         else:
-            cmd = [bin_path, *_BASE_FLAGS, *args]
+            cmd = [bin_path, *_BASE_FLAGS, *me_flags, *args]
 
         self._proc = subprocess.Popen(
             cmd,
@@ -149,6 +158,15 @@ class CodexAdapter:
                     "session_id": self._thread_id,
                 }))
 
+            elif etype == "item.started":
+                item = obj.get("item", {})
+                itype = item.get("type")
+                if itype in ("command_execution", "file_change", "patch", "mcp_tool_call"):
+                    self._event_queue.put(AgentEvent(
+                        type=EventType.TOOL_USE,
+                        payload=_tool_payload(item, completed=False),
+                    ))
+
             elif etype == "item.completed":
                 item = obj.get("item", {})
                 itype = item.get("type")
@@ -157,16 +175,11 @@ class CodexAdapter:
                     if text:
                         self._event_queue.put(AgentEvent(
                             type=EventType.TOKEN, payload={"text": text + "\n"}))
-                elif itype == "command_execution":
-                    self._event_queue.put(AgentEvent(type=EventType.TOOL_USE, payload={
-                        "name": "shell",
-                        "input": {"command": item.get("command")},
-                        "exit_code": item.get("exit_code"),
-                    }))
-                elif itype in ("file_change", "patch", "mcp_tool_call"):
-                    self._event_queue.put(AgentEvent(type=EventType.TOOL_USE, payload={
-                        "name": itype, "input": item,
-                    }))
+                elif itype in ("command_execution", "file_change", "patch", "mcp_tool_call"):
+                    self._event_queue.put(AgentEvent(
+                        type=EventType.TOOL_RESULT,
+                        payload=_tool_payload(item, completed=True),
+                    ))
                 # reasoning / other item types are ignored for display
 
             elif etype == "turn.completed":
@@ -174,7 +187,7 @@ class CodexAdapter:
                     "session_id": self._thread_id, "usage": obj.get("usage"),
                 }))
 
-            elif etype == "turn.started" or etype == "item.started":
+            elif etype == "turn.started":
                 pass  # lifecycle noise
 
             else:
@@ -186,3 +199,42 @@ class CodexAdapter:
             payload={"returncode": self._proc.returncode, "session_id": self._thread_id},
         ))
         self._event_queue.put(None)
+
+
+def _tool_payload(item: dict, *, completed: bool) -> dict:
+    itype = item.get("type")
+    output = item.get("aggregated_output")
+    if output is None:
+        output = item.get("result") or item.get("output")
+    status = item.get("status") or ("completed" if completed else "started")
+    raw_input = {"command": item.get("command")} if itype == "command_execution" else item
+    payload = {
+        "provider_call_id": item.get("id"),
+        "name": "shell" if itype == "command_execution" else itype,
+        "input": _preview(raw_input),
+        "input_bytes": _byte_size(raw_input),
+        "status": status,
+        "exit_code": item.get("exit_code"),
+        "duration_ms": item.get("duration_ms"),
+    }
+    if completed:
+        payload["output_bytes"] = _byte_size(output)
+        payload["output"] = output[:2000] if isinstance(output, str) else output
+    return payload
+
+
+def _byte_size(value: object) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    return len(json.dumps(value, ensure_ascii=True, default=str).encode("utf-8"))
+
+
+def _preview(value: object, limit: int = 4000) -> object:
+    if _byte_size(value) <= limit:
+        return value
+    if isinstance(value, str):
+        return value.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+    encoded = json.dumps(value, ensure_ascii=True, default=str)
+    return encoded[:limit]

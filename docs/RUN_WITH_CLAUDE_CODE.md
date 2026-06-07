@@ -40,7 +40,24 @@ the bootstrap command. Pass --model-provider anthropic
 
 - `artifacts/tracks/claude/runs/<run-id>/RESEARCH_LOG.md` — the agent's running research log for this run
 - `artifacts/tracks/claude/runs/<run-id>/iterations/` — per-cycle experiment and comparison artifacts
+- `artifacts/tracks/claude/runs/<run-id>/telemetry.sqlite` — normalized Claude Code Desktop usage and tool telemetry
+- The run detail page in the web Console — live token, cache, tool, error, and framework-step summaries
 - The latest `comparison_report.html` inside the most recent `comparison/` folder
+
+Claude Code Desktop writes a structured local transcript and invokes the
+project `Stop` hook after a completed turn. The hook starts a short deferred
+import after the hook returns and imports only newly appended
+records into the bound run. Full prompts and tool output remain in Claude's
+native transcript; the run database stores metrics, byte counts, compact tool
+labels, and experiment identifiers only.
+
+To inspect or recover telemetry manually:
+
+```bash
+autoresearch --track claude --run-id <run-id> telemetry report
+autoresearch --track claude --run-id <run-id> telemetry sync \
+  --surface claude --session-id <claude-session-id> --finalize-turn
+```
 
 ## Common Follow-up Prompts
 
@@ -55,6 +72,11 @@ the bootstrap command. Pass --model-provider anthropic
 **Integrity manifest changes**: if a protected file was edited intentionally, run `autoresearch update-integrity-manifest` and explain why in the research log.
 
 **Holdout token errors**: `autoresearch evaluate-milestone` requires the `AUTORESEARCH_MILESTONE_TOKEN` environment variable. This is a human-only operation; the agent should not call it.
+
+**No telemetry after a turn**: restart the Claude Code project so the updated
+`.claude/settings.json` is loaded, then check that the session has bootstrapped
+and is bound to a run. The telemetry hook deliberately skips unbound analysis
+sessions.
 
 ## Recommended Command Pair
 

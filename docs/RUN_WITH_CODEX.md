@@ -46,7 +46,25 @@ the bootstrap command. Pass --model-provider openai
 
 - `artifacts/tracks/codex/runs/<run-id>/RESEARCH_LOG.md` — the agent's running research log for this run
 - `artifacts/tracks/codex/runs/<run-id>/iterations/` — per-cycle experiment and comparison artifacts
+- `artifacts/tracks/codex/runs/<run-id>/telemetry.sqlite` — normalized Codex Desktop usage and tool telemetry
+- The run detail page in the web Console — live token, cache, reasoning, tool, error, and framework-step summaries
 - The latest `comparison_report.html` inside the most recent `comparison/` folder
+
+Codex Desktop writes a structured rollout transcript and invokes the project
+`Stop` hook after a completed turn. The hook starts a short deferred import so
+the final Codex `task_complete` record is captured after the hook returns. It
+imports only newly appended
+records into the bound run. It does not connect to Codex Desktop's internal IPC
+socket. Full prompts and tool output remain in Codex's native rollout; the run
+database stores normalized metrics and compact labels only.
+
+To inspect or recover telemetry manually:
+
+```bash
+autoresearch --track codex --run-id <run-id> telemetry report
+autoresearch --track codex --run-id <run-id> telemetry sync \
+  --surface codex --session-id <codex-thread-id> --finalize-turn
+```
 
 ## Common Follow-up Prompts
 
@@ -61,6 +79,11 @@ the bootstrap command. Pass --model-provider openai
 **Integrity manifest changes**: if a protected file was edited intentionally, run `autoresearch update-integrity-manifest` and explain why in the research log.
 
 **Holdout token errors**: `autoresearch evaluate-milestone` requires the `AUTORESEARCH_MILESTONE_TOKEN` environment variable. This is a human-only operation; the agent should not call it.
+
+**No telemetry after a turn**: restart or reload the Codex project so the
+updated `.codex/hooks.json` is trusted and loaded, then check that the thread
+has bootstrapped and is bound to a run. The telemetry hook deliberately skips
+unbound analysis threads.
 
 ## Recommended Command Pair
 

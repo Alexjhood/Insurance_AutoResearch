@@ -18,6 +18,8 @@ _REPO = _HERE.parents[2]
 TEST_FILES = [
     "test_claude_adapter.py",
     "test_codex_opencode_adapters.py",
+    "test_model_effort.py",
+    "test_telemetry.py",
     "test_db_and_jobs.py",
     "test_job_lifecycle_e2e.py",
     "test_api_integration.py",

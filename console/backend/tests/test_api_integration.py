@@ -39,6 +39,26 @@ def test_tracks_and_runs():
         assert rr.status_code == 200
 
 
+def test_run_telemetry_endpoint_has_stable_shape():
+    tracks = client.get("/api/tracks").json()
+    if not tracks:
+        return
+    track = tracks[0]["track_id"]
+    runs = client.get(f"/api/tracks/{track}/runs").json()
+    if not runs:
+        return
+    run_id = runs[0]["run_id"]
+
+    response = client.get(f"/api/tracks/{track}/runs/{run_id}/telemetry")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "available" in body
+    assert "summary" in body
+    assert "turns" in body
+    assert "workflow_events" in body
+
+
 def test_artifact_path_traversal_blocked():
     """Ensure ../ escapes are rejected by read_artifact."""
     tracks = client.get("/api/tracks").json()
@@ -66,6 +86,53 @@ def test_jobs_list():
     r = client.get("/api/jobs")
     assert r.status_code == 200
     assert isinstance(r.json(), list)
+
+
+def test_surfaces_endpoint():
+    r = client.get("/api/surfaces")
+    assert r.status_code == 200
+    surfaces = r.json()
+    names = {s["surface"] for s in surfaces}
+    assert names == {"claude", "codex", "opencode"}
+    for s in surfaces:
+        assert "models" in s and "efforts" in s and "effort_label" in s
+        assert "" in s["efforts"]
+
+
+def test_job_telemetry_endpoint():
+    job_id = db.create_job(
+        track="telemetryT", run_id="telemetryR", surface="codex",
+        model_provider="openai", model_name="codex", cycles=1,
+        memory_access="none", scope="research", guidance="",
+        seed_prompt="", env={},
+    )
+    turn_id = db.start_telemetry_turn(
+        job_id, surface="codex", session_id="thread-1",
+        model="gpt-5", effort="medium",
+    )
+    db.finish_telemetry_turn(
+        turn_id, session_id="thread-1", duration_ms=100,
+        is_error=False, output_chars=12,
+        usage={
+            "input_tokens": 100, "cached_input_tokens": 75,
+            "cache_creation_input_tokens": None, "uncached_input_tokens": 25,
+            "output_tokens": 10, "reasoning_tokens": 4, "total_tokens": 110,
+            "provider_cost_usd": None,
+        },
+        raw_usage={"input_tokens": 100, "cached_input_tokens": 75},
+        raw_result={"usage": {"input_tokens": 100}},
+    )
+    response = client.get(f"/api/jobs/{job_id}/telemetry")
+    assert response.status_code == 200
+    summary = response.json()["summary"]
+    assert summary["cache_hit_ratio"] == 0.75
+    assert summary["reasoning_tokens"] == 4
+
+    conn = db._connect()
+    conn.execute("DELETE FROM telemetry_turns WHERE job_id=?", (job_id,))
+    conn.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+    conn.commit()
+    conn.close()
 
 
 def test_websocket_replays_recorded_events():

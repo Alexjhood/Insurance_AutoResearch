@@ -1,0 +1,16 @@
+experiment_name = "enet_log_density"
+model_family = "scripted_elasticnet"
+target_strategy = "direct_pure_premium"
+parent_experiment_id = ""
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]
+script_path = "model_glm_elasticnet.py"
+estimator_family = "elasticnet"
+alpha = 0.08
+l1_ratio = 0.3
+max_iter = 10000
+feature_builder_module = "autoresearch.features.log1p_density"

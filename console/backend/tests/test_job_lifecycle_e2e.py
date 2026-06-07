@@ -35,8 +35,21 @@ class StubAdapter:
     def launch(self, *, cwd, env, seed_prompt):
         self._q.put(AgentEvent(EventType.SYSTEM, {"msg": "init", "session_id": "stub-sess-1"}))
         self._q.put(AgentEvent(EventType.TOKEN, {"text": "Bootstrapping run…"}))
-        self._q.put(AgentEvent(EventType.TOOL_USE, {"name": "Bash", "input": {"command": "autoresearch bootstrap-track"}}))
-        self._q.put(AgentEvent(EventType.TURN_END, {"session_id": "stub-sess-1", "is_error": False}))
+        self._q.put(AgentEvent(EventType.TOOL_USE, {
+            "provider_call_id": "tool-1", "name": "Bash",
+            "input": {"command": "autoresearch bootstrap-track"},
+        }))
+        self._q.put(AgentEvent(EventType.TOOL_RESULT, {
+            "provider_call_id": "tool-1", "status": "completed", "output": "ok",
+        }))
+        self._q.put(AgentEvent(EventType.TURN_END, {
+            "session_id": "stub-sess-1", "is_error": False,
+            "duration_ms": 250,
+            "usage": {
+                "input_tokens": 1000, "cached_input_tokens": 600,
+                "output_tokens": 120, "reasoning_tokens": 30,
+            },
+        }))
         self._q.put(AgentEvent(EventType.AGENT_EXIT, {"returncode": 0, "session_id": "stub-sess-1"}))
         self._q.put(None)
         return SessionHandle(session_id="stub-sess-1", pid=12345)
@@ -111,8 +124,17 @@ def test_launch_drain_steer_stop():
         types = {e["event_type"] for e in events}
         assert "token" in types
         assert "tool_use" in types
+        assert "tool_result" in types
         assert "turn_end" in types
         assert "agent_exit" in types
+
+        telemetry = db.get_job_telemetry(job_id)
+        assert telemetry["summary"]["turn_count"] == 1
+        assert telemetry["summary"]["input_tokens"] == 1000
+        assert telemetry["summary"]["cached_input_tokens"] == 600
+        assert telemetry["summary"]["cache_hit_ratio"] == 0.6
+        assert telemetry["summary"]["tool_call_count"] == 1
+        assert telemetry["summary"]["completed_tool_call_count"] == 1
 
         # Guidance made it into the seed prompt
         assert "focus on GLMs" in job["seed_prompt"]

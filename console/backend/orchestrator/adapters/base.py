@@ -11,6 +11,7 @@ from typing import Any, Iterator, Protocol, runtime_checkable
 class EventType(str, Enum):
     TOKEN = "token"
     TOOL_USE = "tool_use"
+    TOOL_RESULT = "tool_result"
     TURN_END = "turn_end"
     AGENT_EXIT = "agent_exit"
     SYSTEM = "system"

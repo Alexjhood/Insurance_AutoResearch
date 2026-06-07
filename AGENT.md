@@ -5,6 +5,22 @@ You are the research agent for an autonomous insurance target-modelling loop on 
 Research run ids must be UTC timestamps in `YYYYMMDDTHHMMSSZ` form. Use
 `--new-run` to create that id; do not invent descriptive run ids.
 
+**Run intent rule:** A request to "run N experiments", "start an experiment",
+"test N ideas", or begin a new investigation means a **fresh run** unless the
+user explicitly says "continue", "resume", or supplies a run id. Do not inspect
+`latest_run.json` or existing run artifacts to infer intent. For a fresh run,
+the first shell command after reading this file must be:
+
+```bash
+autoresearch --track <your-agent-name> --new-run bootstrap-track \
+  --model-provider <provider> --model-name <model-name>
+```
+
+Capture the timestamped `run_id` returned by bootstrap and pass
+`--run-id <returned-run-id>` to every subsequent `autoresearch` command. This
+prevents another session or stale `latest_run.json` state from redirecting the
+work into a pre-existing run.
+
 Read this file at the start of every session. Keep it open as reference. After
 reading this file only, your first shell command in any research run should be an
 `autoresearch --track ...` bootstrap or `start-session` command so the
@@ -230,7 +246,14 @@ Before the expensive CV/bootstrap comparison, every valid challenger is screened
 
 Your default track is your current tool name: **`codex`** when running in Codex, **`claude`** when running in Claude Code, and **`opencode`** when running in OpenCode. These are the only valid research-session track folders; `default` and custom track names are reserved for human/admin analyst work. Your default cycle count is **3**.
 
-For a **new run**, always pass `--new-run`; this creates a fresh timestamped folder such as `artifacts/tracks/codex/runs/20260527T211530Z/`. For **continue** instructions, omit both `--new-run` and `--run-id` so the framework picks up that track's latest run. Only pass `--run-id` when the user explicitly supplies one.
+For a **new run**, always pass `--new-run`; this creates a fresh timestamped
+folder such as `artifacts/tracks/codex/runs/20260527T211530Z/`. Capture the
+returned run id and pin it with `--run-id` on every later command. For explicit
+**continue** instructions without a supplied run id, the first `start-session`
+command may omit both `--new-run` and `--run-id` to resolve the track's latest
+run; capture the resolved run id from its output and pin all later commands.
+Never inspect existing artifacts to decide whether an otherwise new request
+should continue an old run.
 
 | User says | What to do |
 |-----------|-----------|
@@ -246,6 +269,7 @@ autoresearch --track <your-agent-name> --new-run bootstrap-track \
   --model-provider <provider> --model-name <model-name>
 # e.g. --model-provider anthropic --model-name claude-sonnet-4-6
 # e.g. --model-provider openai   --model-name codex-mini-latest
+# Capture the run_id printed by bootstrap as <returned-run-id>.
 ```
 
 **Read handoff** — always do this after bootstrap or at the start of a continuing session:
@@ -256,13 +280,16 @@ autoresearch --track <your-agent-name> --new-run bootstrap-track \
 
 **Run N cycles** — `run-session-cycles` requires an active session. On a fresh run, create one first (idempotent name is fine):
 ```bash
-autoresearch --track <your-agent-name> start-session main         # only needed once per run
-autoresearch --track <your-agent-name> run-session-cycles <N>
+autoresearch --track <your-agent-name> --run-id <returned-run-id> start-session main
+autoresearch --track <your-agent-name> --run-id <returned-run-id> run-session-cycles <N>
 ```
 
 **Each cycle now pauses for your decision.** `run-session-cycles` runs a proposal through experiment + comparison and then **stops in the `awaiting_decision` state** — it does not auto-promote. You must review the metric summary and call `record-decision` (see "You own the decision") before the next cycle. So to run N experiments you loop: `run-session-cycles 1` → review → `record-decision …` → repeat. A larger N still stops after the first comparison that needs a verdict.
 
-If the user supplies a specific `--run-id` (e.g. `CC20260526_01`), pass it to every command. Otherwise use `--new-run` for fresh starts and omit `--run-id` for continues.
+If the user supplies a specific timestamped `--run-id`, pass it to every
+command. Otherwise use `--new-run` for fresh starts, capture its returned run
+id, and pin that id thereafter. For an explicit continuation without a
+supplied id, resolve latest once with `start-session`, then pin the returned id.
 
 ---
 
@@ -278,18 +305,21 @@ If the user supplies a specific `--run-id` (e.g. `CC20260526_01`), pass it to ev
 For a fresh run:
 
 ```bash
-autoresearch --track <your-agent-name> --new-run bootstrap-track      # first command: bind to a fresh timestamped run
-autoresearch --track <your-agent-name> start-session main             # idempotent name; required before run-session-cycles
-autoresearch --track <your-agent-name> list-champion-history
-autoresearch --track <your-agent-name> list-experiments
+autoresearch --track <your-agent-name> --new-run bootstrap-track \
+  --model-provider <provider> --model-name <model-name>               # first command; capture returned run_id
+autoresearch --track <your-agent-name> --run-id <returned-run-id> start-session main
+autoresearch --track <your-agent-name> --run-id <returned-run-id> list-champion-history
+autoresearch --track <your-agent-name> --run-id <returned-run-id> list-experiments
 ```
 
-For a continuing run, skip `bootstrap-track` and omit `--new-run`:
+For an explicit continuing request, skip `bootstrap-track`. If the user did not
+provide a run id, resolve latest exactly once and capture the run id printed by
+`start-session`:
 
 ```bash
-autoresearch --track <your-agent-name> start-session main             # first command: bind to the latest run for this track
-autoresearch --track <your-agent-name> list-champion-history
-autoresearch --track <your-agent-name> list-experiments
+autoresearch --track <your-agent-name> start-session main             # first command only; capture resolved run_id
+autoresearch --track <your-agent-name> --run-id <resolved-run-id> list-champion-history
+autoresearch --track <your-agent-name> --run-id <resolved-run-id> list-experiments
 ```
 
 Then read the handoff file printed by bootstrap (or the latest handoff for a continuing run) and this run's `RESEARCH_LOG.md` before forming any hypothesis.
@@ -659,8 +689,10 @@ ClaudeCode/Codex conversation when you want the agent to configure its own run.
 
 All standard commands accept `--track <name> --run-id <id>`. New agent runs
 should use `--track <tool-name> --new-run bootstrap-track`, which creates a
-timestamped run id. If `--run-id` and `--new-run` are both omitted, the command
-continues the track's latest run. Without `--track`, commands operate on the
+timestamped run id. Capture that id and pass it explicitly thereafter. If
+`--run-id` and `--new-run` are both omitted, the command continues the track's
+latest run; use this implicit resolution only for the first command of an
+explicit continuation request. Without `--track`, commands operate on the
 legacy default paths (backward-compatible).
 
 Tracked run layout:
@@ -714,10 +746,11 @@ autoresearch list-tracks   # see all tracks and their current champion
 6. **Always pass `--track <your-agent-name>` to every command.** Use `codex`
    for Codex, `claude` for Claude Code, and `opencode` for OpenCode. The
    run-scope guard only binds research sessions to those three folders. Use
-   `--new-run` only on the first command of a fresh run, then omit `--run-id`
-   to continue that track's latest timestamped run unless the user explicitly
-   gives a run id. Running without `--track`, with `--track default`, or with a
-   custom track name is reserved for human/admin analyst operations.
+   `--new-run` only on the first command of a fresh run, capture the returned
+   timestamped run id, and pass `--run-id` on every later command. Resolve the
+   latest run implicitly only when the user explicitly requests continuation,
+   then pin the resolved id. Running without `--track`, with `--track default`,
+   or with a custom track name is reserved for human/admin analyst operations.
 
 7. **Never read another track's context bundle.**  The files under
    `artifacts/tracks/<other-agent>/` are off-limits during your session.

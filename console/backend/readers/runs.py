@@ -181,6 +181,13 @@ def get_research_lines(track_id: str, run_id: str) -> list[dict]:
     return [_row_to_dict(r) for r in list_research_lines(cfg.registry_path)]
 
 
+def get_run_telemetry(track_id: str, run_id: str) -> dict:
+    from autoresearch.telemetry.store import get_run_telemetry as read_telemetry
+
+    run_dir = ARTIFACTS_DIR / track_id / "runs" / run_id
+    return read_telemetry(run_dir)
+
+
 def list_artifact_paths(track_id: str, run_id: str) -> list[str]:
     run_dir = ARTIFACTS_DIR / track_id / "runs" / run_id
     if not run_dir.exists():

@@ -33,7 +33,8 @@ class ClaudeAdapter:
     Real event format (from --verbose --include-partial-messages):
       system / subtype=init      → session_id, tools, model (first event)
       system / subtype=hook_*    → hook lifecycle (ignored for display)
-      assistant                  → message.content[].type = text | tool_use | tool_result
+      assistant                  → message.content[].type = text | tool_use
+      user                       → message.content[].type = tool_result
                                    (partial messages arrive mid-generation)
       result                     → turn complete; session_id, duration_ms, is_error
 
@@ -57,6 +58,7 @@ class ClaudeAdapter:
         # True once we've streamed token deltas in the current turn, so we
         # don't re-emit the same text from the final complete assistant message.
         self._turn_had_stream = False
+        self._latest_usage: dict | None = None
 
     @property
     def session_id(self) -> str | None:
@@ -115,6 +117,14 @@ class ClaudeAdapter:
         self._env = {**os.environ, **env}
 
         cmd = [bin_path] + _BASE_FLAGS
+
+        # Agent model + thinking effort (from the launch form)
+        model = env.get("AGENT_MODEL", "").strip()
+        effort = env.get("AGENT_EFFORT", "").strip()
+        if model:
+            cmd += ["--model", model]
+        if effort:
+            cmd += ["--effort", effort]
 
         # Multi-turn mode when steering is needed
         if prompt and not resume_id:
@@ -205,6 +215,8 @@ class ClaudeAdapter:
                 # blocks here to avoid duplicating the text. If no deltas were
                 # seen (partial messages unavailable), emit the text too.
                 msg = obj.get("message", {})
+                if isinstance(msg.get("usage"), dict):
+                    self._latest_usage = msg["usage"]
                 for block in msg.get("content", []):
                     btype = block.get("type")
                     if btype == "text" and not self._turn_had_stream:
@@ -216,11 +228,48 @@ class ClaudeAdapter:
                     elif btype == "tool_use":
                         self._event_queue.put(AgentEvent(
                             type=EventType.TOOL_USE,
-                            payload={"name": block.get("name"), "input": block.get("input")},
+                            payload={
+                                "provider_call_id": block.get("id"),
+                                "name": block.get("name"),
+                                "input": _preview(block.get("input")),
+                                "input_bytes": _byte_size(block.get("input")),
+                                "status": "started",
+                            },
                         ))
+                    elif btype == "tool_result":
+                        content = block.get("content")
+                        self._event_queue.put(AgentEvent(
+                            type=EventType.TOOL_RESULT,
+                            payload={
+                                "provider_call_id": block.get("tool_use_id"),
+                                "output": _preview(content),
+                                "output_bytes": _byte_size(content),
+                                "is_error": block.get("is_error"),
+                                "status": "error" if block.get("is_error") else "completed",
+                            },
+                        ))
+
+            elif etype == "user":
+                msg = obj.get("message", {})
+                for block in msg.get("content", []):
+                    if block.get("type") != "tool_result":
+                        continue
+                    self._event_queue.put(AgentEvent(
+                        type=EventType.TOOL_RESULT,
+                        payload={
+                            "provider_call_id": block.get("tool_use_id"),
+                            "output": _preview(block.get("content")),
+                            "output_bytes": _byte_size(block.get("content")),
+                            "is_error": block.get("is_error"),
+                            "status": "error" if block.get("is_error") else "completed",
+                        },
+                    ))
 
             elif etype == "result":
                 self._turn_had_stream = False
+                usage = obj.get("usage")
+                if not isinstance(usage, dict):
+                    usage = self._latest_usage
                 self._event_queue.put(AgentEvent(
                     type=EventType.TURN_END,
                     payload={
@@ -229,8 +278,12 @@ class ClaudeAdapter:
                         "is_error": obj.get("is_error"),
                         "result": obj.get("result", "")[:200],
                         "num_turns": obj.get("num_turns"),
+                        "usage": usage,
+                        "total_cost_usd": obj.get("total_cost_usd"),
+                        "model": obj.get("model"),
                     },
                 ))
+                self._latest_usage = None
                 # Deliver queued between-turn steers
                 with self._lock:
                     pending = list(self._pending_between_turn)
@@ -255,3 +308,20 @@ class ClaudeAdapter:
             payload={"returncode": self._proc.returncode, "session_id": self._session_id},
         ))
         self._event_queue.put(None)
+
+
+def _byte_size(value: object) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    return len(json.dumps(value, ensure_ascii=True, default=str).encode("utf-8"))
+
+
+def _preview(value: object, limit: int = 4000) -> object:
+    if _byte_size(value) <= limit:
+        return value
+    if isinstance(value, str):
+        return value.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+    encoded = json.dumps(value, ensure_ascii=True, default=str)
+    return encoded[:limit]
