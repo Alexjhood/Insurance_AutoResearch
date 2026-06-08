@@ -212,37 +212,49 @@ export function LiveMonitor({ job, initialEvents }: Props) {
             </div>
           </div>
           {telemetry ? (
-            <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
-              <Metric label="Input tokens" value={formatCount(telemetry.summary.input_tokens)} />
-              <Metric label="Output tokens" value={formatCount(telemetry.summary.output_tokens)} />
-              <Metric
-                label="Cache hits"
-                value={formatPercent(telemetry.summary.cache_hit_ratio)}
-              />
-              <Metric
-                label="Reasoning"
-                value={formatCount(telemetry.summary.reasoning_tokens)}
-              />
-              <Metric
-                label="Tool failures"
-                value={`${telemetry.summary.tool_failure_count}/${telemetry.summary.completed_tool_call_count}`}
-              />
-              <Metric
-                label="Repair signals"
-                value={String(telemetry.summary.signal_count)}
-              />
-              <Metric
-                label="Reported cost"
-                value={
-                  telemetry.summary.provider_reported_cost_usd == null
-                    ? "Not reported"
-                    : `$${telemetry.summary.provider_reported_cost_usd.toFixed(4)}`
-                }
-              />
-              <Metric
-                label="Cost coverage"
-                value={`${telemetry.summary.cost_coverage_turns}/${telemetry.summary.turn_count}`}
-              />
+            <div className="space-y-2">
+              {(job.agent_model || job.agent_effort) && (
+                <div className="flex flex-wrap gap-1.5 text-xs pb-1 border-b border-gray-800">
+                  {job.agent_model && (
+                    <span className="font-mono text-gray-400">{job.agent_model}</span>
+                  )}
+                  {job.agent_effort && (
+                    <span className="badge badge-yellow">{job.agent_effort}</span>
+                  )}
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+                <Metric label="Input tokens" value={formatCount(telemetry.summary.input_tokens)} />
+                <Metric label="Output tokens" value={formatCount(telemetry.summary.output_tokens)} />
+                <Metric
+                  label="Cache hits"
+                  value={formatPercent(telemetry.summary.cache_hit_ratio)}
+                />
+                <Metric
+                  label="Reasoning"
+                  value={formatCount(telemetry.summary.reasoning_tokens)}
+                />
+                <Metric
+                  label="Tool failures"
+                  value={`${telemetry.summary.tool_failure_count}/${telemetry.summary.completed_tool_call_count}`}
+                />
+                <Metric
+                  label="Repair signals"
+                  value={String(telemetry.summary.signal_count)}
+                />
+                <Metric
+                  label="Reported cost"
+                  value={
+                    telemetry.summary.provider_reported_cost_usd == null
+                      ? "Not reported"
+                      : `$${telemetry.summary.provider_reported_cost_usd.toFixed(4)}`
+                  }
+                />
+                <Metric
+                  label="Cost coverage"
+                  value={`${telemetry.summary.cost_coverage_turns}/${telemetry.summary.turn_count}`}
+                />
+              </div>
             </div>
           ) : (
             <div className="text-xs text-gray-600">Waiting for telemetry.</div>

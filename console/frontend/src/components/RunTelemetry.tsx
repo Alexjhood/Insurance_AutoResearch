@@ -73,6 +73,8 @@ export function RunTelemetry({ track, runId, initial }: Props) {
             <thead>
               <tr>
                 <th>Surface</th>
+                <th>Model</th>
+                <th>Effort</th>
                 <th>Tokens</th>
                 <th>Cache</th>
                 <th>Reasoning</th>
@@ -83,6 +85,14 @@ export function RunTelemetry({ track, runId, initial }: Props) {
               {turns.slice(-12).map((turn, index) => (
                 <tr key={String(turn.turn_key ?? index)}>
                   <td>{surfaceForTurn(turn, telemetry.sessions)}</td>
+                  <td className="font-mono text-xs text-gray-400">{String(turn.model ?? "—")}</td>
+                  <td>
+                    {turn.effort ? (
+                      <span className="badge badge-yellow">{String(turn.effort)}</span>
+                    ) : (
+                      <span className="text-gray-600">—</span>
+                    )}
+                  </td>
                   <td className="font-mono">{formatCount(Number(turn.total_tokens ?? 0))}</td>
                   <td>{formatPercent(turnCacheRatio(turn))}</td>
                   <td className="font-mono">{formatCount(Number(turn.reasoning_tokens ?? 0))}</td>

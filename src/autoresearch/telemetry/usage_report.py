@@ -42,9 +42,9 @@ def write_usage_report(run_dir: Path) -> Path | None:
         "change since the previous experiment checkpoint; cumulative values include "
         "records observed at or before the checkpoint time.",
         "",
-        "| Experiment | Status | Completed | Incremental tokens | Cumulative tokens | "
+        "| Experiment | Status | Completed | Model | Effort | Incremental tokens | Cumulative tokens | "
         "Cache hit | Model calls (inc/cum) | Tool calls (inc/cum) | Tool failures (inc/cum) |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "|---|---:|---:|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     previous = _zero_usage()
     for row in rows:
@@ -58,17 +58,20 @@ def write_usage_report(run_dir: Path) -> Path | None:
             else None
         )
         lines.append(
-            "| {name} | {status} | {completed} | {delta_tokens} | {total_tokens} | "
-            "{cache} | {delta_models}/{models} | {delta_tools}/{tools} | "
+            "| {name} | {status} | {completed} | {models} | {efforts} | "
+            "{delta_tokens} | {total_tokens} | "
+            "{cache} | {delta_models}/{models_count} | {delta_tools}/{tools} | "
             "{delta_failures}/{failures} |".format(
                 name=_cell(row["experiment_name"]),
                 status=_cell(row["status"]),
                 completed=_cell(row["completed_at"]),
+                models=_cell(row.get("models_str") or "—"),
+                efforts=_cell(row.get("efforts_str") or "—"),
                 delta_tokens=_count(incremental["total_tokens"]),
                 total_tokens=_count(row["total_tokens"]),
                 cache=f"{cache_ratio:.1%}" if cache_ratio is not None else "-",
                 delta_models=_count(incremental["model_calls"]),
-                models=_count(row["model_calls"]),
+                models_count=_count(row["model_calls"]),
                 delta_tools=_count(incremental["tool_calls"]),
                 tools=_count(row["tool_calls"]),
                 delta_failures=_count(incremental["tool_failures"]),
@@ -161,7 +164,29 @@ def _usage_at(con, checkpoint: dict[str, Any]) -> dict[str, Any]:
         """,
         (at,),
     ).fetchone()
-    return {**checkpoint, **dict(tokens), **dict(tools)}
+    model_rows = con.execute(
+        """
+        SELECT DISTINCT model FROM llm_model_calls
+        WHERE model IS NOT NULL AND julianday(occurred_at) <= julianday(?)
+        """,
+        (at,),
+    ).fetchall()
+    effort_rows = con.execute(
+        """
+        SELECT DISTINCT effort FROM llm_turns
+        WHERE effort IS NOT NULL AND julianday(COALESCE(completed_at, started_at)) <= julianday(?)
+        """,
+        (at,),
+    ).fetchall()
+    models_str = ", ".join(sorted({str(r["model"]) for r in model_rows if r["model"]}))
+    efforts_str = ", ".join(sorted({str(r["effort"]) for r in effort_rows if r["effort"]}))
+    return {
+        **checkpoint,
+        **dict(tokens),
+        **dict(tools),
+        "models_str": models_str or None,
+        "efforts_str": efforts_str or None,
+    }
 
 
 def _zero_usage() -> dict[str, int]:

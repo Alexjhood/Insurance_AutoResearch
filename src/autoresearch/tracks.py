@@ -27,6 +27,8 @@ from autoresearch.experiment_registry.registry import (
     list_artifacts,
 )
 from autoresearch.utils.io import write_json
+from autoresearch.telemetry.store import telemetry_path
+import sqlite3 as _sqlite3
 
 
 _REPORT_TEMPLATE = """\
@@ -35,6 +37,12 @@ _REPORT_TEMPLATE = """\
 Comparison date : {date}
 Track A         : `{track_a}` — champion `{champion_a_id}` ({model_a})
 Track B         : `{track_b}` — champion `{champion_b_id}` ({model_b})
+
+### LLM Configuration
+| | Track A | Track B |
+|-|---------|---------|
+| LLM model(s) | {llm_models_a} | {llm_models_b} |
+| Thinking effort | {llm_efforts_a} | {llm_efforts_b} |
 
 ---
 
@@ -238,6 +246,9 @@ def _run_comparison(config_a: ProjectConfig, config_b: ProjectConfig) -> dict[st
     model_a = champion_a.get("model_family") or "unknown"
     model_b = champion_b.get("model_family") or "unknown"
 
+    llm_models_a, llm_efforts_a = _llm_session_summary(config_a.artifacts_dir)
+    llm_models_b, llm_efforts_b = _llm_session_summary(config_b.artifacts_dir)
+
     report_text = _REPORT_TEMPLATE.format(
         date=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         metric_label=metric_label,
@@ -247,6 +258,10 @@ def _run_comparison(config_a: ProjectConfig, config_b: ProjectConfig) -> dict[st
         champion_b_id=champion_b_id,
         model_a=model_a,
         model_b=model_b,
+        llm_models_a=llm_models_a or "—",
+        llm_models_b=llm_models_b or "—",
+        llm_efforts_a=llm_efforts_a or "—",
+        llm_efforts_b=llm_efforts_b or "—",
         n_resamples=config_a.repeated_resamples,
         score_a=score_a,
         score_b=score_b,
@@ -284,6 +299,10 @@ def _run_comparison(config_a: ProjectConfig, config_b: ProjectConfig) -> dict[st
         "champion_b_id": champion_b_id,
         "model_a": model_a,
         "model_b": model_b,
+        "llm_models_a": llm_models_a,
+        "llm_efforts_a": llm_efforts_a,
+        "llm_models_b": llm_models_b,
+        "llm_efforts_b": llm_efforts_b,
         "score_a": score_a,
         "score_b": score_b,
         "mean_lift": mean_lift,
@@ -352,6 +371,28 @@ def _scalar_metrics(
         target_mode=target_mode,
     )
     return float(panel["gini_weighted"]), float(panel["predicted_to_actual_ratio"])
+
+
+def _llm_session_summary(artifacts_dir: Path) -> tuple[str, str]:
+    """Return (models_str, efforts_str) from the run's telemetry DB, or empty strings."""
+    db = telemetry_path(artifacts_dir)
+    if not db.exists():
+        return "", ""
+    try:
+        con = _sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        con.row_factory = _sqlite3.Row
+        model_rows = con.execute(
+            "SELECT DISTINCT model FROM llm_model_calls WHERE model IS NOT NULL"
+        ).fetchall()
+        effort_rows = con.execute(
+            "SELECT DISTINCT effort FROM llm_turns WHERE effort IS NOT NULL"
+        ).fetchall()
+        con.close()
+        models = ", ".join(sorted({str(r["model"]) for r in model_rows if r["model"]}))
+        efforts = ", ".join(sorted({str(r["effort"]) for r in effort_rows if r["effort"]}))
+        return models, efforts
+    except Exception:
+        return "", ""
 
 
 def _format_gate_checks(checks: dict[str, bool]) -> str:

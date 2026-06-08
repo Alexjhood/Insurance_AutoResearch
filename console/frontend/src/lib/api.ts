@@ -119,6 +119,8 @@ export interface Job {
   surface: string;
   model_provider?: string;
   model_name?: string;
+  agent_model?: string;
+  agent_effort?: string;
   cycles: number;
   memory_access: string;
   scope: string;

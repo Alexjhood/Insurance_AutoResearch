@@ -30,6 +30,90 @@ _SIGNALS = {
 _CODEX_EXIT = re.compile(r"Process exited with code\s+(-?\d+)")
 
 
+def sync_opencode_session(
+    *,
+    run_dir: Path,
+    native_session_id: str,
+) -> dict[str, Any]:
+    """Import an OpenCode session from the desktop app's SQLite database."""
+    db_path = _find_opencode_db()
+    if db_path is None:
+        raise FileNotFoundError(
+            "OpenCode database not found at ~/.local/share/opencode/opencode.db"
+        )
+
+    oc_con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    oc_con.row_factory = sqlite3.Row
+    try:
+        session_row = oc_con.execute(
+            "SELECT * FROM session WHERE id=?", (native_session_id,)
+        ).fetchone()
+        if not session_row:
+            raise ValueError(f"OpenCode session {native_session_id!r} not found in database")
+        message_rows = oc_con.execute(
+            "SELECT * FROM message WHERE session_id=? ORDER BY time_created",
+            (native_session_id,),
+        ).fetchall()
+    finally:
+        oc_con.close()
+
+    model_json: dict[str, Any] = {}
+    try:
+        model_json = json.loads(session_row["model"] or "{}") or {}
+    except (json.JSONDecodeError, TypeError):
+        pass
+    model_id = str(model_json.get("id") or "")
+    provider_id = str(model_json.get("providerID") or "opencode")
+    variant = str(model_json.get("variant") or "")
+    model_str = f"{provider_id}/{model_id}" if provider_id and model_id else model_id
+    effort = variant if variant and variant.lower() != "default" else None
+
+    run_dir = Path(run_dir)
+    con = store.connect(run_dir)
+    try:
+        metadata: dict[str, Any] = {
+            "cwd": session_row["directory"] if "directory" in session_row.keys() else None,
+            "model": model_str,
+            "effort": effort,
+            "started_at": _ms_to_iso(session_row["time_created"]),
+            "last_event_at": _ms_to_iso(session_row["time_updated"]),
+        }
+        sess_key = store.upsert_session(
+            con,
+            surface="opencode",
+            native_session_id=native_session_id,
+            transcript_path=db_path,
+            metadata=metadata,
+        )
+        imported = _import_opencode(con, sess_key, model_str, effort, message_rows)
+        store.refresh_turn_aggregates(con, sess_key)
+        store.refresh_session_status(con, sess_key, finalize=True)
+        store.update_cursor(
+            con,
+            source_path=db_path,
+            surface="opencode",
+            native_session_id=native_session_id,
+            byte_offset=imported,
+            source_size=db_path.stat().st_size,
+            source_mtime_ns=db_path.stat().st_mtime_ns,
+        )
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+    write_usage_report(run_dir)
+    return {
+        "status": "ok",
+        "surface": "opencode",
+        "native_session_id": native_session_id,
+        "records_imported": imported,
+        "run_dir": str(run_dir),
+    }
+
+
 def sync_session(
     *,
     run_dir: Path,
@@ -426,6 +510,21 @@ def _import_claude(
                     native_turn_id=None,
                     started_at=timestamp,
                 )
+            model_name = _str(message.get("model"))
+            if model_name or any(
+                isinstance(b, dict) and b.get("type") == "thinking"
+                for b in (content if isinstance(content, list) else [])
+            ):
+                has_thinking = any(
+                    isinstance(b, dict) and b.get("type") == "thinking"
+                    for b in (content if isinstance(content, list) else [])
+                )
+                store.update_turn_context(
+                    con,
+                    current_turn,
+                    model=model_name,
+                    effort="thinking" if has_thinking else None,
+                )
             if request_id and usage:
                 uncached = _int(usage.get("input_tokens"))
                 cached = _int(usage.get("cache_read_input_tokens"))
@@ -701,6 +800,106 @@ def _json_bytes(value: Any) -> int:
 
 def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
+
+
+def _import_opencode(
+    con: sqlite3.Connection,
+    session_key: str,
+    model_str: str,
+    effort: str | None,
+    message_rows: list,
+) -> int:
+    """Process OpenCode message rows into telemetry tables."""
+    current_turn: str | None = store.latest_turn(con, session_key)
+    imported = 0
+
+    for msg_row in message_rows:
+        try:
+            data: dict[str, Any] = json.loads(msg_row["data"] or "{}") or {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        role = data.get("role")
+        time_ms = (data.get("time") or {}).get("created") or msg_row["time_created"]
+        timestamp = _ms_to_iso(time_ms)
+        msg_id = str(msg_row["id"])
+
+        if role == "user":
+            current_turn = store.ensure_turn(
+                con,
+                session_key_value=session_key,
+                native_turn_id=msg_id,
+                started_at=timestamp,
+                turn_key_value=f"{session_key}:turn:{msg_id}",
+            )
+            store.update_turn_context(con, current_turn, model=model_str, effort=effort)
+            imported += 1
+            continue
+
+        if role != "assistant":
+            continue
+
+        if current_turn is None:
+            current_turn = store.ensure_turn(
+                con,
+                session_key_value=session_key,
+                native_turn_id=None,
+                started_at=timestamp,
+            )
+            store.update_turn_context(con, current_turn, model=model_str, effort=effort)
+
+        tokens: dict[str, Any] = data.get("tokens") or {}
+        cache: dict[str, Any] = tokens.get("cache") or {}
+        msg_provider = _str(data.get("providerID")) or ""
+        msg_model_id = _str(data.get("modelID")) or ""
+        full_model = (
+            f"{msg_provider}/{msg_model_id}"
+            if msg_provider and msg_model_id
+            else msg_model_id or model_str
+        )
+        input_tok = _int(tokens.get("input"))
+        output_tok = _int(tokens.get("output"))
+        reasoning_tok = _int(tokens.get("reasoning"))
+        cache_read = _int(cache.get("read"))
+        cache_write = _int(cache.get("write"))
+        total_tok = _int(tokens.get("total")) or (input_tok + output_tok)
+        cost = data.get("cost")
+
+        store.upsert_model_call(
+            con,
+            {
+                "call_key": f"{session_key}:msg:{msg_id}",
+                "session_key": session_key,
+                "turn_key": current_turn,
+                "occurred_at": timestamp,
+                "model": full_model,
+                "input_tokens": input_tok,
+                "cached_input_tokens": cache_read,
+                "cache_creation_input_tokens": cache_write,
+                "uncached_input_tokens": max(input_tok - cache_read, 0),
+                "output_tokens": output_tok,
+                "reasoning_tokens": reasoning_tok,
+                "total_tokens": total_tok,
+                "provider_cost_usd": float(cost) if cost is not None else None,
+            },
+        )
+        store.update_turn_context(con, current_turn, model=full_model, effort=effort)
+        imported += 1
+
+    return imported
+
+
+def _find_opencode_db() -> Path | None:
+    path = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+    return path if path.exists() else None
+
+
+def _ms_to_iso(ms: Any) -> str | None:
+    from datetime import datetime, timezone
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return None
 
 
 def _str(value: Any) -> str | None:
