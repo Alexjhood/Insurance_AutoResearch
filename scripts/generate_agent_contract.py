@@ -1,20 +1,131 @@
+#!/usr/bin/env python3
+"""Generate the compact agent runtime contract (``AGENT.md``) from code/config.
+
+The agent loads ``AGENT.md`` into context at the start of every run (the console
+seed prompt says "Read AGENT.md, then bootstrap ..."). To keep that startup cost
+small *and* prevent the manual from drifting out of sync with the CLI, the
+runtime contract is generated here from authoritative, importable sources:
+
+* command names      -> ``autoresearch.cli.COMMANDS``
+* proposal fields    -> ``autoresearch.controller.proposal_schema.REQUIRED_PROPOSAL_TEXT_FIELDS``
+* column constants   -> ``autoresearch.models.dispatcher``
+* protected files    -> ``autoresearch.utils.integrity.PROTECTED_RELATIVE_PATHS``
+* compute/gate/target-> ``configs/default.toml``
+
+The long, human-facing manual lives in ``docs/OPERATING_MANUAL.md`` and is the
+drill-down target referenced from the contract.
+
+Usage::
+
+    python scripts/generate_agent_contract.py            # write AGENT.md
+    python scripts/generate_agent_contract.py --check     # exit 1 if stale
+
+``tests/test_agent_contract.py`` runs ``--check`` and also asserts every command
+named in the contract exists in ``cli.COMMANDS``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import tomllib
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from autoresearch.cli import COMMANDS  # noqa: E402
+from autoresearch.controller.proposal_schema import (  # noqa: E402
+    REQUIRED_PROPOSAL_TEXT_FIELDS,
+)
+from autoresearch.models import dispatcher  # noqa: E402
+from autoresearch.utils.integrity import PROTECTED_RELATIVE_PATHS  # noqa: E402
+
+AGENT_MD = REPO_ROOT / "AGENT.md"
+DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.toml"
+MANUAL_REL = "docs/OPERATING_MANUAL.md"
+
+# Curated workflow commands shown in the contract, in the order the agent uses
+# them. Each is validated against cli.COMMANDS at generation time, so renaming or
+# removing a command in the CLI breaks generation (and the sync test) loudly.
+WORKFLOW_COMMANDS: list[tuple[str, str]] = [
+    ("bootstrap-track", "Create + prepare a fresh run (first command of a new run)."),
+    ("start-session", "Open the supervised session for the run."),
+    ("show-latest-handoff", "Read current champion/state before proposing."),
+    ("list-experiments", "List this run's registered experiments."),
+    ("list-champion-history", "Show how the champion evolved this run."),
+    ("run-session-cycles", "Run N cycles; STOPS at awaiting_decision (no auto-promote)."),
+    ("record-decision", "Your verdict: promote | local_promote | reject."),
+    ("park-research-line", "Park an exhausted research line."),
+    ("clear-line-champion", "Drop a local incumbent that looks artefactual."),
+    ("export-context", "Refresh the handoff/context bundle on demand."),
+]
+
+# Column constants the model script needs, sourced from the dispatcher module.
+_COLUMN_CONSTANTS = [
+    ("EXPOSURE", dispatcher.EXPOSURE, "offset; weights + rate->total only, never a feature"),
+    ("CLAIM_COST", dispatcher.CLAIM_COST, "training target (burning-cost mode)"),
+    ("CLAIM_COUNT", dispatcher.CLAIM_COUNT, "training target (frequency mode)"),
+    ("CLAIM_EVENTS", dispatcher.CLAIM_EVENTS, "alternative claim count"),
+    ("RECORD_ID", dispatcher.RECORD_ID, "policy identifier"),
+]
+
+
+def _load_config() -> dict:
+    with DEFAULT_CONFIG.open("rb") as fh:
+        return tomllib.load(fh)
+
+
+def _validate_commands() -> None:
+    """Fail loudly if the contract references a command the CLI does not expose."""
+    missing = [c for c, _ in WORKFLOW_COMMANDS if c not in COMMANDS]
+    if missing:
+        raise SystemExit(
+            f"generate_agent_contract: commands not found in cli.COMMANDS: {missing}"
+        )
+
+
+def render() -> str:
+    cfg = _load_config()
+    compute = cfg["compute"]
+    evaluation = cfg["evaluation"]
+    caps = cfg["search_space"]["preprocessing"]["claim_cap_thresholds"]
+
+    base = compute["base_budget_minutes"]
+    incr = compute["budget_increment_minutes"]
+    per = compute["experiments_per_increment"]
+    gate_mode = evaluation["gate_mode"]
+    gate_metric = evaluation["gate_primary_metric"]
+    target_mode = evaluation["target_mode"]
+    cap = caps[0]
+
+    cmd_lines = "\n".join(
+        f"- `{name}` — {desc}" for name, desc in WORKFLOW_COMMANDS
+    )
+    protected_lines = "\n".join(f"- `{p}`" for p in PROTECTED_RELATIVE_PATHS)
+    const_lines = "\n".join(
+        f"- `{name} = \"{value}\"` — {desc}" for name, value, desc in _COLUMN_CONSTANTS
+    )
+    proposal_fields = ", ".join(f"`{f}`" for f in REQUIRED_PROPOSAL_TEXT_FIELDS)
+
+    return f"""\
 <!-- GENERATED FILE — DO NOT EDIT BY HAND.
      Regenerate with: python scripts/generate_agent_contract.py
      Source of truth: cli.COMMANDS, proposal_schema, dispatcher, integrity,
-     configs/default.toml. Full human manual: docs/OPERATING_MANUAL.md. -->
+     configs/default.toml. Full human manual: {MANUAL_REL}. -->
 
 # AGENT.md — Auto-Research Runtime Contract
 
 You are the research agent for an autonomous insurance target-modelling loop on
 the French Motor dataset (freMTPL2, ~678K policies). The active target is
-**burning cost** (`claim_cost_capped_active`) unless the run sets
-`target_mode = "frequency"` (current default: `burning_cost`). Maximise
-**exposure-weighted Gini** (`gini_weighted`) on the search-validation split;
+**burning cost** (`{dispatcher.CLAIM_COST}`) unless the run sets
+`target_mode = "frequency"` (current default: `{target_mode}`). Maximise
+**exposure-weighted Gini** (`{gate_metric}`) on the search-validation split;
 every promotion is re-checked on a protected holdout. Each run starts with the
 `global_mean` baseline as champion — your first model only has to beat a flat
 exposure-weighted rate.
 
-For anything not covered here, read **docs/OPERATING_MANUAL.md** (full manual: dataset
+For anything not covered here, read **{MANUAL_REL}** (full manual: dataset
 schema, metric panel, gate modes, research-line mechanics, worked examples).
 
 ## Hard safety constraints — never break
@@ -24,17 +135,9 @@ schema, metric panel, gate modes, research-line mechanics, worked examples).
    feature code. The integrity scanner fails the experiment.
 2. **Never edit protected evaluation files** (comparisons block until an
    operator runs `autoresearch update-integrity-manifest`):
-- `src/autoresearch/evaluation/metrics.py`
-- `src/autoresearch/evaluation/resampling.py`
-- `src/autoresearch/evaluation/diagnostics.py`
-- `src/autoresearch/evaluation/validation.py`
-- `src/autoresearch/comparison_runner.py`
-- `src/autoresearch/data/holdout_vault.py`
-- `src/autoresearch/milestone.py`
-- `src/autoresearch/experiment_registry/comparisons.py`
-- `src/autoresearch/experiment_registry/champions.py`
+{protected_lines}
 3. **Never change** the primary metric, gate thresholds, the fixed split
-   (`split_pack.csv`, `data/processed/`), or the claim cap (fixed at 100,000).
+   (`split_pack.csv`, `data/processed/`), or the claim cap (fixed at {cap:,}).
 4. **Always pass pytest** — the runner refuses to proceed on a failing suite.
 5. **Always stay in your own run.** Pass `--track <your-tool-name>`
    (`claude` / `codex` / `opencode`) and `--run-id <id>` to every command. After
@@ -49,7 +152,7 @@ existing artifacts to infer intent.
 
 1. **Bootstrap (fresh run only).** First shell command — binds the run scope:
    ```bash
-   autoresearch --track <t> --new-run bootstrap-track \
+   autoresearch --track <t> --new-run bootstrap-track \\
      --model-provider <provider> --model-name <model-name>
    ```
    Capture the returned timestamped `run_id`; pass `--run-id <id>` thereafter.
@@ -70,7 +173,7 @@ existing artifacts to infer intent.
    ```bash
    autoresearch --track <t> --run-id <id> run-session-cycles 1   # stops at awaiting_decision
    # review the metric summary, then:
-   autoresearch --track <t> --run-id <id> record-decision <comparison_id> \
+   autoresearch --track <t> --run-id <id> record-decision <comparison_id> \\
      --decision promote|local_promote|reject --rationale "..."
    ```
    `run-session-cycles` **never auto-promotes** — it always stops for your
@@ -86,16 +189,7 @@ existing artifacts to infer intent.
 All take `--track <your-tool-name> --run-id <id>` (omit `--run-id` only on the
 first `bootstrap-track`, which prints the id):
 
-- `bootstrap-track` — Create + prepare a fresh run (first command of a new run).
-- `start-session` — Open the supervised session for the run.
-- `show-latest-handoff` — Read current champion/state before proposing.
-- `list-experiments` — List this run's registered experiments.
-- `list-champion-history` — Show how the champion evolved this run.
-- `run-session-cycles` — Run N cycles; STOPS at awaiting_decision (no auto-promote).
-- `record-decision` — Your verdict: promote | local_promote | reject.
-- `park-research-line` — Park an exhausted research line.
-- `clear-line-champion` — Drop a local incumbent that looks artefactual.
-- `export-context` — Refresh the handoff/context bundle on demand.
+{cmd_lines}
 
 ### When a cycle needs repair
 
@@ -125,7 +219,7 @@ def fit_predict(train, score, *, feature_inclusions=None,
 ```
 Rules that are easy to get wrong (full detail in the manual):
 - **Return totals, not rates.** Multiply predicted rates by
-  `score["exposure_term_a"]` before returning.
+  `score["{dispatcher.EXPOSURE}"]` before returning.
 - **Target has exact zeros** — losses needing `y > 0` (gamma/log) error unless
   you split frequency×severity. Prefer Tweedie (`lightgbm`/`xgboost`/statsmodels)
   for direct pure-premium. Do **not** pass `tweedie_power` to
@@ -139,11 +233,7 @@ Rules that are easy to get wrong (full detail in the manual):
   not be used as predictors. Read them from the handoff — do not assume a schema.
 
 Column constants (`from autoresearch.models.dispatcher import ...`):
-- `EXPOSURE = "exposure_term_a"` — offset; weights + rate->total only, never a feature
-- `CLAIM_COST = "claim_cost_capped_active"` — training target (burning-cost mode)
-- `CLAIM_COUNT = "claim_count_signal_q"` — training target (frequency mode)
-- `CLAIM_EVENTS = "claim_event_count_l"` — alternative claim count
-- `RECORD_ID = "record_id"` — policy identifier
+{const_lines}
 
 **Calibration is mandatory** — apply the framework's one-parameter aggregate
 calibrator just before returning. Exact signature and usage:
@@ -166,17 +256,17 @@ returns `(calibrated_pred_score, calib_factor)` where
 
 ## Compute budget
 
-Per-experiment wall-clock budget: **10 min for the first 5 experiments,
-+5 min every 5 thereafter** — `budget_minutes = 10 + 5 × (N // 5)`.
+Per-experiment wall-clock budget: **{base} min for the first {per} experiments,
++{incr} min every {per} thereafter** — `budget_minutes = {base} + {incr} × (N // {per})`.
 The challenger is refit ~5× per comparison (1 fit + 4 CV folds), so budget your
 single fit at ~1/5 of that. Watch `n_estimators × (1/learning_rate)`,
 `num_leaves`/`max_depth`, and row count.
 
 ## Decision policy
 
-Comparisons run under `gate_mode = cv_bootstrap` and stop at `pending_llm`; the
+Comparisons run under `gate_mode = {gate_mode}` and stop at `pending_llm`; the
 mechanical gates are **advisory**, the verdict is yours. Before deciding, review
-`gini_weighted`, `rank_gini_weighted`, `asym_pricing_loss` (lower is better;
+`{gate_metric}`, `rank_gini_weighted`, `asym_pricing_loss` (lower is better;
 penalises under-pricing 4×), and the calibration ratio. Then:
 - **promote** — clean win; replaces the global champion + fires holdout eval.
 - **local_promote** — useful progress for its research line, not a champion.
@@ -205,7 +295,41 @@ not more tuning — re-tuning at a plateau is provably below the gate's noise fl
 
 ## Proposal contract (required top-level fields)
 
-`proposal_id`, `parent_experiment_id`, `experiment_name`, `rationale`, `change_summary`, `expected_benefit`, `key_risk`, `tree_action`, `parent_rationale`, `exploration_axis`, `approach_family`, `target_framing`, `feature_representation`, `expected_learning`, `selected_tree_action_id`, `research_line_action`, `research_line_id`, `research_line_label`, `research_line_hypothesis`, `line_membership_rationale`
+{proposal_fields}
 
 Read `proposal_inbox/proposal_template.json` once for types and the nested
 `experiment_config`. Slimmer JSON is rejected at ingestion and wastes a cycle.
+"""
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Exit non-zero if AGENT.md differs from freshly generated output.",
+    )
+    args = parser.parse_args()
+
+    _validate_commands()
+    content = render()
+
+    if args.check:
+        current = AGENT_MD.read_text(encoding="utf-8") if AGENT_MD.exists() else ""
+        if current != content:
+            print(
+                "AGENT.md is out of sync with its sources. "
+                "Run: python scripts/generate_agent_contract.py",
+                file=sys.stderr,
+            )
+            return 1
+        print("AGENT.md is in sync.")
+        return 0
+
+    AGENT_MD.write_text(content, encoding="utf-8")
+    print(f"Wrote {AGENT_MD.relative_to(REPO_ROOT)} ({len(content):,} bytes).")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -42,6 +42,19 @@ RESEARCH_LINE_ACTIONS = {
     "close_line",
 }
 
+# Required free-text top-level proposal fields. Kept module-level so the agent
+# runtime-contract generator (scripts/generate_agent_contract.py) can render the
+# proposal contract from the single source of truth and stay in sync.
+REQUIRED_PROPOSAL_TEXT_FIELDS = [
+    "proposal_id", "parent_experiment_id", "experiment_name",
+    "rationale", "change_summary", "expected_benefit", "key_risk",
+    "tree_action", "parent_rationale", "exploration_axis",
+    "approach_family", "target_framing", "feature_representation",
+    "expected_learning", "selected_tree_action_id",
+    "research_line_action", "research_line_id", "research_line_label",
+    "research_line_hypothesis", "line_membership_rationale",
+]
+
 TARGET_COLUMNS = {
     "record_id",
     "claim_count_signal_q",
@@ -98,16 +111,7 @@ def validate_proposal(proposal: dict[str, Any], search_space: dict[str, Any]) ->
     """Return validation errors for a structured experiment proposal."""
 
     errors: list[str] = []
-    required_text = [
-        "proposal_id", "parent_experiment_id", "experiment_name",
-        "rationale", "change_summary", "expected_benefit", "key_risk",
-        "tree_action", "parent_rationale", "exploration_axis",
-        "approach_family", "target_framing", "feature_representation",
-        "expected_learning", "selected_tree_action_id",
-        "research_line_action", "research_line_id", "research_line_label",
-        "research_line_hypothesis", "line_membership_rationale",
-    ]
-    for field in required_text:
+    for field in REQUIRED_PROPOSAL_TEXT_FIELDS:
         if not isinstance(proposal.get(field), str) or not proposal[field].strip():
             errors.append(f"{field} is required")
 
