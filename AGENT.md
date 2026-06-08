@@ -207,11 +207,20 @@ exploration axis after 2 same-axis experiments and cap same-model-family tuning
 at 3. A plateau forces a **structural** change (new family or target framing),
 not more tuning — re-tuning at a plateau is provably below the gate's noise floor.
 
-## Proposal contract (required top-level fields)
+## Proposal contract (what you must supply)
 
-`proposal_id`, `parent_experiment_id`, `experiment_name`, `rationale`, `change_summary`, `expected_benefit`, `key_risk`, `tree_action`, `parent_rationale`, `exploration_axis`, `approach_family`, `target_framing`, `feature_representation`, `expected_learning`, `selected_tree_action_id`, `research_line_action`, `research_line_id`, `research_line_label`, `research_line_hypothesis`, `line_membership_rationale`
+Supply only the fields that encode your scientific choice:
 
-The handoff embeds the exact proposal template, including the nested
-`experiment_config` and every field's placeholder — fill those in rather than
-reading a separate schema file. Slimmer JSON is rejected at ingestion and wastes
-a cycle.
+`experiment_name`, `rationale`, `change_summary`, `expected_benefit`, `key_risk`, `exploration_axis`, `approach_family`, `target_framing`, `feature_representation`, `expected_learning`
+
+plus an `experiment_config` with `model_family`, `target_strategy`, and
+`model.script_path` (point it at your `model_<name>.py`).
+
+The controller derives everything else from the champion, the recommended tree
+action, and the research-line registry — you do **not** need to send:
+`proposal_id`, `parent_experiment_id`, `tree_action`, `parent_rationale`, `selected_tree_action_id`, `research_line_action`, `research_line_id`, `research_line_label`, `research_line_hypothesis`, `line_membership_rationale`, `parent_branch_id`, `branch_action`, the fixed
+`preprocessing` block, or the duplicate `experiment_config.experiment_name` /
+`experiment_config.parent_experiment_id`. To deviate from a default (e.g. a
+different tree parent or research line), set that field explicitly; when you
+diverge from the recommended tree action, also include
+`tree_policy_override_rationale`. The handoff embeds a ready-to-fill template.

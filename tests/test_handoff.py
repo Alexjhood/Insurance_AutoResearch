@@ -222,20 +222,141 @@ def test_export_context_and_template(tmp_path: Path) -> None:
     assert template_outputs["proposal_template"].exists()
     assert template_outputs["proposal_schema"].exists()
     refreshed_template = json.loads(context_outputs["proposal_template"].read_text(encoding="utf-8"))
-    assert refreshed_template["parent_experiment_id"] == "direct"
+    # The template is the minimal scientific contract: it carries the scientific
+    # fields + the experiment_config machine block, and omits controller-derived
+    # parentage/tree-walk fields entirely.
+    assert refreshed_template["experiment_name"]
+    assert refreshed_template["exploration_axis"]
+    assert "parent_experiment_id" not in refreshed_template
+    assert "tree_action" not in refreshed_template
+    assert "research_line_id" not in refreshed_template
+    assert set(refreshed_template["experiment_config"]) >= {"model_family", "target_strategy", "model"}
+    assert "parent_experiment_id" not in refreshed_template["experiment_config"]
     assert context["allowed_search_space"]["feature_columns"] == ["driver_age_band_d"]
     assert "exposure_term_a` is not a predictive feature" in handoff
 
-    set_official_champion(
-        config.registry_path,
-        champion_id="new_direct",
-        branch_id="main",
-        reason="test refresh",
-        action="promote",
+    # The schema document marks parentage as controller-derived rather than required.
+    schema = json.loads(template_outputs["proposal_schema"].read_text(encoding="utf-8"))
+    assert "experiment_name" in schema["required"]
+    assert "parent_experiment_id" not in schema["required"]
+    assert "parent_experiment_id" in schema["controller_derived"]
+
+
+def _minimal_proposal() -> dict:
+    """A proposal carrying only the scientific fields the agent must supply.
+
+    Everything else (ids, parentage, tree-walk, research line, fixed
+    preprocessing) is left for the controller to hydrate.
+    """
+
+    return {
+        "experiment_name": "minimal_global_mean",
+        "rationale": "Run a minimal baseline to exercise hydration.",
+        "change_summary": "Identical global-mean config for comparison.",
+        "expected_benefit": "Verify reproducibility.",
+        "key_risk": "None.",
+        "exploration_axis": "model_family",
+        "approach_family": "baseline check",
+        "target_framing": "direct_pure_premium",
+        "feature_representation": "raw",
+        "expected_learning": "Verify the queue with the minimal proposal contract.",
+        "experiment_config": {
+            "model_family": "global_mean",
+            "target_strategy": "direct_pure_premium",
+            "model": {"feature_exclusions": []},
+        },
+    }
+
+
+def _ingest_single(config, proposal: dict) -> dict:
+    config.metadata_dir.mkdir(parents=True, exist_ok=True)
+    (config.metadata_dir / "agent_schema.json").write_text(
+        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]}',
+        encoding="utf-8",
     )
-    refreshed = export_context_bundle(config)
-    inbox_template = json.loads(refreshed["inbox_template"].read_text(encoding="utf-8"))
-    assert inbox_template["parent_experiment_id"] == "new_direct"
+    config.handoff_proposal_inbox_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_proposal_inbox_dir / "proposal.json").write_text(
+        json.dumps(proposal), encoding="utf-8"
+    )
+    return ingest_proposals(config)
+
+
+def test_minimal_scientific_proposal_hydrates_and_validates(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _record_direct(config)
+    initialise_official_champion(config)
+
+    summary = _ingest_single(config, _minimal_proposal())
+
+    assert summary["valid_count"] == 1, summary
+    proposals = list_proposals(config.registry_path)
+    validated = [p for p in proposals if p["status"] == "validated"]
+    assert len(validated) == 1
+    stored = validated[0]
+    # proposal_id is derived from the experiment_name, not labelled invalid_*.
+    assert not stored["proposal_id"].startswith("invalid_proposal")
+    assert stored["proposal_id"].startswith("minimal_global_mean")
+    # Parentage derived from the official champion.
+    assert stored["parent_experiment_id"] == "direct"
+    config_snapshot = stored.get("config") or {}
+    # experiment_config mirrors the single experiment_name and gets fixed prep.
+    assert config_snapshot["experiment_name"] == "minimal_global_mean"
+    assert config_snapshot["parent_experiment_id"] == "direct"
+    assert config_snapshot["preprocessing"]["claim_cap_threshold"] == 100000
+    # A research line was opened automatically (none existed).
+    lines = list_research_lines(config.registry_path)
+    assert len(lines) == 1
+    # The research node carries the derived tree-walk metadata.
+    nodes = list_research_nodes(config.registry_path)
+    assert nodes and nodes[0]["tree_metadata"]["tree_action"] == "new_root"
+
+
+def test_create_line_without_id_mints_new_line_when_one_exists(tmp_path: Path) -> None:
+    # Regression: an agent that sets research_line_action=create_line but omits
+    # research_line_id must get a brand-new line, never be bound to the existing
+    # one (which would fail "create_line requires a new research_line_id").
+    config = _config(tmp_path)
+    _record_direct(config)
+    initialise_official_champion(config)
+    upsert_research_line(
+        config.registry_path,
+        line_id="line_existing",
+        label="Existing line",
+        status="active",
+        root_node_id="line_existing",
+        hypothesis="A prior line.",
+    )
+
+    proposal = _minimal_proposal()
+    proposal["research_line_action"] = "create_line"
+    proposal["research_line_label"] = "Brand new line"
+    proposal["research_line_hypothesis"] = "A genuinely new direction."
+    # Deliberately no research_line_id.
+
+    summary = _ingest_single(config, proposal)
+
+    assert summary["valid_count"] == 1, summary
+    line_ids = {line["line_id"] for line in list_research_lines(config.registry_path)}
+    assert "line_existing" in line_ids
+    assert len(line_ids) == 2  # a new line was minted, not the existing one reused
+
+
+def test_hydration_does_not_override_agent_supplied_fields(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _record_direct(config)
+    initialise_official_champion(config)
+
+    proposal = _minimal_proposal()
+    proposal["research_line_id"] = "agent_chosen_line"
+    proposal["research_line_label"] = "Agent chosen label"
+    proposal["line_membership_rationale"] = "Deliberate line membership note."
+
+    summary = _ingest_single(config, proposal)
+
+    assert summary["valid_count"] == 1, summary
+    line = list_research_lines(config.registry_path)[0]
+    assert line["line_id"] == "agent_chosen_line"
+    assert line["label"] == "Agent chosen label"
 
 
 def test_exposure_is_rejected_as_model_feature(tmp_path: Path) -> None:

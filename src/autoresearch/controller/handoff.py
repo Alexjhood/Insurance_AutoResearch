@@ -66,48 +66,32 @@ def _write_proposal_template_files(config: ProjectConfig, context: dict[str, Any
 
 
 def _proposal_template(config: ProjectConfig, context: dict[str, Any]) -> dict[str, Any]:
-    """Return a proposal template aligned to the current champion and tree policy."""
+    """Return the minimal proposal template the agent fills in.
 
-    champion = context.get("official_champion") or {}
-    recommended_actions = ((context.get("research_tree") or {}).get("tree_policy") or {}).get("recommended_actions") or []
-    recommended_action = recommended_actions[0] if recommended_actions else {}
-    research_lines = (context.get("research_lines") or {}).get("active_lines") or []
-    selected_line = research_lines[0] if research_lines else {}
+    Only the scientific fields plus the ``experiment_config`` machine block are
+    required; the controller hydrates ids, parentage, tree-walk, research-line
+    label/hypothesis, and the fixed preprocessing at ingestion. See
+    :func:`autoresearch.controller.workflow._hydrate_derived_fields` and the
+    optional-override example in :func:`build_handoff`.
+    """
+
+    search_space = context.get("allowed_search_space") or {}
+    strategies = search_space.get("target_strategies") or ["direct_pure_premium"]
+    default_strategy = strategies[0]
     return {
-        "proposal_id": "short_unique_id",
-        "parent_experiment_id": champion.get("champion_id", "OFFICIAL_CHAMPION_ID"),
-        "parent_branch_id": champion.get("branch_id", "main"),
-        "research_line_action": "extend_line" if selected_line else "create_line",
-        "research_line_id": selected_line.get("line_id", "line_short_name"),
-        "research_line_label": selected_line.get("label", "Short research line label"),
-        "research_line_hypothesis": selected_line.get("hypothesis", "What this line is trying to learn."),
-        "line_membership_rationale": "Why this proposal belongs in this research line.",
-        "park_research_line_id": None,
-        "park_research_line_rationale": None,
-        "tree_action": recommended_action.get("tree_action", "new_root"),
-        "research_parent_node_id": recommended_action.get("parent_node_id"),
-        "selected_tree_action_id": recommended_action.get("action_id", "start_first_root"),
-        "parent_rationale": "Why this parent or new root is the right next tree step.",
-        "exploration_axis": "model_family",
-        "approach_family": "Broad approach family, not a prescribed implementation.",
-        "target_framing": "direct_pure_premium",
-        "feature_representation": "raw",
-        "expected_learning": "What this experiment should teach even if it fails.",
-        "branch_action": "new_branch",
         "experiment_name": "concise_experiment_name",
         "rationale": "Why this change is worth trying.",
         "change_summary": "Exact modelling/preprocessing change from parent.",
         "expected_benefit": "Expected improvement mechanism.",
         "key_risk": "Most likely failure mode.",
+        "exploration_axis": "model_family",
+        "approach_family": "Broad approach family, not a prescribed implementation.",
+        "target_framing": "direct_pure_premium",
+        "feature_representation": "raw",
+        "expected_learning": "What this experiment should teach even if it fails.",
         "experiment_config": {
-            "experiment_name": "concise_experiment_name",
             "model_family": "scripted_challenger",
-            "target_strategy": "direct_pure_premium",
-            "parent_experiment_id": champion.get("champion_id", "OFFICIAL_CHAMPION_ID"),
-            "preprocessing": {
-                "claim_capping_enabled": True,
-                "claim_cap_threshold": 100000,
-            },
+            "target_strategy": default_strategy,
             "model": {
                 "script_path": "model.py",
                 "feature_exclusions": [],
@@ -326,39 +310,37 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
     learning_lines = _render_recent_learnings(config, context)
 
     template_json = json.dumps({
-        "proposal_id": "<short_unique_id>",
-        "parent_experiment_id": champion_id,
-        "parent_branch_id": branch_id,
-        "research_line_action": "<create_line|extend_line|revisit_line|close_line>",
-        "research_line_id": "<line_short_name>",
-        "research_line_label": "<human readable line label>",
-        "research_line_hypothesis": "<what this local line is exploring>",
-        "line_membership_rationale": "<why this proposal belongs in this line>",
-        "park_research_line_id": None,
-        "park_research_line_rationale": None,
-        "tree_action": recommended_action.get("tree_action", "<tree_action>"),
-        "research_parent_node_id": recommended_action.get("parent_node_id"),
-        "selected_tree_action_id": recommended_action.get("action_id", "<recommended action_id>"),
-        "parent_rationale": "<why this tree parent or new root is appropriate>",
-        "exploration_axis": "<model_family|target_framing|feature_representation|calibration|hyperparameter|diagnostic_probe|data_slice|ensemble|other>",
-        "approach_family": "<broad approach family, without relying on another run's details>",
-        "target_framing": "<target framing used by the proposal>",
-        "feature_representation": "<feature representation used by the proposal>",
-        "expected_learning": "<what this experiment should teach even if it fails>",
-        "branch_action": "new_branch",
         "experiment_name": "<concise_name>",
         "rationale": "<why this change is worth trying>",
         "change_summary": "<exact modelling/preprocessing change from parent>",
         "expected_benefit": "<expected improvement mechanism>",
         "key_risk": "<most likely failure mode>",
+        "exploration_axis": "<model_family|target_framing|feature_representation|calibration|hyperparameter|diagnostic_probe|data_slice|ensemble|other>",
+        "approach_family": "<broad approach family, without relying on another run's details>",
+        "target_framing": "<target framing used by the proposal>",
+        "feature_representation": "<feature representation used by the proposal>",
+        "expected_learning": "<what this experiment should teach even if it fails>",
         "experiment_config": {
-            "experiment_name": "<concise_name>",
             "model_family": "scripted_challenger",
             "target_strategy": "direct_pure_premium",
-            "parent_experiment_id": champion_id,
-            "preprocessing": {"claim_capping_enabled": True, "claim_cap_threshold": 100000},
             "model": {"script_path": "model_<name>.py"},
         },
+    }, indent=2)
+
+    # Optional block — only include the keys you want to override. The controller
+    # otherwise derives ids/parentage, follows the top recommended tree action,
+    # and extends the most recent active research line.
+    override_json = json.dumps({
+        "research_line_id": (
+            (research_lines.get("active_lines") or [{}])[0].get("line_id", "<existing_line_id>")
+        ),
+        "research_line_action": "<create_line|extend_line|revisit_line|close_line>",
+        "research_line_label": "<label, only required when creating a new line>",
+        "research_line_hypothesis": "<hypothesis, only required when creating a new line>",
+        "tree_action": recommended_action.get("tree_action", "<tree_action>"),
+        "selected_tree_action_id": recommended_action.get("action_id", "<recommended action_id>"),
+        "research_parent_node_id": recommended_action.get("parent_node_id"),
+        "tree_policy_override_rationale": "<required only when diverging from the recommended action>",
     }, indent=2)
 
     from autoresearch.memory import resolve_memory_access
@@ -421,10 +403,26 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         f"Copy this to `{config.handoff_proposal_inbox_dir}/proposal_<name>.json` and fill in the `<...>` fields.",
         "Also write `model_<name>.py` (same directory) with a `fit_predict(train, score, ...)` function.",
         "Write exactly one proposal for this context refresh.",
+        "",
+        "Supply only the scientific fields below. The controller derives the rest "
+        "(`proposal_id`, parentage, `branch_action`, the tree-walk fields, the "
+        "research-line `label`/`hypothesis`, and the fixed `preprocessing`) — you "
+        "do not repeat them.",
         *deferred_lines,
         "",
         "```json",
         template_json,
+        "```",
+        "",
+        "By default the controller follows the top recommended tree action and "
+        "extends the most recent active research line. To override either, add only "
+        "the keys you want to change from this optional block (omit the rest). To "
+        "open a *new* line set `research_line_action` to `create_line` with a short "
+        "new `research_line_id` plus a `research_line_label`/`research_line_hypothesis`; "
+        "to extend an existing line use its id and you can omit the label/hypothesis:",
+        "",
+        "```json",
+        override_json,
         "```",
         "",
         "## Key constraints",
@@ -444,11 +442,11 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "- Scope: active run only. Do not use results from other runs as proposal evidence.",
         "- Choose `research_parent_node_id` from this tree when the next idea builds on a prior hypothesis; use `null` only for a genuinely new line of attack.",
         "- Cross-run memory, when enabled, may inform broad strategy but must not supply tree parent IDs or evidence for this run.",
-        "- Choose `research_line_action` and `research_line_id` so the run maintains a small number of coherent local research lines.",
+        "- By default a proposal extends the most recent active research line. To organise differently, set `research_line_id` (and `research_line_action`) via the optional override block so the run keeps a small number of coherent lines.",
         "- Keep at most 5 research lines active. When creating a new line at the cap, set `park_research_line_id` and explain why it should be parked.",
         "- A future `record-decision` can be `promote` for the whole run, `local_promote` for this line only, or `reject`.",
         "- The single-split hurdle uses this line's local incumbent where available; full comparison still reports against the official champion.",
-        "- Set `tree_action`, `selected_tree_action_id`, and `parent_rationale`; if you ignore the recommended action, include `tree_policy_override_rationale`.",
+        "- By default the controller takes the top recommended tree action. To choose a different one, set `tree_action`/`selected_tree_action_id` in the override block; if you ignore the recommended action, include `tree_policy_override_rationale`.",
         "- Prefer genuine exploration over repetitive small retunes. A useful child idea should change the hypothesis, representation, target framing, or error mode it addresses.",
         "- Clear failures and auto-rejections are evidence. Reflect on them, then branch only when the child idea is materially different.",
         "",
@@ -474,38 +472,33 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
 def proposal_schema_document(config: ProjectConfig, context: dict[str, Any]) -> dict[str, Any]:
     """Export an inspectable proposal schema description."""
 
+    from autoresearch.controller.proposal_schema import (
+        DERIVED_PROPOSAL_FIELDS,
+        SCIENTIFIC_PROPOSAL_FIELDS,
+    )
+
     return {
         "type": "object",
-        "required": [
-            "proposal_id",
-            "parent_experiment_id",
+        "required": [*SCIENTIFIC_PROPOSAL_FIELDS, "experiment_config"],
+        "controller_derived": [
+            *DERIVED_PROPOSAL_FIELDS,
             "parent_branch_id",
             "branch_action",
-            "research_line_action",
-            "research_line_id",
-            "research_line_label",
-            "research_line_hypothesis",
-            "line_membership_rationale",
-            "tree_action",
-            "selected_tree_action_id",
-            "parent_rationale",
-            "exploration_axis",
-            "approach_family",
-            "target_framing",
-            "feature_representation",
-            "expected_learning",
-            "experiment_name",
-            "rationale",
-            "change_summary",
-            "expected_benefit",
-            "key_risk",
-            "experiment_config",
+            "research_parent_node_id",
+            "experiment_config.experiment_name",
+            "experiment_config.parent_experiment_id",
+            "experiment_config.preprocessing",
         ],
+        "experiment_config_required": ["model_family", "target_strategy", "model.script_path"],
         "allowed_search_space": context["allowed_search_space"],
         "notes": [
-            "proposal_id must use letters, numbers, hyphen, or underscore.",
-            "experiment_config.experiment_name must equal experiment_name.",
-            "experiment_config.parent_experiment_id must equal parent_experiment_id.",
+            "Supply only the required scientific fields plus experiment_config "
+            "(model_family, target_strategy, model.script_path); the controller "
+            "hydrates every controller_derived field at ingestion.",
+            "Any controller_derived field may still be supplied to override its default.",
+            "proposal_id, when supplied, must use letters, numbers, hyphen, or underscore.",
+            "experiment_config.experiment_name (derived) mirrors experiment_name.",
+            "experiment_config.parent_experiment_id (derived) mirrors parent_experiment_id.",
             "experiment_config.model.script_path is required for non-global_mean autonomous experiments.",
             "Do not use exposure_term_a as a predictive feature; it is reserved for weights and response calculations.",
             "research_parent_node_id is optional and may only point to a node from this active run's research_tree.",

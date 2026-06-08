@@ -7,7 +7,7 @@ small *and* prevent the manual from drifting out of sync with the CLI, the
 runtime contract is generated here from authoritative, importable sources:
 
 * command names      -> ``autoresearch.cli.COMMANDS``
-* proposal fields    -> ``autoresearch.controller.proposal_schema.REQUIRED_PROPOSAL_TEXT_FIELDS``
+* proposal fields    -> ``autoresearch.controller.proposal_schema.SCIENTIFIC_PROPOSAL_FIELDS``
 * column constants   -> ``autoresearch.models.dispatcher``
 * protected files    -> ``autoresearch.utils.integrity.PROTECTED_RELATIVE_PATHS``
 * compute/gate/target-> ``configs/default.toml``
@@ -36,7 +36,8 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from autoresearch.cli import COMMANDS  # noqa: E402
 from autoresearch.controller.proposal_schema import (  # noqa: E402
-    REQUIRED_PROPOSAL_TEXT_FIELDS,
+    DERIVED_PROPOSAL_FIELDS,
+    SCIENTIFIC_PROPOSAL_FIELDS,
 )
 from autoresearch.models import dispatcher  # noqa: E402
 from autoresearch.utils.integrity import PROTECTED_RELATIVE_PATHS  # noqa: E402
@@ -106,7 +107,8 @@ def render() -> str:
     const_lines = "\n".join(
         f"- `{name} = \"{value}\"` — {desc}" for name, value, desc in _COLUMN_CONSTANTS
     )
-    proposal_fields = ", ".join(f"`{f}`" for f in REQUIRED_PROPOSAL_TEXT_FIELDS)
+    proposal_fields = ", ".join(f"`{f}`" for f in SCIENTIFIC_PROPOSAL_FIELDS)
+    derived_fields = ", ".join(f"`{f}`" for f in DERIVED_PROPOSAL_FIELDS)
 
     return f"""\
 <!-- GENERATED FILE — DO NOT EDIT BY HAND.
@@ -297,14 +299,23 @@ exploration axis after 2 same-axis experiments and cap same-model-family tuning
 at 3. A plateau forces a **structural** change (new family or target framing),
 not more tuning — re-tuning at a plateau is provably below the gate's noise floor.
 
-## Proposal contract (required top-level fields)
+## Proposal contract (what you must supply)
+
+Supply only the fields that encode your scientific choice:
 
 {proposal_fields}
 
-The handoff embeds the exact proposal template, including the nested
-`experiment_config` and every field's placeholder — fill those in rather than
-reading a separate schema file. Slimmer JSON is rejected at ingestion and wastes
-a cycle.
+plus an `experiment_config` with `model_family`, `target_strategy`, and
+`model.script_path` (point it at your `model_<name>.py`).
+
+The controller derives everything else from the champion, the recommended tree
+action, and the research-line registry — you do **not** need to send:
+{derived_fields}, `parent_branch_id`, `branch_action`, the fixed
+`preprocessing` block, or the duplicate `experiment_config.experiment_name` /
+`experiment_config.parent_experiment_id`. To deviate from a default (e.g. a
+different tree parent or research line), set that field explicitly; when you
+diverge from the recommended tree action, also include
+`tree_policy_override_rationale`. The handoff embeds a ready-to-fill template.
 """
 
 

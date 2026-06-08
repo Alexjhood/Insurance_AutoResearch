@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 import json
+import re
 import sqlite3
 from pathlib import Path
 import shutil
@@ -421,6 +422,140 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
 
 
 
+def _is_blank(value: Any) -> bool:
+    """True when a proposal text field is missing or empty."""
+
+    return not isinstance(value, str) or not value.strip()
+
+
+def _fixed_claim_cap(config: ProjectConfig) -> int:
+    """Return the run's fixed claim-cap threshold from the search space."""
+
+    prep = (getattr(config, "search_space", {}) or {}).get("preprocessing", {})
+    thresholds = prep.get("claim_cap_thresholds") or [100000]
+    return thresholds[0]
+
+
+def _hydrate_research_line(config: ProjectConfig, parsed: dict[str, Any]) -> None:
+    """Fill research-line fields the agent omitted.
+
+    An explicit ``research_line_id`` is honoured: an existing line inherits its
+    stored label/hypothesis (so the agent need not restate them), and an unknown
+    id is treated as a new line. With no id, the proposal extends the most recent
+    active line, or opens a first line when none exist.
+    """
+
+    fallback_hypothesis = (
+        parsed.get("rationale")
+        or parsed.get("expected_learning")
+        or "Exploration line for this run."
+    )
+
+    def _open_new_line(new_id: str) -> None:
+        parsed["research_line_id"] = new_id
+        parsed["research_line_action"] = "create_line"
+        if _is_blank(parsed.get("research_line_label")):
+            parsed["research_line_label"] = parsed.get("experiment_name") or new_id
+        if _is_blank(parsed.get("research_line_hypothesis")):
+            parsed["research_line_hypothesis"] = fallback_hypothesis
+
+    def _bind_existing_line(line: dict[str, Any]) -> None:
+        parsed["research_line_id"] = line["line_id"]
+        parsed.setdefault("research_line_action", "extend_line")
+        if _is_blank(parsed.get("research_line_label")):
+            parsed["research_line_label"] = line.get("label") or line["line_id"]
+        if _is_blank(parsed.get("research_line_hypothesis")):
+            parsed["research_line_hypothesis"] = line.get("hypothesis") or fallback_hypothesis
+
+    line_id = parsed.get("research_line_id")
+    if isinstance(line_id, str) and line_id.strip():
+        existing = get_research_line(config.registry_path, line_id)
+        if existing is not None:
+            _bind_existing_line(existing)
+        else:
+            # An explicit but unknown id is a new line.
+            parsed.setdefault("research_line_action", "create_line")
+            if _is_blank(parsed.get("research_line_label")):
+                parsed["research_line_label"] = parsed.get("experiment_name") or line_id
+            if _is_blank(parsed.get("research_line_hypothesis")):
+                parsed["research_line_hypothesis"] = fallback_hypothesis
+        return
+
+    # No id supplied. Mint a new id when there is nothing to extend or when the
+    # agent explicitly asked to create a line; otherwise extend the most recent
+    # active line. This keeps research_line_action and research_line_id
+    # consistent — an agent that says `create_line` without an id never gets
+    # bound to a pre-existing line.
+    active = list_research_lines(config.registry_path, status="active")
+    if not active or parsed.get("research_line_action") == "create_line":
+        _open_new_line(f"line_{parsed['proposal_id']}"[:80])
+    else:
+        _bind_existing_line(active[0])
+
+
+def _hydrate_derived_fields(
+    config: ProjectConfig,
+    parsed: dict[str, Any],
+    champion: dict[str, Any],
+    context: dict[str, Any],
+) -> None:
+    """Fill controller-derivable proposal fields the agent may omit.
+
+    Only absent/blank fields are filled, so a fully specified (legacy) proposal
+    is left untouched and any value the agent does supply always wins. Validation
+    runs afterwards as a safety net (see ``REQUIRED_PROPOSAL_TEXT_FIELDS``).
+    """
+
+    # Identity + parentage: the official champion is the only valid parent.
+    parsed.setdefault("proposal_id", _proposal_id(parsed))
+    if _is_blank(parsed.get("parent_experiment_id")):
+        parsed["parent_experiment_id"] = champion["champion_id"]
+    if _is_blank(parsed.get("parent_branch_id")):
+        parsed["parent_branch_id"] = champion["branch_id"]
+    parsed.setdefault("branch_action", "new_branch")
+
+    # Tree-walk defaults from the top recommended action; an agent that wants a
+    # different action supplies it (with tree_policy_override_rationale when it
+    # diverges from the recommendation).
+    policy = (context.get("research_tree") or {}).get("tree_policy") or {}
+    recommended = policy.get("recommended_actions") or []
+    rec = recommended[0] if recommended else {}
+    if _is_blank(parsed.get("tree_action")):
+        parsed["tree_action"] = rec.get("tree_action") or "new_root"
+    if _is_blank(parsed.get("selected_tree_action_id")):
+        parsed["selected_tree_action_id"] = rec.get("action_id") or "start_first_root"
+    if "research_parent_node_id" not in parsed:
+        parsed["research_parent_node_id"] = rec.get("parent_node_id")
+    if _is_blank(parsed.get("parent_rationale")):
+        parsed["parent_rationale"] = (
+            f"Follows recommended tree action {parsed['selected_tree_action_id']}."
+        )
+
+    _hydrate_research_line(config, parsed)
+    if _is_blank(parsed.get("line_membership_rationale")):
+        parsed["line_membership_rationale"] = (
+            parsed.get("rationale") or "Belongs to this research line."
+        )
+
+    # experiment_config: mirror the single experiment_name / parent id the agent
+    # gave and apply the run's fixed preprocessing so the agent need not restate
+    # any of it.
+    exp_config = parsed.get("experiment_config")
+    if isinstance(exp_config, dict):
+        if _is_blank(exp_config.get("experiment_name")) and not _is_blank(
+            parsed.get("experiment_name")
+        ):
+            exp_config["experiment_name"] = parsed["experiment_name"]
+        if _is_blank(exp_config.get("parent_experiment_id")):
+            exp_config["parent_experiment_id"] = parsed["parent_experiment_id"]
+        prep = exp_config.get("preprocessing")
+        if not isinstance(prep, dict) or not prep:
+            exp_config["preprocessing"] = {
+                "claim_capping_enabled": True,
+                "claim_cap_threshold": _fixed_claim_cap(config),
+            }
+
+
 def _validate_and_normalise(
     config: ProjectConfig,
     parsed: dict[str, Any],
@@ -431,6 +566,7 @@ def _validate_and_normalise(
     if not isinstance(parsed.get("experiment_config"), dict):
         parsed["experiment_config"] = {}
     context = build_llm_context(config)
+    _hydrate_derived_fields(config, parsed, champion, context)
     space = allowed_search_space(config, context.get("agent_schema"))
     errors = validate_proposal(parsed, space)
     if parsed.get("parent_experiment_id") != champion["champion_id"]:
@@ -882,11 +1018,31 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _slugify_id(text: str) -> str:
+    """Reduce free text to the proposal-id charset ([A-Za-z0-9_-])."""
+
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "_", text).strip("_")
+    return slug[:60]
+
+
 def _proposal_id(parsed: dict[str, Any] | None) -> str:
-    if parsed and isinstance(parsed.get("proposal_id"), str):
+    """Return the proposal id, deriving a meaningful one when none was supplied.
+
+    Under the minimal proposal contract the agent legitimately omits
+    ``proposal_id`` (the controller derives it), so the fallback is built from the
+    agent's ``experiment_name`` plus a timestamp uniquifier rather than being
+    labelled ``invalid_*``. Only a proposal with neither id nor usable name — i.e.
+    a genuinely malformed one — falls back to a neutral stamped id.
+    """
+
+    if parsed and isinstance(parsed.get("proposal_id"), str) and parsed["proposal_id"].strip():
         return parsed["proposal_id"]
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    return f"invalid_proposal_{stamp}"
+    name = parsed.get("experiment_name") if parsed else None
+    slug = _slugify_id(name) if isinstance(name, str) else ""
+    if slug:
+        return f"{slug}_{stamp}"
+    return f"proposal_{stamp}"
 
 
 def _hydrate_proposal_from_path(proposal: dict[str, Any]) -> dict[str, Any]:

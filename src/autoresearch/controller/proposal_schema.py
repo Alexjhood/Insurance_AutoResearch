@@ -42,18 +42,36 @@ RESEARCH_LINE_ACTIONS = {
     "close_line",
 }
 
-# Required free-text top-level proposal fields. Kept module-level so the agent
-# runtime-contract generator (scripts/generate_agent_contract.py) can render the
-# proposal contract from the single source of truth and stay in sync.
-REQUIRED_PROPOSAL_TEXT_FIELDS = [
-    "proposal_id", "parent_experiment_id", "experiment_name",
+# Top-level free-text proposal fields, partitioned by who is responsible for
+# them. Kept module-level so the agent runtime-contract generator
+# (scripts/generate_agent_contract.py), the handoff template, and the schema
+# document all render from this single source of truth and stay in sync.
+#
+# SCIENTIFIC fields encode a genuine modelling choice only the proposing agent
+# can make, so the agent must supply them.
+SCIENTIFIC_PROPOSAL_FIELDS = [
+    "experiment_name",
     "rationale", "change_summary", "expected_benefit", "key_risk",
-    "tree_action", "parent_rationale", "exploration_axis",
-    "approach_family", "target_framing", "feature_representation",
-    "expected_learning", "selected_tree_action_id",
+    "exploration_axis", "approach_family", "target_framing",
+    "feature_representation", "expected_learning",
+]
+
+# DERIVED fields are filled by the controller (see
+# autoresearch.controller.workflow.hydrate_derived_fields) from the champion,
+# the recommended tree action, and the research-line registry when the agent
+# omits them. They remain *required* after hydration so the stored record and
+# downstream surfaces (research tree, reports) stay complete; an agent may still
+# supply any of them to override the default.
+DERIVED_PROPOSAL_FIELDS = [
+    "proposal_id", "parent_experiment_id",
+    "tree_action", "parent_rationale", "selected_tree_action_id",
     "research_line_action", "research_line_id", "research_line_label",
     "research_line_hypothesis", "line_membership_rationale",
 ]
+
+# Validation iterates this union *after* hydration; it is the safety net that
+# guarantees every record is complete regardless of which fields the agent sent.
+REQUIRED_PROPOSAL_TEXT_FIELDS = SCIENTIFIC_PROPOSAL_FIELDS + DERIVED_PROPOSAL_FIELDS
 
 TARGET_COLUMNS = {
     "record_id",
