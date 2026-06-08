@@ -158,17 +158,21 @@ existing artifacts to infer intent.
    Capture the returned timestamped `run_id`; pass `--run-id <id>` thereafter.
    For an explicit continuation, skip bootstrap and resolve latest once with
    `start-session`, then pin the resolved id.
-2. **Read the handoff** (`show-latest-handoff`) and this run's
-   `RESEARCH_LOG.md` before forming any hypothesis.
+2. **Read the handoff** (`show-latest-handoff`) before forming any hypothesis.
+   It is authoritative: champion, recent results and learnings, recommended tree
+   actions, key constraints, and the exact proposal template are all embedded
+   inline. Open this run's `RESEARCH_LOG.md` or `latest_context.json` only when
+   you need older detail than the handoff already carries.
 3. **Propose one idea per context refresh.** Write a proposal JSON + a
    neighbouring model script into **this run's** inbox. The handoff prints its
    exact path (`Inbox: ... ← write proposal JSON + model script here`); for a
    tracked run it is
    `artifacts/tracks/<track>/runs/<run-id>/proposal_inbox/` — **not** the
    repo-root `proposal_inbox/` (that legacy path is used only for untracked
-   runs and stays empty here). Read the `proposal_template.json` in that same
-   run inbox once for the exact schema. At most one queued proposal is ingested
-   per refresh; extra JSON files stay deferred.
+   runs and stays empty here). The handoff prints the exact proposal template
+   inline — copy it and fill the `<...>` fields; no separate schema-file read is
+   needed. At most one queued proposal is ingested per refresh; extra JSON files
+   stay deferred.
 4. **Run + decide, looping one cycle at a time:**
    ```bash
    autoresearch --track <t> --run-id <id> run-session-cycles 1   # stops at awaiting_decision
@@ -297,8 +301,10 @@ not more tuning — re-tuning at a plateau is provably below the gate's noise fl
 
 {proposal_fields}
 
-Read `proposal_inbox/proposal_template.json` once for types and the nested
-`experiment_config`. Slimmer JSON is rejected at ingestion and wastes a cycle.
+The handoff embeds the exact proposal template, including the nested
+`experiment_config` and every field's placeholder — fill those in rather than
+reading a separate schema file. Slimmer JSON is rejected at ingestion and wastes
+a cycle.
 """
 
 

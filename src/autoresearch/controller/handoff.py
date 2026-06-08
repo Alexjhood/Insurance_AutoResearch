@@ -323,6 +323,7 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
     recommended_action = recommended_actions[0] if recommended_actions else {}
     action_lines = _render_tree_policy_lines(recommended_actions)
     deferred_lines = _render_deferred_proposal_warning(config)
+    learning_lines = _render_recent_learnings(config, context)
 
     template_json = json.dumps({
         "proposal_id": "<short_unique_id>",
@@ -404,7 +405,10 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
     lines = [
         "# Auto-Research Handoff",
         "",
-        "Read `AGENT.md` for the full operating manual.",
+        "This handoff is the authoritative context for proposing the next experiment — "
+        "champion, recent results and learnings, recommended tree actions, key constraints, "
+        "and the full proposal template are all inline below. Read `AGENT.md` for the runtime "
+        "contract; the files under \"Optional drill-down\" only when you need more detail.",
         "",
         "## Current state",
         "",
@@ -454,11 +458,15 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         *action_lines,
         "",
         *node_lines,
+        *learning_lines,
         *_playbook_link_lines,
         "",
-        "## Context JSON (full detail)",
+        "## Optional drill-down",
         "",
-        f"`{config.handoff_context_dir / 'latest_context.json'}`",
+        "The handoff above is authoritative for proposing. Read these only when you "
+        "need detail it does not already carry:",
+        f"- Full context JSON: `{config.handoff_context_dir / 'latest_context.json'}`",
+        f"- Narrative research log: `{config.research_log_path}`",
     ]
     return "\n".join(lines) + "\n"
 
@@ -531,20 +539,90 @@ def _next_supervised_command(config: ProjectConfig, context: dict[str, Any]) -> 
     return f"autoresearch --track {config.track_id} --run-id {config.run_id} run-session-cycle"
 
 
+def _render_recent_learnings(config: ProjectConfig, context: dict[str, Any]) -> list[str]:
+    """Inline the most recent non-promotions + last research-log entry.
+
+    Surfacing these in the handoff removes the agent's need to read the full
+    ``RESEARCH_LOG.md`` or per-proposal non-promotion files on every cycle.
+    """
+    learning_lines: list[str] = []
+
+    non_promoted_dir = config.handoff_results_dir / "non_promoted"
+    summaries: list[dict[str, Any]] = []
+    if non_promoted_dir.exists():
+        files = sorted(
+            non_promoted_dir.glob("*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for path in files[:3]:
+            try:
+                summaries.append(read_json(path))
+            except (OSError, json.JSONDecodeError):
+                continue
+    if summaries:
+        learning_lines.append("Recent non-promotions (most recent first):")
+        for item in summaries:
+            name = item.get("experiment_name") or item.get("proposal_id") or "unknown"
+            outcome = item.get("outcome_type") or "inconclusive"
+            reason = (item.get("reason") or "").strip()
+            if len(reason) > 160:
+                reason = reason[:160] + "…"
+            guidance = (item.get("agent_guidance") or "").strip()
+            if len(guidance) > 160:
+                guidance = guidance[:160] + "…"
+            entry = f"- `{name}` ({outcome}): {reason}"
+            if guidance:
+                entry += f" — guidance: {guidance}"
+            learning_lines.append(entry)
+
+    log_tail = _research_log_tail(config)
+    if log_tail:
+        if learning_lines:
+            learning_lines.append("")
+        learning_lines.append("Last research-log entry:")
+        learning_lines.extend(f"> {line}" if line else ">" for line in log_tail.splitlines())
+
+    if not learning_lines:
+        return []
+    return ["", "## Recent learnings", "", *learning_lines]
+
+
+def _research_log_tail(config: ProjectConfig, max_chars: int = 600) -> str:
+    """Return the final ``## ``-delimited entry of this run's research log, bounded."""
+    path = config.research_log_path
+    if not path.exists():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if not text:
+        return ""
+    marker = "\n## "
+    idx = text.rfind(marker)
+    entry = text[idx + 1:] if idx != -1 else text
+    entry = entry.strip()
+    if len(entry) > max_chars:
+        entry = entry[-max_chars:].lstrip()
+    return entry
+
+
 def _render_tree_node_lines(nodes: list[dict[str, Any]]) -> list[str]:
     if not nodes:
         return ["No research-tree nodes yet. Start with a small, well-motivated first hypothesis."]
     lines = ["Recent active-run nodes:"]
     for node in nodes[:8]:
-        metrics = node.get("metrics") or {}
-        lift = metrics.get("lift") if "lift" in metrics else metrics.get("mean_lift")
+        lift = node.get("lift")
         lift_text = f", lift={lift}" if lift is not None else ""
-        summary = node.get("change_summary") or node.get("expected_benefit") or ""
+        axis = node.get("exploration_axis")
+        axis_text = f", axis={axis}" if axis else ""
+        summary = node.get("learning") or ""
         if len(summary) > 120:
             summary = summary[:120] + "..."
         lines.append(
             f"- `{node.get('node_id')}` status={node.get('status')}"
-            f", outcome={node.get('outcome_type')}{lift_text}: {summary}"
+            f", outcome={node.get('outcome_type')}{axis_text}{lift_text}: {summary}"
         )
     return lines
 

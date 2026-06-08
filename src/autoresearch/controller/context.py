@@ -246,30 +246,35 @@ def _parse_registry_time(value: object) -> datetime | None:
 
 
 def _compact_research_nodes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    keys = [
-        "node_id",
-        "line_id",
-        "parent_node_id",
-        "proposal_id",
-        "status",
-        "outcome_type",
-        "experiment_id",
-        "comparison_id",
-        "change_summary",
-        "expected_benefit",
-        "key_risk",
-        "metrics",
-        "guidance",
-        "tree_metadata",
-    ]
+    """Reduce each research node to the enums + one learning sentence the planner needs.
+
+    Verbose prose (``expected_benefit``, ``key_risk``, ``guidance``) and the full
+    ``tree_metadata`` / ``metrics`` blobs are dropped from the proposer-facing
+    payload — they are the dominant context-size driver and are reachable via the
+    registry when a drill-down genuinely needs them. ``exploration_axis`` is
+    promoted to a top-level field so :func:`_build_tree_policy` keeps working.
+    """
     result = []
     for row in rows:
-        item = {key: row.get(key) for key in keys}
-        for text_key in ("change_summary", "expected_benefit", "key_risk", "guidance"):
-            value = item.get(text_key) or ""
-            if len(value) > 220:
-                item[text_key] = value[:220] + "…"
-        result.append(item)
+        metrics = row.get("metrics") or {}
+        metadata = row.get("tree_metadata") or {}
+        learning = row.get("change_summary") or row.get("expected_benefit") or ""
+        if len(learning) > 140:
+            learning = learning[:140] + "…"
+        result.append({
+            "node_id": row.get("node_id"),
+            "parent_node_id": row.get("parent_node_id"),
+            "line_id": row.get("line_id"),
+            "proposal_id": row.get("proposal_id"),
+            "experiment_id": row.get("experiment_id"),
+            "comparison_id": row.get("comparison_id"),
+            "status": row.get("status"),
+            "outcome_type": row.get("outcome_type"),
+            "exploration_axis": metadata.get("exploration_axis"),
+            "score": metrics.get("score", metrics.get("mean_score")),
+            "lift": metrics.get("lift", metrics.get("mean_lift")),
+            "learning": learning,
+        })
     return result
 
 
@@ -423,8 +428,11 @@ def _build_tree_policy(champion: dict[str, Any] | None, nodes: list[dict[str, An
 
 
 def _node_axis(node: dict[str, Any]) -> str | None:
-    metadata = node.get("tree_metadata") or {}
-    axis = metadata.get("exploration_axis")
+    # Compact context nodes expose exploration_axis at the top level; raw registry
+    # nodes carry it inside tree_metadata. Accept either shape.
+    axis = node.get("exploration_axis")
+    if not axis:
+        axis = (node.get("tree_metadata") or {}).get("exploration_axis")
     return str(axis) if axis else None
 
 
