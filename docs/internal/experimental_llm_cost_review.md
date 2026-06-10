@@ -403,7 +403,12 @@ Do not require the LLM to rewrite 60-120 lines when changing one parameter.
 
 ## 9. Cache the Test Gate by Relevant Code Hash
 
-Priority: P0
+Priority: P0 — **Implemented.** Successful pytest-gate results are cached per
+run using a fingerprint of test-relevant source/config contents plus the active
+Python interpreter, platform, and installed package versions. Bootstrap runs or
+reuses the gate explicitly; direct experiment runs retain the same protection.
+Failures and experiment-specific scans, preflight, and prediction/output
+validation are never cached.
 
 Run the full suite:
 

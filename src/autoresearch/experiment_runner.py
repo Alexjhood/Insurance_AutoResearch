@@ -69,7 +69,7 @@ from autoresearch.run_artifacts import next_iteration_dir
 from autoresearch.utils.environment import capture_environment
 from autoresearch.utils.integrity import (
     check_integrity,
-    run_pytest,
+    ensure_pytest_gate,
     scan_file_for_holdout_access,
     scan_file_for_non_predictive_feature_use,
     scan_for_holdout_access,
@@ -123,9 +123,9 @@ def run_experiment(
         raise ValueError(msg)
 
     # ── Gate 2: mandatory pytest ─────────────────────────────────────────────
-    pytest_passed, pytest_output = run_pytest(config.root)
-    if not pytest_passed:
-        msg = f"Pytest gate failed — fix tests before running experiments.\n{pytest_output}"
+    pytest_gate = ensure_pytest_gate(config.root, config.artifacts_dir)
+    if not pytest_gate["passed"]:
+        msg = f"Pytest gate failed — fix tests before running experiments.\n{pytest_gate['output']}"
         record_experiment(
             config.registry_path,
             experiment_id=experiment_id,

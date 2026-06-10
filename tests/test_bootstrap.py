@@ -47,6 +47,7 @@ def test_bootstrap_track_reuses_existing_baseline_and_exports_context(tmp_path: 
     assert get_official_champion(config.registry_path)["champion_id"] == "direct"
     assert [step["step"] for step in result["steps"]] == [
         "prepare-data",
+        "test-gate",
         "init-registry",
         "run-starting-baseline",
         "init-official-champion",
@@ -54,7 +55,7 @@ def test_bootstrap_track_reuses_existing_baseline_and_exports_context(tmp_path: 
         "export-context",
     ]
     assert result["steps"][0]["status"] == "skipped"
-    assert result["steps"][2]["status"] == "skipped"
+    assert result["steps"][3]["status"] == "skipped"
 
 
 def test_bootstrap_reruns_prepare_data_when_holdout_missing(tmp_path: Path, monkeypatch) -> None:
@@ -98,7 +99,7 @@ def test_bootstrap_track_runs_only_global_mean_config(tmp_path: Path, monkeypatc
 
     result = bootstrap_track(config)
 
-    assert result["steps"][2]["status"] == "ran"
+    assert result["steps"][3]["status"] == "ran"
     assert calls == ["global_mean.toml"]
     assert get_official_champion(config.registry_path)["champion_id"] == "direct"
 
@@ -128,6 +129,44 @@ def test_bootstrap_track_reports_global_mean_failure(tmp_path: Path, monkeypatch
 
     with pytest.raises(ValueError, match=r"global_mean\.toml: broken baseline"):
         bootstrap_track(config)
+
+
+def test_bootstrap_materialises_run_before_test_gate(tmp_path: Path, monkeypatch) -> None:
+    config = _config(tmp_path)
+    track_base = tmp_path / "tracks" / "test"
+    run_dir = track_base / "runs" / "20260610T072525Z"
+    config = replace(
+        config,
+        track_base_dir=track_base,
+        artifacts_dir=run_dir,
+        registry_path=run_dir / "registry.sqlite",
+        research_log_path=run_dir / "RESEARCH_LOG.md",
+        handoff_base_dir=run_dir,
+        handoff_context_dir=run_dir / "context",
+        handoff_proposal_inbox_dir=run_dir / "proposal_inbox",
+        handoff_proposal_processed_dir=run_dir / "proposal_processed",
+        handoff_results_dir=run_dir / "results",
+        handoff_handoffs_dir=run_dir / "handoffs",
+        proposal_inbox_file=run_dir / "proposal_inbox" / "manual_proposals.jsonl",
+        run_id="20260610T072525Z",
+    )
+    _write_prepared_data_markers(config)
+    monkeypatch.setattr(
+        "autoresearch.bootstrap.ensure_pytest_gate",
+        lambda root, cache_dir: {
+            "passed": False,
+            "cached": False,
+            "skipped": False,
+            "output": "failed",
+        },
+    )
+
+    with pytest.raises(ValueError, match="Pytest gate failed"):
+        bootstrap_track(config)
+
+    assert (run_dir / "run_manifest.json").exists()
+    latest = (track_base / "latest_run.json").read_text(encoding="utf-8")
+    assert "20260610T072525Z" in latest
 
 
 def test_bootstrap_track_requires_named_track(tmp_path: Path) -> None:

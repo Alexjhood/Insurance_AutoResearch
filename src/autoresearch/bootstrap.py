@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from autoresearch.config import ProjectConfig
+from autoresearch.config import ProjectConfig, ensure_project_dirs
 from autoresearch.controller.champion import initialise_official_champion
 from autoresearch.controller.handoff import export_context_bundle, write_proposal_template
 from autoresearch.data.pipeline import prepare_data
@@ -16,6 +16,7 @@ from autoresearch.experiment_registry.registry import (
 )
 from autoresearch.experiment_runner import run_experiment
 from autoresearch.run_artifacts import bootstrap_iteration_dir
+from autoresearch.utils.integrity import ensure_pytest_gate
 
 
 def bootstrap_track(
@@ -41,6 +42,10 @@ def bootstrap_track(
             "Use --model-version and --harness for additional context."
         )
 
+    # Persist the selected run before any fallible gate so retries and harness
+    # scope binding cannot fall back to a previous run.
+    ensure_project_dirs(config)
+
     steps: list[dict[str, Any]] = []
 
     if prepare_shared_data:
@@ -65,6 +70,22 @@ def bootstrap_track(
             )
     else:
         steps.append({"step": "prepare-data", "status": "skipped", "reason": "disabled by caller"})
+
+    test_gate = ensure_pytest_gate(config.root, config.artifacts_dir)
+    steps.append(
+        {
+            "step": "test-gate",
+            "status": (
+                "skipped" if test_gate.get("skipped")
+                else "cached" if test_gate.get("cached")
+                else "ran"
+            ),
+            "duration_seconds": test_gate.get("duration_seconds"),
+            "output": test_gate.get("output"),
+        }
+    )
+    if not test_gate["passed"]:
+        raise ValueError("Pytest gate failed during bootstrap:\n" + str(test_gate["output"]))
 
     registry_existed = config.registry_path.exists()
     registry_path = init_registry(config.registry_path)

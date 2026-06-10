@@ -24,24 +24,21 @@ _AUTORESEARCH = cfg.AUTORESEARCH_BIN
 
 SEED_TEMPLATES = {
     "claude": dedent("""\
-        Read AGENT.md, then bootstrap a new run under track "{track}" \
-        with run id "{run_id}" and run {cycles} cycles. \
+        Read AGENT.md, then run `autoresearch --track {track} --run-id {run_id} bootstrap-track --model-provider {model_provider} --model-name {model_name}` and complete {cycles} cycles in that exact run. \
         Use synthetic data — data/processed/agent_dataset_search.parquet already exists. \
-        Pass --model-provider {model_provider} --model-name {model_name} to bootstrap-track. \
+        Do not use `--new-run`. \
         {guidance}
     """),
     "codex": dedent("""\
-        Read AGENT.md, then bootstrap a new run under track "{track}" \
-        with run id "{run_id}" and run {cycles} cycles. \
+        Read AGENT.md, then run `autoresearch --track {track} --run-id {run_id} bootstrap-track --model-provider {model_provider} --model-name {model_name}` and complete {cycles} cycles in that exact run. \
         Use synthetic data — data/processed/agent_dataset_search.parquet already exists. \
-        Pass --model-provider {model_provider} --model-name {model_name} to bootstrap-track. \
+        Do not use `--new-run`. \
         {guidance}
     """),
     "opencode": dedent("""\
-        Read AGENT.md, then bootstrap a new run under track "{track}" \
-        with run id "{run_id}" and run {cycles} cycles. \
+        Read AGENT.md, then run `autoresearch --track {track} --run-id {run_id} bootstrap-track --model-provider {model_provider} --model-name {model_name}` and complete {cycles} cycles in that exact run. \
         Use synthetic data — data/processed/agent_dataset_search.parquet already exists. \
-        Pass --model-provider {model_provider} --model-name {model_name} to bootstrap-track. \
+        Do not use `--new-run`. \
         {guidance}
     """),
 }
@@ -55,6 +52,8 @@ def _build_env(job: dict) -> dict:
     env = {**os.environ}
     env["AUTORESEARCH_SCOPE"] = job.get("scope", "research")
     env["AUTORESEARCH_MEMORY_ACCESS"] = job.get("memory_access", "none")
+    env["AUTORESEARCH_TRACK"] = job["track"]
+    env["AUTORESEARCH_RUN_ID"] = job["run_id"]
     if cfg.CLAUDE_BIN:
         env["CLAUDE_BIN"] = cfg.CLAUDE_BIN
     if cfg.CODEX_BIN:

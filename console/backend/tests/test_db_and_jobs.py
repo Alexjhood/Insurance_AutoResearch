@@ -131,6 +131,33 @@ def test_reattach_marks_running_interrupted():
         assert any("interrupted" in (e["payload_json"] or "") for e in events)
 
 
+def test_job_environment_binds_agent_to_assigned_run():
+    import console.backend.orchestrator.jobs as jobs
+
+    env = jobs._build_env(
+        {
+            "scope": "research",
+            "memory_access": "none",
+            "track": "codex",
+            "run_id": "20260610T072525Z",
+        }
+    )
+
+    assert env["AUTORESEARCH_TRACK"] == "codex"
+    assert env["AUTORESEARCH_RUN_ID"] == "20260610T072525Z"
+
+    prompt = jobs.SEED_TEMPLATES["codex"].format(
+        track="codex",
+        run_id="20260610T072525Z",
+        cycles=3,
+        model_provider="openai",
+        model_name="codex-mini-latest",
+        guidance="",
+    )
+    assert "--run-id 20260610T072525Z bootstrap-track" in prompt
+    assert "Do not use `--new-run`" in prompt
+
+
 def test_schema_init_runs_once():
     """Reconnecting many times should not re-run schema each time (perf)."""
     with tempfile.TemporaryDirectory() as tmp:

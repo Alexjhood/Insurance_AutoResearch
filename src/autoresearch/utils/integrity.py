@@ -17,9 +17,13 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib.metadata
 import json
+import os
+import platform
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -320,6 +324,109 @@ def check_integrity(root: Path, artifacts_dir: Path) -> list[str]:
 
 # ── Pytest gate ───────────────────────────────────────────────────────────────
 
+_TEST_GATE_CACHE_FILENAME = "test_gate_cache.json"
+_TEST_GATE_CACHE_VERSION = 1
+_TEST_GATE_DIRS = ("src", "tests", "configs", "scripts")
+_TEST_GATE_SUFFIXES = frozenset({".py", ".toml", ".json", ".yaml", ".yml"})
+_TEST_GATE_FILES = (
+    "AGENT.md",
+    "pyproject.toml",
+    "pytest.ini",
+    "setup.cfg",
+    "tox.ini",
+    "conftest.py",
+)
+
+
+def _pytest_skip_reason(root: Path) -> str | None:
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("AUTORESEARCH_SKIP_PYTEST_GATE"):
+        return "running inside test suite"
+    if not (root / "tests").exists():
+        return "tests/ directory not found"
+    return None
+
+
+def _test_gate_files(root: Path) -> list[Path]:
+    """Return files whose contents can affect the repository pytest gate."""
+
+    files: set[Path] = set()
+    for dirname in _TEST_GATE_DIRS:
+        base = root / dirname
+        if base.exists():
+            files.update(
+                path
+                for path in base.rglob("*")
+                if path.is_file() and path.suffix.lower() in _TEST_GATE_SUFFIXES
+            )
+    files.update(path for name in _TEST_GATE_FILES if (path := root / name).is_file())
+    return sorted(files, key=lambda path: str(path.relative_to(root)))
+
+
+def compute_test_gate_fingerprint(root: Path) -> str:
+    """Hash test-relevant files and the active Python package environment."""
+
+    digest = hashlib.sha256()
+    digest.update(f"cache-version:{_TEST_GATE_CACHE_VERSION}\n".encode())
+    for path in _test_gate_files(root):
+        relative = path.relative_to(root)
+        digest.update(f"file:{relative.as_posix()}\0".encode())
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+
+    runtime = {
+        "python_executable": sys.executable,
+        "python_version": sys.version,
+        "platform": platform.platform(),
+        "packages": sorted(
+            f"{dist.metadata.get('Name', '')}=={dist.version}"
+            for dist in importlib.metadata.distributions()
+        ),
+    }
+    digest.update(json.dumps(runtime, sort_keys=True).encode())
+    return digest.hexdigest()
+
+
+def ensure_pytest_gate(root: Path, cache_dir: Path) -> dict[str, Any]:
+    """Run pytest once per test-relevant code and environment fingerprint."""
+
+    skip_reason = _pytest_skip_reason(root)
+    if skip_reason:
+        return {
+            "passed": True,
+            "cached": False,
+            "skipped": True,
+            "output": f"skipped ({skip_reason})",
+        }
+
+    fingerprint = compute_test_gate_fingerprint(root)
+    cache_path = cache_dir / _TEST_GATE_CACHE_FILENAME
+    if cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cached = {}
+        if cached.get("passed") is True and cached.get("fingerprint") == fingerprint:
+            return {**cached, "cached": True, "skipped": False, "cache_path": str(cache_path)}
+
+    started = time.perf_counter()
+    passed, output = run_pytest(root)
+    result: dict[str, Any] = {
+        "passed": passed,
+        "cached": False,
+        "skipped": False,
+        "fingerprint": fingerprint,
+        "duration_seconds": round(time.perf_counter() - started, 3),
+        "output": output,
+        "cache_path": str(cache_path),
+    }
+    if passed:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        temp_path = cache_path.with_suffix(".tmp")
+        temp_path.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
+        temp_path.replace(cache_path)
+    return result
+
+
 def run_pytest(root: Path) -> tuple[bool, str]:
     """Run the test suite and return (passed, output_summary).
 
@@ -327,17 +434,12 @@ def run_pytest(root: Path) -> tuple[bool, str]:
     infinite recursion.  Set ``AUTORESEARCH_SKIP_PYTEST_GATE=1`` to disable
     the gate in CI or other non-interactive contexts.
     """
-    import os
-
-    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("AUTORESEARCH_SKIP_PYTEST_GATE"):
-        return True, "skipped (running inside test suite)"
-
-    tests_dir = root / "tests"
-    if not tests_dir.exists():
-        return True, "skipped (tests/ directory not found)"
+    skip_reason = _pytest_skip_reason(root)
+    if skip_reason:
+        return True, f"skipped ({skip_reason})"
 
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "--tb=short", "-q", str(tests_dir)],
+        [sys.executable, "-m", "pytest", "--tb=short", "-q", str(root / "tests")],
         capture_output=True,
         text=True,
         cwd=str(root),

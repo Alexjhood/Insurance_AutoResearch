@@ -194,13 +194,13 @@ def _has_start_session_name(tokens: list[str]) -> bool:
     return False
 
 
-def _post_tool_succeeded(payload: dict) -> bool:
-    """Best-effort success check for harness payload variants."""
+def _post_tool_succeeded(payload: dict) -> bool | None:
+    """Return explicit tool success/failure, or None when the payload is silent."""
     candidates = [
-        payload,
         payload.get("tool_response") or {},
         payload.get("tool_output") or {},
         payload.get("result") or {},
+        payload,
     ]
     for obj in candidates:
         if not isinstance(obj, dict):
@@ -216,7 +216,35 @@ def _post_tool_succeeded(payload: dict) -> bool:
             return True
         if status in {"error", "failed", "failure"}:
             return False
-    return True
+    return None
+
+
+def _run_id_from_post_payload(payload: dict) -> str:
+    """Extract a timestamp run id from bootstrap output, if present."""
+
+    pattern = re.compile(r"""["']?run_id["']?\s*[:=]\s*["']?(\d{8}T\d{6}Z)""")
+
+    def _search(value: object) -> str:
+        if isinstance(value, dict):
+            direct = str(value.get("run_id") or "")
+            if RUN_ID_TIMESTAMP.fullmatch(direct):
+                return direct
+            for child in value.values():
+                found = _search(child)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = _search(child)
+                if found:
+                    return found
+        elif isinstance(value, str):
+            match = pattern.search(value)
+            if match:
+                return match.group(1)
+        return ""
+
+    return _search(payload)
 
 
 def _bindable_autoresearch_tokens(command: str) -> list[list[str]]:
@@ -537,7 +565,8 @@ def handle_post_tool_use(payload: dict) -> int:
         return 0
     if resolve_scope(session_id) is not None:  # already analyst or bound
         return 0
-    if not _post_tool_succeeded(payload):
+    succeeded = _post_tool_succeeded(payload)
+    if succeeded is False:
         return 0
     command = (payload.get("tool_input") or {}).get("command", "")
     invocations = _bindable_autoresearch_tokens(command)
@@ -552,7 +581,19 @@ def handle_post_tool_use(payload: dict) -> int:
             f"{track!r}; allowed={sorted(ALLOWED_RESEARCH_TRACKS)}"
         )
         return 0
-    run_id = _flag_value(invocations[0], "--run-id") or _latest_run_id(track)
+    run_id = _flag_value(invocations[0], "--run-id")
+    if not run_id and _has_flag(invocations[0], "--new-run"):
+        run_id = _run_id_from_post_payload(payload)
+        if not run_id and succeeded is True:
+            run_id = _latest_run_id(track)
+        if not run_id:
+            _log(
+                f"session {session_id}: refusing ambiguous --new-run auto-bind; "
+                "tool result did not identify the created run"
+            )
+            return 0
+    if not run_id:
+        run_id = _latest_run_id(track)
     if not run_id:
         return 0
     if not RUN_ID_TIMESTAMP.fullmatch(run_id):

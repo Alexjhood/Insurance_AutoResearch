@@ -272,6 +272,20 @@ def test_session_start_logs_hook_active(monkeypatch, tmp_path):
     assert "hook active (SessionStart source=startup)" in (tmp_path / "guard.log").read_text(encoding="utf-8")
 
 
+def test_session_start_binds_console_assigned_research_run(monkeypatch, tmp_path):
+    monkeypatch.setattr(guard, "SCOPE_DIR", tmp_path)
+    monkeypatch.setattr(guard, "LOG_PATH", tmp_path / "guard.log")
+    monkeypatch.setenv("AUTORESEARCH_SCOPE", "research")
+    monkeypatch.setenv("AUTORESEARCH_TRACK", "codex")
+    monkeypatch.setenv("AUTORESEARCH_RUN_ID", "20260610T072525Z")
+
+    assert guard.handle_session_start({"session_id": "console-run", "source": "startup"}) == 0
+
+    scope = guard.resolve_scope("console-run")
+    assert scope["track"] == "codex"
+    assert scope["run_id"] == "20260610T072525Z"
+
+
 def test_failed_autoresearch_command_does_not_bind(monkeypatch, tmp_path):
     monkeypatch.setattr(guard, "SCOPE_DIR", tmp_path)
     monkeypatch.setattr(guard, "LOG_PATH", tmp_path / "guard.log")
@@ -280,12 +294,56 @@ def test_failed_autoresearch_command_does_not_bind(monkeypatch, tmp_path):
 
     payload = {
         "session_id": "failed-bind",
+        "status": "completed",
         "tool_input": {"command": "autoresearch --track claude start-session --new-run"},
         "tool_response": {"exit_code": 2},
     }
 
     assert guard.handle_post_tool_use(payload) == 0
     assert guard.resolve_scope("failed-bind") is None
+
+
+def test_ambiguous_new_run_does_not_bind_stale_latest(monkeypatch, tmp_path):
+    monkeypatch.setattr(guard, "SCOPE_DIR", tmp_path)
+    monkeypatch.setattr(guard, "LOG_PATH", tmp_path / "guard.log")
+    monkeypatch.setattr(guard, "_latest_run_id", lambda track: "20260610T063646Z")
+    monkeypatch.delenv("AUTORESEARCH_SCOPE", raising=False)
+
+    payload = {
+        "session_id": "ambiguous-new-run",
+        "tool_input": {
+            "command": (
+                "autoresearch --track codex --new-run bootstrap-track "
+                "--model-provider openai --model-name codex-mini-latest"
+            )
+        },
+    }
+
+    assert guard.handle_post_tool_use(payload) == 0
+    assert guard.resolve_scope("ambiguous-new-run") is None
+
+
+def test_new_run_binds_run_id_reported_by_bootstrap_output(monkeypatch, tmp_path):
+    monkeypatch.setattr(guard, "SCOPE_DIR", tmp_path)
+    monkeypatch.setattr(guard, "LOG_PATH", tmp_path / "guard.log")
+    monkeypatch.delenv("AUTORESEARCH_SCOPE", raising=False)
+
+    payload = {
+        "session_id": "reported-new-run",
+        "tool_input": {
+            "command": (
+                "autoresearch --track codex --new-run bootstrap-track "
+                "--model-provider openai --model-name codex-mini-latest"
+            )
+        },
+        "tool_response": {
+            "status": "completed",
+            "output": '{"track": "codex", "run_id": "20260610T072525Z"}',
+        },
+    }
+
+    assert guard.handle_post_tool_use(payload) == 0
+    assert guard.resolve_scope("reported-new-run")["run_id"] == "20260610T072525Z"
 
 
 def test_invalid_start_session_shape_does_not_bind(monkeypatch, tmp_path):

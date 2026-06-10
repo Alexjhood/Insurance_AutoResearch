@@ -10,6 +10,7 @@ from autoresearch.utils import integrity
 from autoresearch.utils.integrity import (
     PROTECTED_RELATIVE_PATHS,
     check_integrity,
+    ensure_pytest_gate,
     compute_protected_hashes,
     scan_file_for_holdout_access,
     scan_file_for_non_predictive_feature_use,
@@ -17,6 +18,11 @@ from autoresearch.utils.integrity import (
 )
 
 _MARKER_SOURCE = "milestone_holdout = 'bad'"
+
+
+def _enable_pytest_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("AUTORESEARCH_SKIP_PYTEST_GATE", raising=False)
 
 
 @pytest.fixture
@@ -124,3 +130,72 @@ def test_exposure_weight_usage_is_allowed(tmp_path: Path) -> None:
     )
 
     assert scan_file_for_non_predictive_feature_use(script) == []
+
+
+def test_pytest_gate_reuses_success_for_unchanged_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "tests").mkdir()
+    source = tmp_path / "src" / "package.py"
+    source.parent.mkdir()
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    _enable_pytest_gate(monkeypatch)
+    calls: list[Path] = []
+
+    def fake_run_pytest(root: Path) -> tuple[bool, str]:
+        calls.append(root)
+        return True, "1 passed"
+
+    monkeypatch.setattr(integrity, "run_pytest", fake_run_pytest)
+
+    first = ensure_pytest_gate(tmp_path, tmp_path / "artifacts")
+    second = ensure_pytest_gate(tmp_path, tmp_path / "artifacts")
+
+    assert first["cached"] is False
+    assert second["cached"] is True
+    assert calls == [tmp_path]
+
+
+def test_pytest_gate_invalidates_when_relevant_file_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "tests").mkdir()
+    source = tmp_path / "src" / "package.py"
+    source.parent.mkdir()
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    _enable_pytest_gate(monkeypatch)
+    calls = 0
+
+    def fake_run_pytest(root: Path) -> tuple[bool, str]:
+        nonlocal calls
+        calls += 1
+        return True, "1 passed"
+
+    monkeypatch.setattr(integrity, "run_pytest", fake_run_pytest)
+
+    ensure_pytest_gate(tmp_path, tmp_path / "artifacts")
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+    result = ensure_pytest_gate(tmp_path, tmp_path / "artifacts")
+
+    assert result["cached"] is False
+    assert calls == 2
+
+
+def test_pytest_gate_does_not_cache_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "tests").mkdir()
+    _enable_pytest_gate(monkeypatch)
+    results = iter([(False, "failed"), (True, "passed")])
+
+    monkeypatch.setattr(integrity, "run_pytest", lambda root: next(results))
+
+    first = ensure_pytest_gate(tmp_path, tmp_path / "artifacts")
+    second = ensure_pytest_gate(tmp_path, tmp_path / "artifacts")
+
+    assert first["passed"] is False
+    assert second["passed"] is True
+    assert second["cached"] is False
