@@ -82,7 +82,7 @@ policy = "reject"
 lookback = 25
 
 [search_space]
-model_families = ["global_mean"]
+model_families = ["global_mean", "recipe"]
 target_strategies = ["direct_pure_premium", "frequency_severity"]
 allow_legacy_baselines = false
 # LLM may add new model families by creating src/autoresearch/models/<family>.py
@@ -91,10 +91,26 @@ allow_open_model_families = true
 # LLM may add feature builders by creating src/autoresearch/features/<module>.py
 # and specifying feature_builder_module = "autoresearch.features.<module>" in [model].
 allow_feature_builder_modules = true
-# Autonomous proposals must provide a run-local modelling script. Built-in
-# model families may be used as research ideas, but their implementation must
-# be written into the experiment artifact instead of imported from src/models.
+# Autonomous proposals must provide a model implementation: either a declarative
+# `model.recipe` (interpreted by trusted framework code — preferred for known
+# methods) OR a run-local modelling script (the escape hatch — for novel methods
+# the recipe vocabulary cannot express). Built-in model families may be used as
+# research ideas, but their implementation must be a recipe or written into the
+# experiment artifact instead of imported from src/models.
 requires_model_script = true
+
+[recipes]
+# Declarative model recipes (#6). A recipe is a small validated description of a
+# common model that trusted framework code interprets, replacing ~100 lines of
+# hand-written scaffolding for the common case.
+#
+# reuse_scope controls which prior recipes a run may consult for suggestions:
+#   "run"    — Option 1 (default): only recipes tried earlier in THIS run.
+#   "memory" — Option 2: recipes from ALL runs/threads, via the cross-run memory
+#              store. Only takes effect when memory access is engaged
+#              (AUTORESEARCH_MEMORY_ACCESS = own|all); otherwise falls back to
+#              "run" so an independent benchmark stays uncontaminated.
+reuse_scope = "run"
 
 [compute]
 base_budget_minutes = 10

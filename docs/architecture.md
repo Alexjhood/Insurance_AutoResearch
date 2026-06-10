@@ -111,32 +111,42 @@ The milestone holdout is architecturally separated from the search partition. `e
 
 ## Model Layer
 
-Autonomous experiments use run-local modelling scripts. A proposal points
-`experiment_config.model.script_path` at a Python file stored beside the
-proposal. The file must expose:
+An experiment supplies its model in one of two ways:
 
-```python
-def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hyperparameters):
-    return predicted_target_array, notes_dict
-```
+1. **Declarative recipe (preferred).** `experiment_config.model.recipe` is a
+   small validated object (estimator, objective, encoding, params, structure)
+   interpreted by trusted code in `autoresearch.models.recipe`. A curated,
+   decorator-extensible registry (`estimators.py`, `encoders.py`) covers the
+   common search space; the validity matrix in `schema.py` rejects illegal
+   combinations before anything runs. `model_family = "recipe"`.
+2. **Run-local script (escape hatch).** A proposal points
+   `experiment_config.model.script_path` at a Python file beside the proposal
+   exposing `fit_predict(train, score, *, feature_inclusions=None,
+   feature_exclusions=None, **hyperparameters)`. Used for novel models the
+   recipe vocabulary cannot express.
+
+A model returns **either** a raw `np.ndarray` of target totals (legacy contract:
+it owns its own exposure conversion and calibration) **or** a
+`Prediction(values, unit)` (from `autoresearch.models.prediction`). For a
+`Prediction`, the framework owns the safety-critical bookkeeping (#7): rate→total
+conversion via exposure, single-scalar training calibration, native-bias
+recording, and prediction validation. Recipes always return a `Prediction`, so
+both paths share one finalisation stage in `dispatch_model()`.
 
 The framework still owns data loading, split application, capping, evaluation,
-comparison, and registry writes. The script owns the modelling choice for that
-single run. This means GLMs, GBMs, GAMs, ensembles, or simpler hand-built rules
-are all possible research directions, but the implementation is an auditable
-per-run artifact instead of a pre-selected method imported from `src/models`.
+comparison, and registry writes. The `global_mean` no-model baseline is the
+built-in bootstrap starting point.
 
-The `global_mean` no-model baseline is the built-in bootstrap starting point.
-All other experiments must supply a run-local `fit_predict` script via
-`experiment_config.model.script_path`.
-
-`dispatch_model()` in `models/dispatcher.py` handles script loading, prediction
-DataFrame construction, and a row-count assertion to catch silent drops.
+`dispatch_model()` in `models/dispatcher.py` routes `model_family` (recipe /
+global_mean / open registry / script), finalises `Prediction` returns,
+constructs the prediction DataFrame, and asserts row counts to catch silent
+drops. Promoted recipes are saved to a run-local (or, under memory access,
+cross-run) ledger and re-emitted as `champion_template.py` for cheap follow-ups.
 
 The active target is controlled by `evaluation.target_mode` or the CLI
 `--target-mode` override. `burning_cost` is the default and interprets model
-outputs as predicted claim costs. `frequency` interprets model outputs as
-expected claim counts. In both modes scripts return target totals, not rates.
+outputs as predicted claim costs; `frequency` interprets them as expected claim
+counts.
 
 ## Output Validation
 

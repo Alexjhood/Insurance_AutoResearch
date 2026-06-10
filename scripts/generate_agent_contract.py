@@ -40,6 +40,7 @@ from autoresearch.controller.proposal_schema import (  # noqa: E402
     SCIENTIFIC_PROPOSAL_FIELDS,
 )
 from autoresearch.models import dispatcher  # noqa: E402
+from autoresearch.models.recipe import menu as recipe_menu  # noqa: E402
 from autoresearch.utils.integrity import PROTECTED_RELATIVE_PATHS  # noqa: E402
 
 AGENT_MD = REPO_ROOT / "AGENT.md"
@@ -109,6 +110,14 @@ def render() -> str:
     )
     proposal_fields = ", ".join(f"`{f}`" for f in SCIENTIFIC_PROPOSAL_FIELDS)
     derived_fields = ", ".join(f"`{f}`" for f in DERIVED_PROPOSAL_FIELDS)
+
+    rmenu = recipe_menu()
+    estimator_lines = "\n".join(
+        f"- **{name}** — obj {sorted(info['objectives'])}; enc {sorted(info['encodings'])}"
+        + (" (early-stop)" if info["supports_early_stopping"] else "")
+        for name, info in rmenu["estimators"].items()
+    )
+    structure_list = ", ".join(f"`{s}`" for s in rmenu["structures"])
 
     return f"""\
 <!-- GENERATED FILE — DO NOT EDIT BY HAND.
@@ -200,65 +209,73 @@ first `bootstrap-track`, which prints the id):
 ### When a cycle needs repair
 
 A cycle can stop in **`needs_repair`** (instead of `awaiting_decision`) when the
-model script fails preflight, output validation, or the positive-lift check. The
+model fails preflight, output validation, or the positive-lift check. The
 framework writes `repair_request_<N>.json` into the proposal directory. Recover
-without guessing — the file tells you what to do:
+without guessing — the file tells you what to do via its `repair_kind`:
 
-1. Read `repair_request_<N>.json`. It names the script to write
-   (`write_script`, e.g. `model_attempt_2.py`), the `failed_checks`, the
-   `error_type`, and an `instruction` field.
-2. Write that `model_attempt_<N>.py` fixing the named checks, keeping the same
-   `fit_predict` interface and never touching holdout data.
-3. Rerun `run-session-cycles 1` — it automatically picks up the new attempt.
+1. Read `repair_request_<N>.json`: `repair_kind`, `failed_checks`, `instruction`.
+2. `repair_kind == "recipe"` → write the corrected recipe to
+   `recipe_attempt_<N>.json` (framework still owns units/calibration; only write
+   `model_attempt_<N>.py` if the recipe truly can't express the fix).
+   `repair_kind == "script"` → write `model_attempt_<N>.py` (same `fit_predict`).
+   Never touch holdout data.
+3. Rerun `run-session-cycles 1` — it picks up the new attempt automatically.
 
 You get up to **3 attempts**. Attempt 2 should move *opposite* the failure (if a
 tree was too deep, go shallower — not halfway back); if attempt 2 is still no
 better, let it fail rather than spend attempt 3 on a near-duplicate.
 
-## Model interface (compact)
+## Model: a recipe (preferred) or a script (escape hatch)
 
-A run-local model script must expose:
+Specify the model one of two ways. Both flow through the same framework
+units/calibration stage, so **you never write exposure conversion or calibration
+yourself**. Prefer a recipe for any method the registry covers; drop to a script
+only for a model the recipe vocabulary cannot express.
+
+### Option A — declarative recipe (`model.recipe`), preferred
+
+A validated object interpreted by trusted code. Set `model_family = "recipe"`:
+```json
+{{"structure": "direct", "estimator": "lightgbm", "objective": "tweedie",
+ "encoding": "native_categorical", "params": {{"num_leaves": 63}}, "early_stopping": 50}}
+```
+Champion follow-up (do not repeat the full recipe):
+```json
+{{"recipe_ref":"champion","recipe_overrides":{{"params":{{"num_leaves":31}}}}}}
+```
+The controller expands it before validation; feature selectors remain sibling fields.
+Frequency × severity nests two stages (burning-cost mode only):
+`{{"structure":"frequency_severity","stages":{{"frequency":{{"estimator":"lightgbm","objective":"poisson"}},"severity":{{"estimator":"lightgbm","objective":"gamma"}}}}}}`
+
+Structures: {structure_list}. Estimators (only these obj × enc combos are legal —
+invalid ones are rejected before running):
+{estimator_lines}
+
+Target → objective: **pure premium** (has zeros) → tweedie/squared_error;
+**frequency** → poisson/tweedie/squared_error; **severity** (claim rows, >0) →
+gamma/squared_error. Features default to all eligible predictors; restrict with
+`model.feature_inclusions/exclusions` using names from the handoff.
+
+### Option B — run-local script (escape hatch, for novel models)
+
+Expose `fit_predict`; return a `Prediction` (the framework converts unit→total
+and calibrates for you) **or** a raw `np.ndarray` of TOTALS (you own calibration):
 ```python
+from autoresearch.models.prediction import Prediction
+
 def fit_predict(train, score, *, feature_inclusions=None,
-                feature_exclusions=None, **hyperparameters) -> tuple[np.ndarray, dict]:
-    ...  # fit on `train`, return active-target TOTAL predictions + notes
+                feature_exclusions=None, **hyperparameters):
+    ...  # fit on `train`
+    return Prediction(values=pred_rates, unit="rate"), notes
 ```
-Rules that are easy to get wrong (full detail in the manual):
-- **Return totals, not rates.** Multiply predicted rates by
-  `score["{dispatcher.EXPOSURE}"]` before returning.
-- **Target has exact zeros** — losses needing `y > 0` (gamma/log) error unless
-  you split frequency×severity. Prefer Tweedie (`lightgbm`/`xgboost`/statsmodels)
-  for direct pure-premium. Do **not** pass `tweedie_power` to
-  `HistGradientBoostingRegressor`.
-- **Encode categoricals** (string levels like `'B12'`): lightgbm `category`
-  dtype; xgboost/sklearn need ordinal/one-hot.
-- **Use early stopping** with a train-internal split (never search-validation or
-  holdout).
-- **Feature names** come from the handoff bundle's
-  `allowed_search_space.feature_columns`; `non_predictive_columns` there must
-  not be used as predictors. Read them from the handoff — do not assume a schema.
-
-Column constants (`from autoresearch.models.dispatcher import ...`):
+If you return a raw array instead: multiply rates by `score["{dispatcher.EXPOSURE}"]`;
+gamma/log losses need `y > 0` (split freq×sev or use Tweedie); encode categoricals
+(`'B12'`): lightgbm `category` dtype, xgboost/sklearn ordinal/one-hot; early-stop
+on a train-internal split only; and calibration is mandatory —
+`apply_training_calibration(pred_score, pred_train, actual_train_cost)` from
+`autoresearch.models.calibration` (factor = Σactual/Σpred). Feature names come
+from the handoff. Column constants (`from autoresearch.models.dispatcher import`):
 {const_lines}
-
-**Calibration is mandatory** — apply the framework's one-parameter aggregate
-calibrator just before returning. Exact signature and usage:
-```python
-from autoresearch.models.dispatcher import CLAIM_COST, CLAIM_COUNT
-from autoresearch.models.calibration import apply_training_calibration
-
-# pred_train and pred_score must already be TOTALS (rate × exposure), not rates.
-actual = (train[CLAIM_COUNT].to_numpy()
-          if hyperparameters.get("target_mode") == "frequency"
-          else train[CLAIM_COST].to_numpy())
-pred_score, calib_factor = apply_training_calibration(pred_score, pred_train, actual)
-notes["calib_factor"] = round(float(calib_factor), 4)
-notes["native_pred_to_actual_ratio"] = round(1.0 / calib_factor, 4)
-return pred_score, notes
-```
-`apply_training_calibration(pred_score, pred_train_cost, actual_train_cost)`
-returns `(calibrated_pred_score, calib_factor)` where
-`calib_factor = sum(actual_train_cost) / sum(pred_train_cost)`.
 
 ## Compute budget
 
@@ -305,8 +322,10 @@ Supply only the fields that encode your scientific choice:
 
 {proposal_fields}
 
-plus an `experiment_config` with `model_family`, `target_strategy`, and
-`model.script_path` (point it at your `model_<name>.py`).
+plus an `experiment_config` with `model_family`, `target_strategy`, and a model
+implementation — **either** `model.recipe` (preferred; set `model_family =
+"recipe"`) **or** `model.script_path` (point it at your `model_<name>.py` for a
+novel method).
 
 The controller derives everything else from the champion, the recommended tree
 action, and the research-line registry — you do **not** need to send:

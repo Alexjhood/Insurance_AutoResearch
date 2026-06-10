@@ -107,6 +107,8 @@ class ProjectConfig:
     model_harness: str | None = None
     # cross-run memory
     structural_gini_threshold: float = 0.37
+    # declarative model recipes (#6): "run" (Option 1) | "memory" (Option 2)
+    recipe_reuse_scope: str = "run"
     # Whether this command should move artifacts/tracks/<track>/latest_run.json.
     update_latest_run: bool = True
 
@@ -149,6 +151,7 @@ def load_config(
     repair_cfg = raw.get("repair", {})
     screening_cfg = raw.get("screening", {})
     memory_cfg = raw.get("memory", {})
+    recipes_cfg = raw.get("recipes", {})
 
     resolved_track = track_id or "default"
 
@@ -265,6 +268,7 @@ def load_config(
         screening_min_relative_lift=float(screening_cfg.get("min_relative_lift", -0.002)),
         running_stale_minutes=int(raw.get("handoff", {}).get("running_stale_minutes", 30)),
         structural_gini_threshold=float(memory_cfg.get("structural_gini_threshold", 0.37)),
+        recipe_reuse_scope=str(recipes_cfg.get("reuse_scope", "run")).strip().lower(),
         update_latest_run=update_latest_run,
     )
 

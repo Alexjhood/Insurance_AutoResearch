@@ -437,6 +437,9 @@ def compare_against_current_champion(
                 comparison_id=comparison_id,
             )
             evaluate_on_holdout(config, challenger_id, comparison_id)
+            # Same finalisation as the supervised path: record the recipe outcome
+            # and (re)generate the champion follow-up artifacts.
+            _record_recipe_outcome_and_template(config, challenger_id, "promote")
 
     return artifacts
 
@@ -456,6 +459,52 @@ def _load_guardrail_status(comp: dict[str, Any]) -> dict[str, Any]:
         return json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return {}
+
+
+def _record_recipe_outcome_and_template(config, challenger_id: str, decision: str) -> None:
+    """Record a recipe's final outcome (#6) and regenerate the champion template (#8).
+
+    Best-effort: any failure here is logged and swallowed so it can never block a
+    promotion/rejection decision.
+    """
+
+    try:
+        from autoresearch.controller.champion_template import generate_champion_template
+        from autoresearch.experiment_registry.registry import get_experiment
+        from autoresearch.models.recipe_library import record_recipe
+        from autoresearch.utils.io import read_json
+
+        row = get_experiment(config.registry_path, challenger_id)
+        recipe = None
+        model_spec = None
+        target_strategy = None
+        snapshot_path = row.get("config_snapshot_path") if row else None
+        if snapshot_path:
+            try:
+                snapshot = read_json(Path(snapshot_path))
+                experiment = snapshot.get("experiment", {})
+                model = experiment.get("model", {})
+                recipe = model.get("recipe")
+                target_strategy = experiment.get("target_strategy")
+                model_spec = {"target_strategy": target_strategy, **model}
+            except Exception:
+                recipe = None
+        if isinstance(recipe, dict) and recipe:
+            record_recipe(
+                config,
+                recipe,
+                experiment_id=challenger_id,
+                outcome=decision,
+                target_strategy=target_strategy,
+                model_spec=model_spec,
+            )
+
+        if decision == "promote":
+            generate_champion_template(config, challenger_id)
+    except Exception as exc:
+        import logging
+
+        logging.getLogger(__name__).debug("recipe/template hook failed (non-fatal): %s", exc)
 
 
 def record_decision(
@@ -690,6 +739,10 @@ def record_decision(
         decided_at=decided_at,
         guardrail_status=guardrail_result or None,
     )
+
+    # Record the recipe outcome (#6) and, on promotion, regenerate the champion
+    # template (#8). Both are best-effort and must never block a decision.
+    _record_recipe_outcome_and_template(config, challenger_id, decision)
 
     final_decision = {
         "decision": decision,

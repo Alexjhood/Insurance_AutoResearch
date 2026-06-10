@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from autoresearch.models.prediction import Prediction, finalize_prediction
 from autoresearch.targets import BURNING_COST, FREQUENCY, normalise_target_mode, target_spec
 
 
@@ -92,14 +93,11 @@ def dispatch_model(
         feature_exclusions,
         model_script_path,
     )
-    predicted_target = np.asarray(predicted_target, dtype=float)
-    if len(predicted_target) != len(score):
-        raise ValueError(
-            f"Model returned {len(predicted_target)} predictions for {len(score)} scored rows"
-        )
+    clipped_target = _finalize_predicted(
+        predicted_target, score, notes, target_mode=target_mode, train_split_label=train_split
+    )
 
     actual_target = score[spec.source_column].astype(float).to_numpy()
-    clipped_target = np.clip(predicted_target, 0.0, None)
     exposure = score[EXPOSURE].astype(float).to_numpy()
     predictions = pd.DataFrame({
         RECORD_ID: score[RECORD_ID].to_numpy(),
@@ -182,19 +180,16 @@ def dispatch_model_on_explicit_frames(
         feature_exclusions,
         model_script_path,
     )
-    predicted_target = np.asarray(predicted_target, dtype=float)
-    if len(predicted_target) != len(score):
-        raise ValueError(
-            f"Model returned {len(predicted_target)} predictions for {len(score)} scored rows"
-        )
+    finalised = _finalize_predicted(
+        predicted_target, score, notes, target_mode=target_mode, train_split_label="_cv_train"
+    )
 
     # Filter to val rows only for evaluation
     val_mask = score["split"].to_numpy() == "_cv_val"
     score_val = score[val_mask].copy()
-    pred_val = predicted_target[val_mask]
 
     actual_target = score_val[spec.source_column].astype(float).to_numpy()
-    clipped_target = np.clip(pred_val, 0.0, None)
+    clipped_target = finalised[val_mask]
     exposure = score_val[EXPOSURE].astype(float).to_numpy()
 
     predictions = pd.DataFrame({
@@ -221,6 +216,42 @@ def dispatch_model_on_explicit_frames(
     return ModelResult(predictions=predictions, model_notes=notes, interpret_fn=interpret_fn)
 
 
+def _finalize_predicted(
+    predicted: Any,
+    score: pd.DataFrame,
+    notes: dict[str, Any],
+    *,
+    target_mode: str,
+    train_split_label: str,
+) -> np.ndarray:
+    """Resolve a model return value to validated, calibrated target totals.
+
+    A bare ``np.ndarray`` is treated as already-final totals (legacy contract:
+    the model owns its own exposure conversion and calibration). A
+    :class:`Prediction` is finalised by the framework (#7): rate→total via
+    exposure, aggregate training calibration, and prediction validation.
+    """
+
+    spec = target_spec(target_mode)
+    if isinstance(predicted, Prediction):
+        totals, fin_notes = finalize_prediction(
+            predicted,
+            score,
+            exposure_column=EXPOSURE,
+            source_column=spec.source_column,
+            train_split_label=train_split_label,
+        )
+        notes.update(fin_notes)
+        return totals
+
+    arr = np.asarray(predicted, dtype=float)
+    if len(arr) != len(score):
+        raise ValueError(
+            f"Model returned {len(arr)} predictions for {len(score)} scored rows"
+        )
+    return np.clip(arr, 0.0, None)
+
+
 def _call_model(
     model_family: str,
     target_strategy: str,
@@ -238,6 +269,24 @@ def _call_model(
     predicted *rates* (not totals) for arbitrary feature inputs.  Models that
     do not return a third value get ``interpret_fn=None``.
     """
+
+    # A recipe takes precedence over a script path: representations are meant to
+    # be mutually exclusive (enforced at proposal validation), and routing the
+    # recipe first prevents a stray script_path from silently shadowing it.
+    if model_family == "recipe" or (model_family != "global_mean" and "recipe" in hp):
+        if model_script_path is not None:
+            raise ValueError(
+                "A model cannot specify both a recipe and a script_path; choose one."
+            )
+        from autoresearch.models import recipe as _recipe
+        return _normalise_fit_predict_result(
+            _recipe.fit_predict(
+                train, score,
+                feature_inclusions=feature_inclusions,
+                feature_exclusions=feature_exclusions,
+                **hp,
+            )
+        )
 
     if model_script_path is not None:
         return _call_script_model(

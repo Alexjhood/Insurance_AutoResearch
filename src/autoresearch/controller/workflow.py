@@ -311,6 +311,7 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
                     reason=f"Auto-rejected by single-split screen: {reason}",
                     quantitative_signal=screening,
                 )
+                _record_recipe_outcome(config, proposal, experiment_id, "auto_reject", screening)
                 return {
                     "proposal_id": proposal_id,
                     "experiment_id": experiment_id,
@@ -556,6 +557,83 @@ def _hydrate_derived_fields(
             }
 
 
+def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge JSON-object overrides without mutating either input."""
+
+    result = json.loads(json.dumps(base))
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = json.loads(json.dumps(value))
+    return result
+
+
+def _hydrate_recipe_reference(
+    config: ProjectConfig,
+    parsed: dict[str, Any],
+    champion: dict[str, Any],
+    errors: list[str],
+) -> None:
+    """Expand ``model.recipe_ref=champion`` into a validated full recipe."""
+
+    exp_config = parsed.get("experiment_config")
+    model = exp_config.get("model") if isinstance(exp_config, dict) else None
+    if not isinstance(model, dict) or "recipe_ref" not in model:
+        return
+
+    recipe_ref = model.get("recipe_ref")
+    if recipe_ref != "champion":
+        errors.append("model.recipe_ref currently supports only 'champion'")
+        return
+    if "recipe" in model or "script_path" in model or "model_script_path" in model:
+        errors.append("model.recipe_ref cannot be combined with model.recipe or model.script_path")
+        return
+
+    overrides = model.get("recipe_overrides", {})
+    if not isinstance(overrides, dict):
+        errors.append("model.recipe_overrides must be an object")
+        return
+
+    artifact_path = config.handoff_proposal_inbox_dir / "champion_recipe.json"
+    try:
+        artifact = read_json(artifact_path)
+    except Exception as exc:
+        errors.append(f"model.recipe_ref could not load champion_recipe.json: {exc}")
+        return
+    if artifact.get("experiment_id") != champion.get("champion_id"):
+        errors.append("model.recipe_ref points to a stale champion_recipe.json")
+        return
+
+    artifact_model = artifact.get("model")
+    if not isinstance(artifact_model, dict):
+        recipe = artifact.get("recipe")
+        artifact_model = {"recipe": recipe} if isinstance(recipe, dict) else {}
+    base_recipe = artifact_model.get("recipe")
+    if not isinstance(base_recipe, dict) or not base_recipe:
+        errors.append("model.recipe_ref champion is not recipe-based")
+        return
+
+    resolved_model = {
+        key: json.loads(json.dumps(value))
+        for key, value in artifact_model.items()
+        if key not in {"recipe_ref", "recipe_overrides"}
+    }
+    resolved_model["recipe"] = _deep_merge(base_recipe, overrides)
+    for key in ("feature_inclusions", "feature_exclusions"):
+        if key in model:
+            value = model[key]
+            if value is None:
+                resolved_model.pop(key, None)
+            else:
+                resolved_model[key] = value
+
+    exp_config["model"] = resolved_model
+    exp_config["model_family"] = "recipe"
+    if _is_blank(exp_config.get("target_strategy")):
+        exp_config["target_strategy"] = artifact.get("target_strategy")
+
+
 def _validate_and_normalise(
     config: ProjectConfig,
     parsed: dict[str, Any],
@@ -567,8 +645,10 @@ def _validate_and_normalise(
         parsed["experiment_config"] = {}
     context = build_llm_context(config)
     _hydrate_derived_fields(config, parsed, champion, context)
+    reference_errors: list[str] = []
+    _hydrate_recipe_reference(config, parsed, champion, reference_errors)
     space = allowed_search_space(config, context.get("agent_schema"))
-    errors = validate_proposal(parsed, space)
+    errors = reference_errors + validate_proposal(parsed, space)
     if parsed.get("parent_experiment_id") != champion["champion_id"]:
         errors.append("parent_experiment_id must match the current official champion")
     parent_branch = parsed.get("parent_branch_id") or champion["branch_id"]
@@ -740,21 +820,36 @@ def _run_validated_experiment_attempts(
     attempt_lifts: list[float | None] = []
     noise_eps = getattr(config, "repair_noise_floor_eps", 0.002)
     auto_abandon = getattr(config, "repair_auto_abandon_enabled", True)
+    # A recipe-origin experiment repairs as a recipe (the framework owns units &
+    # calibration); only an explicit escape-hatch script forces the script path.
+    recipe_origin = _proposal_recipe(proposal) is not None
 
     for attempt in range(1, 4):
         attempt_script = proposal_dir / f"model_attempt_{attempt}.py"
+        attempt_recipe = proposal_dir / f"recipe_attempt_{attempt}.json"
         cfg = dict(proposal["config"])
         model_cfg = dict(cfg.get("model") or {})
         if attempt_script.exists():
+            # An explicit script attempt (the escape hatch) always wins.
+            model_cfg.pop("recipe", None)
             model_cfg["script_path"] = attempt_script.name
+            if recipe_origin:
+                cfg["model_family"] = "scripted_challenger"
+        elif attempt_recipe.exists():
+            # A corrected recipe supplied by the agent for this attempt.
+            model_cfg.pop("script_path", None)
+            model_cfg.pop("model_script_path", None)
+            model_cfg["recipe"] = read_json(attempt_recipe)
+            cfg["model_family"] = "recipe"
         elif attempt == 1:
             raw_script = model_cfg.get("script_path") or model_cfg.get("model_script_path")
             if raw_script:
                 raw_path = proposal_dir / str(raw_script)
                 if raw_path.exists():
                     model_cfg["script_path"] = raw_path.name
+            # else: a recipe-origin proposal already carries model.recipe — run as-is.
         elif last_report is not None:
-            _write_repair_request(proposal_dir, attempt, last_report)
+            _write_repair_request(proposal_dir, attempt, last_report, recipe_origin=recipe_origin)
             break
         cfg["model"] = model_cfg
         experiment_config_path = proposal_dir / f"experiment_config_attempt_{attempt}.toml"
@@ -783,12 +878,11 @@ def _run_validated_experiment_attempts(
             attempt_lifts.append(None)
             last_report = exc_report
             if attempt < 3:
-                _write_repair_request(proposal_dir, attempt + 1, exc_report)
-                next_script = proposal_dir / f"model_attempt_{attempt + 1}.py"
-                if not next_script.exists():
+                _write_repair_request(proposal_dir, attempt + 1, exc_report, recipe_origin=recipe_origin)
+                if not _next_attempt_available(proposal_dir, attempt + 1):
                     raise ExperimentNeedsRepair(
                         f"Attempt {attempt} failed with {type(exc).__name__}: {str(exc)[:200]}. "
-                        f"Write {next_script} and rerun the proposal."
+                        f"{_repair_handoff_message(proposal_dir, attempt + 1, recipe_origin)}"
                     )
             continue
 
@@ -832,12 +926,11 @@ def _run_validated_experiment_attempts(
                 )
 
         if attempt < 3:
-            _write_repair_request(proposal_dir, attempt + 1, report)
-            next_script = proposal_dir / f"model_attempt_{attempt + 1}.py"
-            if not next_script.exists():
+            _write_repair_request(proposal_dir, attempt + 1, report, recipe_origin=recipe_origin)
+            if not _next_attempt_available(proposal_dir, attempt + 1):
                 raise ExperimentNeedsRepair(
                     f"Experiment output validation failed: {report['reason']}. "
-                    f"Write {next_script} and rerun the proposal."
+                    f"{_repair_handoff_message(proposal_dir, attempt + 1, recipe_origin)}"
                 )
     reason = last_report["reason"] if last_report else "Experiment validation failed"
     raise ValueError(f"Experiment output validation failed after repair attempts: {reason}")
@@ -970,23 +1063,65 @@ def _artifact_path(config: ProjectConfig, experiment_id: str, artifact_type: str
     raise ValueError(f"Experiment {experiment_id} has no {artifact_type!r} artifact")
 
 
-def _write_repair_request(proposal_dir: Path, next_attempt: int, report: dict[str, Any]) -> Path:
+def _next_attempt_available(proposal_dir: Path, next_attempt: int) -> bool:
+    """A repaired attempt is ready if the agent supplied either a corrected recipe
+    or an escape-hatch script for it."""
+    return (
+        (proposal_dir / f"recipe_attempt_{next_attempt}.json").exists()
+        or (proposal_dir / f"model_attempt_{next_attempt}.py").exists()
+    )
+
+
+def _repair_handoff_message(proposal_dir: Path, next_attempt: int, recipe_origin: bool) -> str:
+    if recipe_origin:
+        return (
+            f"Fix the recipe and write {proposal_dir / f'recipe_attempt_{next_attempt}.json'} "
+            "(a JSON file containing just the corrected model.recipe object), then rerun the "
+            "proposal. Only write a model_attempt_*.py script if the recipe vocabulary genuinely "
+            "cannot express the fix."
+        )
+    return (
+        f"Write {proposal_dir / f'model_attempt_{next_attempt}.py'} and rerun the proposal."
+    )
+
+
+def _write_repair_request(
+    proposal_dir: Path,
+    next_attempt: int,
+    report: dict[str, Any],
+    *,
+    recipe_origin: bool = False,
+) -> Path:
     error_type = report.get("error_type", "positive_lift_failed")
     payload: dict[str, Any] = {
         "next_attempt": next_attempt,
-        "write_script": f"model_attempt_{next_attempt}.py",
         "error_type": error_type,
         "reason": report.get("reason"),
         "failed_checks": [check for check in report.get("checks", []) if not check.get("passed")],
         "metrics_summary": report.get("metrics_summary"),
         "comparison_report": report.get("comparison_report"),
-        "instruction": (
+    }
+    if recipe_origin:
+        payload["repair_kind"] = "recipe"
+        payload["write_recipe"] = f"recipe_attempt_{next_attempt}.json"
+        payload["escape_hatch_script"] = f"model_attempt_{next_attempt}.py"
+        payload["instruction"] = (
+            "This experiment is a declarative recipe. Fix the RECIPE and write the corrected "
+            f"recipe object to recipe_attempt_{next_attempt}.json (just the model.recipe object). "
+            "The framework owns feature handling, units, and calibration — do NOT add exposure "
+            "conversion or calibration. Only fall back to writing "
+            f"model_attempt_{next_attempt}.py (a fit_predict script) if the recipe vocabulary "
+            "genuinely cannot express the fix. Read comparison_report (HTML) for Gini/lift detail first."
+        )
+    else:
+        payload["repair_kind"] = "script"
+        payload["write_script"] = f"model_attempt_{next_attempt}.py"
+        payload["instruction"] = (
             "Revise the model script to fix the failed checks. Keep the same fit_predict "
             "interface and do not access holdout data. The next run will use this script. "
             "Read comparison_report (HTML) for full Gini curves and lift charts before deciding "
             "on the fix strategy."
-        ),
-    }
+        )
     if error_type in ("runtime_exception", "compute_budget_exceeded"):
         payload["exception_class"] = report.get("exception_class", "")
         payload["traceback"] = report.get("traceback", "")
@@ -1146,6 +1281,52 @@ def _upsert_proposal_node(
         metrics=metrics,
         guidance=guidance,
     )
+
+
+def _proposal_recipe(proposal: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the recipe object from a proposal's experiment_config, if any."""
+    cfg = proposal.get("experiment_config") or proposal.get("config") or {}
+    model = cfg.get("model") if isinstance(cfg, dict) else None
+    recipe = model.get("recipe") if isinstance(model, dict) else None
+    return recipe if isinstance(recipe, dict) and recipe else None
+
+
+def _record_recipe_outcome(
+    config: ProjectConfig,
+    proposal: dict[str, Any],
+    experiment_id: str,
+    outcome: str,
+    screening: dict[str, Any] | None = None,
+) -> None:
+    """Record a recipe's terminal outcome to the reuse library. Best-effort.
+
+    Covers terminal paths that bypass ``record_decision`` (notably single-split
+    auto-rejection), so a losing recipe is not left mis-recorded as ``completed``.
+    """
+    recipe = _proposal_recipe(proposal)
+    if recipe is None:
+        return
+    try:
+        from autoresearch.models.recipe_library import record_recipe
+
+        score = None
+        if screening:
+            score = screening.get("challenger_score")
+        cfg = proposal.get("experiment_config") or proposal.get("config") or {}
+        model = cfg.get("model") if isinstance(cfg, dict) else {}
+        record_recipe(
+            config,
+            recipe,
+            experiment_id=experiment_id,
+            outcome=outcome,
+            score=score,
+            target_strategy=cfg.get("target_strategy"),
+            feature_inclusions=model.get("feature_inclusions"),
+            feature_exclusions=model.get("feature_exclusions"),
+            model_spec={"target_strategy": cfg.get("target_strategy"), **model},
+        )
+    except Exception:
+        pass
 
 
 def _screening_metrics_summary(screening: dict[str, Any]) -> dict[str, Any]:

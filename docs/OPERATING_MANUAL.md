@@ -62,6 +62,8 @@ Features with string values (e.g. `'B12'`) must be encoded before estimators tha
 
 ### Other recurring traps
 
+- These traps apply to **hand-written scripts that return a raw array**; a
+  recipe or a `Prediction` return has the framework handle both automatically.
 - Always multiply predicted rates by `exposure_term_a` to return totals.
 - Always apply `apply_training_calibration` before returning.
 - Build feature lists with care — `list + int` concatenation raises `TypeError`.
@@ -357,7 +359,7 @@ The agent schema in `context/latest_context.json` lists *all* historical target 
 
 ### B. Proposal-schema first (prevents inbox ingestion failures)
 
-The inbox JSON has a small, strict schema. Before writing your first proposal in a fresh run, read `proposal_inbox/proposal_template.json` *once*. You only supply the fields that encode your scientific choice: `experiment_name`, `rationale`, `change_summary`, `expected_benefit`, `key_risk`, `exploration_axis`, `approach_family`, `target_framing`, `feature_representation`, `expected_learning`, plus an `experiment_config` carrying `model_family`, `target_strategy`, and `model.script_path`. The controller **derives** the rest at ingestion — `proposal_id`, `parent_experiment_id`/`parent_branch_id`, `branch_action`, the tree-walk fields (`tree_action`, `selected_tree_action_id`, `research_parent_node_id`, `parent_rationale`), the research-line `research_line_action`/`research_line_label`/`research_line_hypothesis`/`line_membership_rationale`, the fixed `preprocessing` block, and the duplicate `experiment_config.experiment_name`/`experiment_config.parent_experiment_id`. You do not need to repeat any of those. To deviate from a default, supply that field explicitly (see the optional-override block in the handoff); when you diverge from the recommended tree action also include `tree_policy_override_rationale`.
+The inbox JSON has a small, strict schema. Before writing your first proposal in a fresh run, read `proposal_inbox/proposal_template.json` *once*. You only supply the fields that encode your scientific choice: `experiment_name`, `rationale`, `change_summary`, `expected_benefit`, `key_risk`, `exploration_axis`, `approach_family`, `target_framing`, `feature_representation`, `expected_learning`, plus an `experiment_config` carrying `model_family`, `target_strategy`, and a model implementation — either `model.recipe` (preferred; set `model_family = "recipe"`) or `model.script_path` (escape hatch). The controller **derives** the rest at ingestion — `proposal_id`, `parent_experiment_id`/`parent_branch_id`, `branch_action`, the tree-walk fields (`tree_action`, `selected_tree_action_id`, `research_parent_node_id`, `parent_rationale`), the research-line `research_line_action`/`research_line_label`/`research_line_hypothesis`/`line_membership_rationale`, the fixed `preprocessing` block, and the duplicate `experiment_config.experiment_name`/`experiment_config.parent_experiment_id`. You do not need to repeat any of those. To deviate from a default, supply that field explicitly (see the optional-override block in the handoff); when you diverge from the recommended tree action also include `tree_policy_override_rationale`.
 
 Tree fields are behavioural metadata, not prescriptions for implementation. Use them to describe what the experiment is trying to learn and where it sits in this run's tree. `tree_action=new_root` may use `research_parent_node_id=null`; every other `tree_action` must point to a valid node in this run's `research_tree`.
 
@@ -393,15 +395,18 @@ Rule of thumb: if you have 2 consecutive same-axis experiments at the plateau, t
 
 ### F. Avoid re-writing champion scaffolding (eliminates boilerplate)
 
-Do not restate ~100 lines of identical model scaffolding in every proposal —
-copy your previous run-local script and diff only the part that changes (the
-estimator or a few hyperparameters). Each verbatim re-write of the champion
-costs ~3K output tokens for zero information gain.
+Do not restate ~100 lines of identical model scaffolding in every proposal. For
+any method the recipe registry covers, **use a `model.recipe`** (see Step 2,
+Option A) — it is a few lines, validated before running, and the framework owns
+exposure conversion and calibration. Reserve hand-written scripts for genuinely
+novel models the recipe vocabulary cannot express. Each verbatim re-write of the
+champion script costs ~3K output tokens for zero information gain.
 
-> Note: a generated `proposal_inbox/champion_template.py` was specified for this
-> purpose but is **not currently produced by the framework**. Do not rely on it
-> existing; copy-then-diff your own prior script instead. (See cost review
-> recommendation #8.)
+> After every promotion the framework now writes
+> `proposal_inbox/champion_recipe.json` and `proposal_inbox/champion_template.py`
+> into this run's inbox. For a one-parameter follow-up, edit `PARAM_OVERRIDES`
+> (or `RECIPE`) in `champion_template.py` rather than rewriting a model. (Cost
+> review recommendation #8 — now implemented.)
 
 ### G. Axis rotation & approach diversity
 
@@ -456,7 +461,65 @@ Write your hypothesis — and why it is the cheapest next step — at the top of
 
 ### Step 2 — Implement
 
-**Option A: Autonomous proposal with a run-local model script**
+You provide the model **either** as a declarative recipe (preferred for any
+method the registry covers) **or** as a run-local Python script (the escape hatch
+for novel models). Both flow through the same framework units/calibration stage,
+so you never write exposure conversion or calibration yourself.
+
+**Option A (preferred): Declarative model recipe**
+
+Set `model_family = "recipe"` and put a `model.recipe` object in the proposal —
+no Python file needed. Trusted framework code (`autoresearch.models.recipe`)
+interprets it: feature selection, encoding, estimator construction, train-internal
+early stopping, rate→total conversion, and aggregate calibration are all handled
+for you. Invalid building-block combinations (e.g. gamma loss on pure premium,
+native categoricals on xgboost, Tweedie on `hist_gbm`) are rejected before
+anything runs.
+
+```toml
+experiment_name = "lgbm_tweedie_v1"
+model_family = "recipe"
+target_strategy = "direct_pure_premium"
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model.recipe]
+structure = "direct"          # or "frequency_severity" (burning-cost mode only)
+estimator = "lightgbm"        # lightgbm | xgboost | hist_gbm | tweedie_glm | elasticnet | constant
+objective = "tweedie"         # tweedie | poisson | gamma | squared_error
+encoding = "native_categorical"   # native_categorical | one_hot | ordinal (defaults per estimator)
+early_stopping = 50
+
+[model.recipe.params]
+num_leaves = 63
+learning_rate = 0.05
+```
+
+Frequency × severity nests two stages, each a normal recipe:
+
+```toml
+[model.recipe]
+structure = "frequency_severity"
+[model.recipe.stages.frequency]
+estimator = "lightgbm"
+objective = "poisson"
+[model.recipe.stages.severity]
+estimator = "lightgbm"
+objective = "gamma"
+```
+
+Target → objective rules: **pure premium** (has exact zeros) → `tweedie` /
+`squared_error`; **frequency** → `poisson` / `tweedie` / `squared_error`;
+**severity** (claim rows, strictly positive) → `gamma` / `squared_error`. Restrict
+features with `model.feature_inclusions` / `feature_exclusions`. Recipes used
+earlier in the run are recorded with their outcome and surfaced for reuse
+(`[recipes] reuse_scope`; cross-run reuse engages only under memory access). To
+add a method not in the registry, register it in
+`src/autoresearch/models/recipe/estimators.py` or use Option B.
+
+**Option B: Autonomous proposal with a run-local model script (escape hatch)**
 Create one proposal JSON and one neighbouring Python script in the proposal
 inbox. The JSON must set `experiment_config.model.script_path` to the script
 filename. Do not rely on pre-existing model implementations in
@@ -498,10 +561,13 @@ def fit_predict(
     ...
 ```
 
-If the model predicts pure premium or annual claim frequency, multiply by
-`score["exposure_term_a"]` before returning.
+A script may instead return a `Prediction(values=rates, unit="rate")` (from
+`autoresearch.models.prediction`) and let the framework convert rate→total via
+exposure and calibrate for you — the same finalisation recipes use. If you return
+a raw `np.ndarray` you must return target totals (multiply pure-premium/frequency
+rates by `score["exposure_term_a"]`) and calibrate yourself (below).
 
-**Option B: New feature engineering module**
+**Option C: New feature engineering module**
 Create `src/autoresearch/features/<name>.py`. Must expose:
 
 ```python
@@ -523,12 +589,14 @@ Column constants (import from `autoresearch.models.dispatcher`):
 - `CLAIM_EVENTS = "claim_event_count_l"`
 - `RECORD_ID = "record_id"`
 
-**Calibration — always apply**
+**Calibration — always apply (unless you return a `Prediction`)**
 
-Every model script must apply a training-total calibration scalar before
-returning predictions.  This is a single aggregate correction (one degree of
-freedom, no leakage risk) that guarantees the aggregate gate passes and
-preserves visibility of the model's native bias in the comparison report.
+Recipes and scripts that return a `Prediction` are calibrated by the framework
+automatically — skip this. A script that returns a raw `np.ndarray` must apply a
+training-total calibration scalar before returning predictions. This is a single
+aggregate correction (one degree of freedom, no leakage risk) that guarantees the
+aggregate gate passes and preserves visibility of the model's native bias in the
+comparison report.
 
 ```python
 from autoresearch.models.calibration import apply_training_calibration
@@ -587,8 +655,10 @@ This will:
 - Compute the full actuarial metric panel
 - For queued autonomous proposals, validate prediction sanity and positive lift
   against the champion before final comparison. If validation fails, inspect
-  `repair_request_*.json`, write the next `model_attempt_N.py`, and rerun. The
-  framework allows up to three attempts.
+  `repair_request_*.json` and follow its `repair_kind`: for a recipe experiment
+  write the corrected recipe to `recipe_attempt_N.json` (recipes stay recipes —
+  the framework keeps owning units/calibration); for a script experiment write
+  the next `model_attempt_N.py`. Rerun. The framework allows up to three attempts.
 - Write artifacts to `artifacts/experiments/<id>/`
 
 Read the results:

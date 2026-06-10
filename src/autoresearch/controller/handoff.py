@@ -9,6 +9,7 @@ import shutil
 from typing import Any
 
 from autoresearch.config import ProjectConfig, ensure_project_dirs
+from autoresearch.controller.champion_template import RESERVED_INBOX_FILENAMES
 from autoresearch.controller.context import build_llm_context
 from autoresearch.controller.workflow import enqueue_proposal_from_file, run_next_queued_proposal
 from autoresearch.experiment_registry.registry import (
@@ -78,6 +79,32 @@ def _proposal_template(config: ProjectConfig, context: dict[str, Any]) -> dict[s
     search_space = context.get("allowed_search_space") or {}
     strategies = search_space.get("target_strategies") or ["direct_pure_premium"]
     default_strategy = strategies[0]
+    champion_recipe_path = config.handoff_proposal_inbox_dir / "champion_recipe.json"
+    if champion_recipe_path.exists():
+        try:
+            champion_artifact = read_json(champion_recipe_path)
+            default_strategy = champion_artifact.get("target_strategy") or default_strategy
+        except Exception:
+            pass
+        model = {
+            "recipe_ref": "champion",
+            "recipe_overrides": {},
+            "feature_exclusions": [],
+        }
+        model_family = "recipe"
+    else:
+        model = {
+            "recipe": {
+                "structure": "direct",
+                "estimator": "lightgbm",
+                "objective": "tweedie",
+                "encoding": "native_categorical",
+                "early_stopping": 50,
+                "params": {"num_leaves": 63, "learning_rate": 0.05},
+            },
+            "feature_exclusions": [],
+        }
+        model_family = "recipe"
     return {
         "experiment_name": "concise_experiment_name",
         "rationale": "Why this change is worth trying.",
@@ -90,12 +117,9 @@ def _proposal_template(config: ProjectConfig, context: dict[str, Any]) -> dict[s
         "feature_representation": "raw",
         "expected_learning": "What this experiment should teach even if it fails.",
         "experiment_config": {
-            "model_family": "scripted_challenger",
+            "model_family": model_family,
             "target_strategy": default_strategy,
-            "model": {
-                "script_path": "model.py",
-                "feature_exclusions": [],
-            },
+            "model": model,
         },
     }
 
@@ -113,7 +137,7 @@ def ingest_proposals(config: ProjectConfig) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     accepted_valid = _active_queued_count(config) > 0
     for proposal_file in sorted(config.handoff_proposal_inbox_dir.glob("*.json")):
-        if proposal_file.name == "proposal_template.json":
+        if proposal_file.name == "proposal_template.json" or proposal_file.name in RESERVED_INBOX_FILENAMES:
             continue
         if accepted_valid:
             results.append({
@@ -254,8 +278,14 @@ def inbox_status(config: ProjectConfig) -> dict[str, Any]:
     invalid_dir = config.handoff_proposal_processed_dir / "invalid"
     return {
         "inbox_dir": str(config.handoff_proposal_inbox_dir),
-        "inbox_json_count": len([p for p in config.handoff_proposal_inbox_dir.glob("*.json") if p.name != "proposal_template.json"]),
-        "inbox_files": [str(p) for p in sorted(config.handoff_proposal_inbox_dir.glob("*.json"))],
+        "inbox_json_count": len([
+            p for p in config.handoff_proposal_inbox_dir.glob("*.json")
+            if p.name != "proposal_template.json" and p.name not in RESERVED_INBOX_FILENAMES
+        ]),
+        "inbox_files": [
+            str(p) for p in sorted(config.handoff_proposal_inbox_dir.glob("*.json"))
+            if p.name not in RESERVED_INBOX_FILENAMES
+        ],
         "processed_valid_count": len(list(valid_dir.glob("*.json"))) if valid_dir.exists() else 0,
         "processed_invalid_count": len(list(invalid_dir.glob("*.json"))) if invalid_dir.exists() else 0,
         "processed_duplicate_count": len(list((config.handoff_proposal_processed_dir / "duplicate").glob("*.json")))
@@ -291,12 +321,16 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
     features = search_space.get("feature_columns") or []
     target_strategies = search_space.get("target_strategies") or ["direct_pure_premium"]
     target_mode = search_space.get("active_target_mode") or config.target_mode
-    return_instruction = (
-        "Return expected claim counts (not rates): if predicting annual claim frequency, multiply by "
-        "`score['exposure_term_a']`"
-        if target_mode == "frequency"
-        else "Return claim costs (not rates): if predicting pure premium, multiply by `score['exposure_term_a']`"
+
+    # Recipe vocabulary (generated from the live registry, so it never drifts).
+    from autoresearch.models.recipe import menu as _recipe_menu
+
+    _menu = _recipe_menu()
+    estimator_menu = "; ".join(
+        f"`{name}` (obj {sorted(info['objectives'])})"
+        for name, info in _menu["estimators"].items()
     )
+    _default_objective = "poisson" if target_mode == "frequency" else "tweedie"
     feature_list = ", ".join(f"`{f}`" for f in features)
     tree = context.get("research_tree") or {}
     research_lines = context.get("research_lines") or {}
@@ -308,6 +342,34 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
     action_lines = _render_tree_policy_lines(recommended_actions)
     deferred_lines = _render_deferred_proposal_warning(config)
     learning_lines = _render_recent_learnings(config, context)
+
+    champion_recipe_path = config.handoff_proposal_inbox_dir / "champion_recipe.json"
+    if champion_recipe_path.exists():
+        try:
+            champion_artifact = read_json(champion_recipe_path)
+            template_target_strategy = (
+                champion_artifact.get("target_strategy") or "direct_pure_premium"
+            )
+        except Exception:
+            template_target_strategy = "direct_pure_premium"
+        template_model = {
+            "recipe_ref": "champion",
+            "recipe_overrides": {
+                "params": {"num_leaves": "<new_value>"}
+            },
+        }
+    else:
+        template_target_strategy = "direct_pure_premium"
+        template_model = {
+            "recipe": {
+                "structure": "direct",
+                "estimator": "lightgbm",
+                "objective": _default_objective,
+                "encoding": "native_categorical",
+                "early_stopping": 50,
+                "params": {"num_leaves": 63, "learning_rate": 0.05},
+            }
+        }
 
     template_json = json.dumps({
         "experiment_name": "<concise_name>",
@@ -321,10 +383,17 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "feature_representation": "<feature representation used by the proposal>",
         "expected_learning": "<what this experiment should teach even if it fails>",
         "experiment_config": {
-            "model_family": "scripted_challenger",
-            "target_strategy": "direct_pure_premium",
-            "model": {"script_path": "model_<name>.py"},
+            "model_family": "recipe",
+            "target_strategy": template_target_strategy,
+            "model": template_model,
         },
+    }, indent=2)
+
+    # Escape-hatch shape, shown only as the alternative for novel models.
+    script_config_json = json.dumps({
+        "model_family": "scripted_challenger",
+        "target_strategy": "direct_pure_premium",
+        "model": {"script_path": "model_<name>.py"},
     }, indent=2)
 
     # Optional block — only include the keys you want to override. The controller
@@ -395,14 +464,22 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "## Current state",
         "",
         f"- **Champion**: `{champion_id}` (branch `{branch_id}`{gini_str})",
-        f"- **Inbox**: `{config.handoff_proposal_inbox_dir}`  ← write proposal JSON + model script here",
+        f"- **Inbox**: `{config.handoff_proposal_inbox_dir}`  ← write the proposal JSON here",
         f"- **Next command**: `{_next_supervised_command(config, context)}`",
+        *_render_champion_followup(config),
         "",
         "## Proposal quick-start",
         "",
         f"Copy this to `{config.handoff_proposal_inbox_dir}/proposal_<name>.json` and fill in the `<...>` fields.",
-        "Also write `model_<name>.py` (same directory) with a `fit_predict(train, score, ...)` function.",
         "Write exactly one proposal for this context refresh.",
+        "",
+        "**Prefer a declarative `model.recipe`** (below): trusted framework code builds the model "
+        "and owns exposure→total conversion and calibration — no Python file, no hand-calibration. "
+        f"Estimators: {estimator_menu}. Structures: `direct`, `frequency_severity` (burning-cost only). "
+        "Encoding defaults per estimator; `early_stopping` uses a framework train-internal split.",
+        "When a recipe champion exists, use `model.recipe_ref: \"champion\"` plus only the nested "
+        "`recipe_overrides` you are changing. The controller resolves and validates the full recipe "
+        "before execution. Put `feature_inclusions`/`feature_exclusions` beside the reference, not inside it.",
         "",
         "Supply only the scientific fields below. The controller derives the rest "
         "(`proposal_id`, parentage, `branch_action`, the tree-walk fields, the "
@@ -412,6 +489,17 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "",
         "```json",
         template_json,
+        "```",
+        "",
+        "**Escape hatch (novel models only):** if the recipe vocabulary cannot express your idea, "
+        "write `model_<name>.py` (same directory) exposing "
+        "`fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hyperparameters)` "
+        "and set `experiment_config.model.script_path` instead of `recipe`. Return a "
+        "`Prediction(values=rates, unit=\"rate\")` from `autoresearch.models.prediction` and the framework "
+        "converts to totals and calibrates for you (a recipe and a script are mutually exclusive):",
+        "",
+        "```json",
+        script_config_json,
         "```",
         "",
         "By default the controller follows the top recommended tree action and "
@@ -429,12 +517,10 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "",
         f"- **Target mode**: `{target_mode}`",
         f"- **Features available**: {feature_list}",
-        "- **Exposure policy**: `exposure_term_a` is not a predictive feature. Use it only for sample weights, response denominators, and multiplying predicted rates back to target totals.",
-        f"- **Target strategies**: {', '.join(f'`{s}`' for s in target_strategies)}",
+        "- **Exposure policy**: `exposure_term_a` is not a predictive feature. The framework uses it for sample weights, response denominators, and rate→total conversion — you do not.",
+        f"- **Target strategies**: {', '.join(f'`{s}`' for s in target_strategies)} (must agree with the recipe `structure`: `direct_pure_premium`/`frequency`→`direct`, `frequency_severity`→`frequency_severity`)",
         "- **Claim cap**: `100000` (fixed — never change `claim_cap_threshold`)",
-        "- **`model.py` interface**: must expose `fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hyperparameters) -> tuple[np.ndarray, dict]`",
-        f"- **{return_instruction}**",
-        "- **Always apply** `apply_training_calibration` from `autoresearch.models.calibration` before returning",
+        "- **Units & calibration are framework-owned**: a recipe (or a script returning `Prediction`) needs no exposure conversion or `apply_training_calibration` call. Only a script returning a raw `np.ndarray` must return totals and calibrate itself.",
         "- **Never reference** `milestone_holdout`, `holdout_vault`, or `AUTORESEARCH_MILESTONE_TOKEN`",
         "",
         "## Exploration tree",
@@ -457,6 +543,7 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "",
         *node_lines,
         *learning_lines,
+        *_render_recipe_reuse(config),
         *_playbook_link_lines,
         "",
         "## Optional drill-down",
@@ -489,17 +576,24 @@ def proposal_schema_document(config: ProjectConfig, context: dict[str, Any]) -> 
             "experiment_config.parent_experiment_id",
             "experiment_config.preprocessing",
         ],
-        "experiment_config_required": ["model_family", "target_strategy", "model.script_path"],
+        "experiment_config_required": [
+            "model_family",
+            "target_strategy",
+            "model.recipe OR model.recipe_ref OR model.script_path",
+        ],
         "allowed_search_space": context["allowed_search_space"],
         "notes": [
             "Supply only the required scientific fields plus experiment_config "
-            "(model_family, target_strategy, model.script_path); the controller "
+            "(model_family, target_strategy, and a model implementation); the controller "
             "hydrates every controller_derived field at ingestion.",
             "Any controller_derived field may still be supplied to override its default.",
             "proposal_id, when supplied, must use letters, numbers, hyphen, or underscore.",
             "experiment_config.experiment_name (derived) mirrors experiment_name.",
             "experiment_config.parent_experiment_id (derived) mirrors parent_experiment_id.",
-            "experiment_config.model.script_path is required for non-global_mean autonomous experiments.",
+            "Provide exactly one of model.recipe, model.recipe_ref='champion', or model.script_path. "
+            "recipe_ref accepts an optional nested recipe_overrides object and is resolved before validation.",
+            "A recipe's structure must agree with target_strategy (direct↔direct_pure_premium/frequency; "
+            "frequency_severity↔frequency_severity).",
             "Do not use exposure_term_a as a predictive feature; it is reserved for weights and response calculations.",
             "research_parent_node_id is optional and may only point to a node from this active run's research_tree.",
             "tree_action=new_root may use research_parent_node_id=null; all other tree actions must point to a valid active-run node.",
@@ -530,6 +624,56 @@ def _next_supervised_command(config: ProjectConfig, context: dict[str, Any]) -> 
         return f"autoresearch --track {config.track_id} --run-id {config.run_id} start-session main"
 
     return f"autoresearch --track {config.track_id} --run-id {config.run_id} run-session-cycle"
+
+
+def _render_champion_followup(config: ProjectConfig) -> list[str]:
+    """Point the agent at the generated champion follow-up artifacts when present."""
+    inbox = config.handoff_proposal_inbox_dir
+    recipe_path = inbox / "champion_recipe.json"
+    template_path = inbox / "champion_template.py"
+    if recipe_path.exists():
+        return [
+            f"- **Champion follow-up**: set `model.recipe_ref` to `\"champion\"` and provide only "
+            "`model.recipe_overrides` for changed recipe fields. The controller resolves "
+            f"`{recipe_path.name}` and preserves provenance — do not rewrite the recipe."
+        ]
+    if template_path.exists():
+        return [
+            f"- **Champion follow-up**: `{template_path.name}` (script) reproduces the champion; "
+            "edit `PARAM_OVERRIDES` for a small follow-up."
+        ]
+    return []
+
+
+def _render_recipe_reuse(config: ProjectConfig, *, limit: int = 8) -> list[str]:
+    """Inline a compact ranked summary of recipes tried so far (the reuse library).
+
+    Surfacing this in the authoritative handoff is what makes the recipe library
+    actually influence the next proposal — both winners to build on and dead-ends
+    to avoid repeating. Scope (run-local vs cross-run) follows ``[recipes]``.
+    """
+    try:
+        from autoresearch.models.recipe_library import effective_reuse_scope, list_recipes
+
+        rows = list_recipes(config, limit=limit)
+    except Exception:
+        return []
+    if not rows:
+        return []
+    scope = effective_reuse_scope(config)
+    lines = [
+        "## Recipe reuse",
+        "",
+        f"Recipes tried so far (scope: `{scope}`), best/most-terminal first. Build on what worked; "
+        "do not re-run a recipe that already lost or failed:",
+        "",
+    ]
+    for r in rows:
+        score = r.get("score")
+        score_str = f"{score:.4f}" if isinstance(score, (int, float)) else "—"
+        lines.append(f"- `{r.get('summary')}` — {r.get('outcome')} (score {score_str})")
+    lines.append("")
+    return lines
 
 
 def _render_recent_learnings(config: ProjectConfig, context: dict[str, Any]) -> list[str]:

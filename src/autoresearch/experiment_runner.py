@@ -422,6 +422,30 @@ def run_experiment(
         timed_out=timed_out,
         notes=f"Experiment with {model_family}/{target_strategy}; milestone holdout not accessed.",
     )
+
+    # Record declarative recipes for the reuse library (#6). Best-effort.
+    recipe_obj = model_cfg.get("recipe")
+    if isinstance(recipe_obj, dict) and recipe_obj:
+        from autoresearch.models.recipe_library import record_recipe
+
+        eval_split = config.ordinary_eval_splits[0] if config.ordinary_eval_splits else None
+        gini = next(
+            (row.get("gini_weighted") for row in metrics.get("split_metrics", [])
+             if row.get("split") == eval_split),
+            None,
+        )
+        record_recipe(
+            config,
+            recipe_obj,
+            experiment_id=experiment_id,
+            outcome="completed",
+            score=gini,
+            target_strategy=target_strategy,
+            feature_inclusions=model_cfg.get("feature_inclusions"),
+            feature_exclusions=model_cfg.get("feature_exclusions"),
+            model_spec={"target_strategy": target_strategy, **model_cfg},
+        )
+
     return artifacts
 
 

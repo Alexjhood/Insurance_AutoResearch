@@ -204,9 +204,46 @@ def validate_proposal(proposal: dict[str, Any], search_space: dict[str, Any]) ->
         errors.append("model must be an object")
     else:
         script_path = model.get("script_path") or model.get("model_script_path")
+        recipe = model.get("recipe")
+        if recipe is not None:
+            if not isinstance(recipe, dict):
+                errors.append("model.recipe must be an object")
+            else:
+                from autoresearch.models.recipe import validate_recipe
+                target_mode = search_space.get("active_target_mode", "burning_cost")
+                errors.extend(
+                    f"model.recipe: {msg}"
+                    for msg in validate_recipe(recipe, target_mode=target_mode)
+                )
+        has_recipe = isinstance(recipe, dict)
+        has_script = isinstance(script_path, str) and bool(script_path.strip())
         if search_space.get("requires_model_script", False) and family != "global_mean":
-            if not isinstance(script_path, str) or not script_path.strip():
-                errors.append("model.script_path is required for non-global_mean autonomous experiments")
+            # A declarative recipe OR a Python escape-hatch script satisfies the
+            # model requirement (recipes are encouraged for known methods; scripts
+            # remain first-class for novel exploration).
+            if not (has_script or has_recipe):
+                errors.append(
+                    "model.recipe or model.script_path is required for non-global_mean "
+                    "autonomous experiments"
+                )
+        # Exactly one coherent representation — the dispatcher would otherwise let a
+        # script silently shadow a recipe, or fail at runtime on a recipe under a
+        # non-'recipe' family.
+        if has_recipe and has_script:
+            errors.append("Provide either model.recipe or model.script_path, not both")
+        if has_recipe and family != "recipe":
+            errors.append("model_family must be 'recipe' when model.recipe is provided")
+        if has_recipe and isinstance(recipe, dict):
+            structure = recipe.get("structure", "direct")
+            ts = exp_config.get("target_strategy")
+            if structure == "frequency_severity" and ts != "frequency_severity":
+                errors.append(
+                    "recipe structure 'frequency_severity' requires target_strategy 'frequency_severity'"
+                )
+            if structure == "direct" and ts == "frequency_severity":
+                errors.append(
+                    "recipe structure 'direct' is incompatible with target_strategy 'frequency_severity'"
+                )
         allowed_features = set(search_space.get("feature_columns", []))
         non_predictive = set(search_space.get("non_predictive_columns", []))
         for key in ("feature_inclusions", "feature_exclusions"):

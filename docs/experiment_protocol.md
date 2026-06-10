@@ -85,12 +85,19 @@ Every experiment folder under `artifacts/experiments/<experiment_id>/` must cont
 
 ## Proposal Constraints
 
-Autonomous proposals must provide a run-local script for every non-`global_mean`
-experiment via `experiment_config.model.script_path`. The script is copied into
-the proposal iteration directory, scanned for holdout markers, and executed
-through the `fit_predict()` contract. Built-in GLM/GBM ideas are allowed, but
-the implementation must live in the run-local script rather than relying on a
-pre-existing module in `src/autoresearch/models`.
+Autonomous proposals must provide a model implementation for every
+non-`global_mean` experiment, **either**:
+
+- a declarative `experiment_config.model.recipe` (preferred; `model_family =
+  "recipe"`) — validated against the recipe building-block registry and the
+  target/objective validity matrix before running; **or**
+- a run-local script via `experiment_config.model.script_path` (escape hatch for
+  novel methods) — copied into the proposal iteration directory, scanned for
+  holdout markers, and executed through the `fit_predict()` contract.
+
+Either way the implementation is an auditable per-run artifact (a recipe object
+or a script) rather than a pre-existing module imported from
+`src/autoresearch/models`.
 
 The proposal search space is validated before any experiment is run. Per-family bounds:
 

@@ -313,7 +313,13 @@ failures without reducing the search space.
 
 ## 6. Introduce Declarative Model Recipes With a Python Escape Hatch
 
-Priority: P0
+Priority: P0 — **Implemented.** `autoresearch.models.recipe` interprets a
+validated recipe (`model.recipe`, `model_family = "recipe"`) built from a curated,
+decorator-extensible registry of estimators/objectives/encodings/structures
+(`direct` and `frequency_severity`). The validity matrix rejects illegal combos
+before running. Run-local scripts remain a first-class escape hatch. Recipe reuse
+is governed by `[recipes] reuse_scope`: `run` (Option 1, default) or `memory`
+(Option 2, cross-run, only under memory access).
 
 Most experiments use a small set of repeatable operations:
 
@@ -345,7 +351,12 @@ solution strength while making common experiments cheaper and more reliable.
 
 ## 7. Move Units, Exposure Conversion, and Calibration Into the Framework
 
-Priority: P0
+Priority: P0 — **Implemented.** `autoresearch.models.prediction.Prediction(values,
+unit)` lets any model (recipe or script) return rates or totals; the dispatcher
+finalises it — rate→total via exposure, single-scalar training calibration,
+native-bias recording, and validation. Objective/label validators (gamma>0,
+poisson≥0, non-empty severity, `best_iteration` guard) live in framework code.
+Returning a raw `np.ndarray` preserves the legacy self-calibrated contract.
 
 The LLM should not repeatedly implement the most safety-critical bookkeeping.
 
@@ -373,7 +384,11 @@ Claude run and removes repeated calibration/exposure code from every script.
 
 ## 8. Generate the Promised Champion Template
 
-Priority: P0
+Priority: P0 — **Implemented.** After every promotion,
+`autoresearch.controller.champion_template` writes `champion_recipe.json` and a
+`champion_template.py` (with a `PARAM_OVERRIDES` block) into the run inbox, so a
+one-parameter follow-up is a tiny diff. Script-based champions are copied as the
+starting template.
 
 Either generate `proposal_inbox/champion_template.py` or remove the instruction.
 Prefer generating it after every promotion.
