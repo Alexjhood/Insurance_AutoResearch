@@ -115,8 +115,9 @@ first `bootstrap-track`, which prints the id):
 ### When a cycle needs repair
 
 A cycle can stop in **`needs_repair`** (instead of `awaiting_decision`) when the
-model fails preflight, output validation, or the positive-lift check. The
-framework writes `repair_request_<N>.json` into the proposal directory. Recover
+model fails preflight, the compute budget, or output validation. A negative lift
+is **not** a repair trigger — such models proceed to screening. The framework
+writes `repair_request_<N>.json` into the proposal directory. Recover
 without guessing — the file tells you what to do via its `repair_kind`:
 
 1. Read `repair_request_<N>.json`: `repair_kind`, `failed_checks`, `instruction`.
@@ -197,8 +198,10 @@ from the handoff. Column constants (`from autoresearch.models.dispatcher import`
 Per-experiment wall-clock budget: **10 min for the first 5 experiments,
 +5 min every 5 thereafter** — `budget_minutes = 10 + 5 × (N // 5)`.
 The challenger is refit ~5× per comparison (1 fit + 4 CV folds), so budget your
-single fit at ~1/5 of that. Watch `n_estimators × (1/learning_rate)`,
-`num_leaves`/`max_depth`, and row count.
+single fit at ~1/5 of that. A close call (win rate in [0.40, 0.60]) escalates to
+more folds — up to ~13× the single fit, *outside* the budget alarm — so leave
+headroom. Watch `n_estimators × (1/learning_rate)`, `num_leaves`/`max_depth`,
+and row count.
 
 ## Decision policy
 

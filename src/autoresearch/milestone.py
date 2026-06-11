@@ -103,7 +103,7 @@ def evaluate_on_holdout(
         report_path.write_text(
             f"# Milestone Holdout Report — {promotion_id}\n\n"
             f"**Skipped**: {exc}\n\n"
-            "Re-run with `autoresearch evaluate-milestone {champion_id}` after resolving.\n",
+            f"Re-run with `autoresearch evaluate-milestone {champion_id}` after resolving.\n",
             encoding="utf-8",
         )
         if not is_vault_absent:

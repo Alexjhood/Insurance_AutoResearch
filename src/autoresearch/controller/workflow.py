@@ -851,15 +851,19 @@ def _run_validated_experiment_attempts(
     """
 
     last_report: dict[str, Any] | None = None
-    # Track per-attempt numeric lifts for auto-abandon check.
-    attempt_lifts: list[float | None] = []
     noise_eps = getattr(config, "repair_noise_floor_eps", 0.002)
     auto_abandon = getattr(config, "repair_auto_abandon_enabled", True)
     # A recipe-origin experiment repairs as a recipe (the framework owns units &
     # calibration); only an explicit escape-hatch script forces the script path.
     recipe_origin = _proposal_recipe(proposal) is not None
 
-    for attempt in range(1, 4):
+    # On a repaired rerun, resume at the prepared attempt instead of re-fitting
+    # the known-failing earlier attempts from scratch. Replay their persisted
+    # lifts so the auto-abandon history is preserved.
+    start_attempt = _resume_attempt_index(proposal_dir)
+    attempt_lifts: list[float | None] = _reconstruct_attempt_lifts(proposal_dir, start_attempt)
+
+    for attempt in range(start_attempt, 4):
         attempt_script = proposal_dir / f"model_attempt_{attempt}.py"
         attempt_recipe = proposal_dir / f"recipe_attempt_{attempt}.json"
         cfg = dict(proposal["config"])
@@ -1107,6 +1111,43 @@ def _next_attempt_available(proposal_dir: Path, next_attempt: int) -> bool:
     )
 
 
+def _resume_attempt_index(proposal_dir: Path) -> int:
+    """Where the attempt loop should start when a repaired cycle is rerun.
+
+    A previous process already ran (and recorded) attempts 1..N-1 before stopping
+    with ``repair_request_<N>.json``. Restarting at attempt 1 would re-fit the
+    known-failing attempt from scratch on every rerun (and again per repair).
+    Resume at the highest attempt that has both a pending repair request *and* the
+    corrected input the agent was asked to supply; otherwise start fresh at 1.
+    """
+    for candidate in (3, 2):
+        if (proposal_dir / f"repair_request_{candidate}.json").exists() and _next_attempt_available(
+            proposal_dir, candidate
+        ):
+            return candidate
+    return 1
+
+
+def _reconstruct_attempt_lifts(proposal_dir: Path, start_attempt: int) -> list[float | None]:
+    """Rebuild the per-attempt lift history for attempts skipped on resume.
+
+    Attempt ``k``'s lift was persisted into ``repair_request_<k+1>.json`` when it
+    failed. Replaying it keeps the two-consecutive-attempts auto-abandon check
+    correct across a resumed run instead of silently resetting it.
+    """
+    lifts: list[float | None] = []
+    for k in range(1, start_attempt):
+        request_path = proposal_dir / f"repair_request_{k + 1}.json"
+        lift: float | None = None
+        if request_path.exists():
+            try:
+                lift = read_json(request_path).get("failed_attempt_lift")
+            except Exception:
+                lift = None
+        lifts.append(lift)
+    return lifts
+
+
 def _repair_handoff_message(proposal_dir: Path, next_attempt: int, recipe_origin: bool) -> str:
     if recipe_origin:
         return (
@@ -1127,7 +1168,11 @@ def _write_repair_request(
     *,
     recipe_origin: bool = False,
 ) -> Path:
-    error_type = report.get("error_type", "positive_lift_failed")
+    error_type = report.get("error_type", "output_validation_failed")
+    lift_summary = report.get("lift_summary")
+    failed_attempt_lift = (
+        lift_summary.get("lift") if isinstance(lift_summary, dict) else None
+    )
     payload: dict[str, Any] = {
         "next_attempt": next_attempt,
         "error_type": error_type,
@@ -1135,6 +1180,9 @@ def _write_repair_request(
         "failed_checks": [check for check in report.get("checks", []) if not check.get("passed")],
         "metrics_summary": report.get("metrics_summary"),
         "comparison_report": report.get("comparison_report"),
+        # Lift of the attempt that just failed (= attempt next_attempt - 1). Lets a
+        # resumed run reconstruct the auto-abandon history without re-fitting it.
+        "failed_attempt_lift": failed_attempt_lift,
     }
     if recipe_origin:
         payload["repair_kind"] = "recipe"

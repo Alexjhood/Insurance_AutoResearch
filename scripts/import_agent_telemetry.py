@@ -16,12 +16,16 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from autoresearch.telemetry.importer import find_transcript, sync_session
+from autoresearch.telemetry.importer import (
+    find_transcript,
+    sync_opencode_session,
+    sync_session,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--surface", required=True, choices=("claude", "codex"))
+    parser.add_argument("--surface", required=True, choices=("claude", "codex", "opencode"))
     parser.add_argument("--session-id")
     parser.add_argument("--transcript-path")
     parser.add_argument("--track")
@@ -49,6 +53,17 @@ def main(argv: list[str] | None = None) -> int:
             return _finish(args, {"status": "skipped", "reason": "session_not_bound"})
 
         run_dir = ROOT / "artifacts" / "tracks" / str(track) / "runs" / str(run_id)
+
+        # OpenCode keeps its history in its own SQLite database rather than a
+        # transcript file, so it has no find_transcript/deferred-settle path: read
+        # the session straight from the DB on both SessionStart and Stop.
+        if args.surface == "opencode":
+            result = sync_opencode_session(
+                run_dir=run_dir,
+                native_session_id=str(session_id),
+            )
+            return _finish(args, result)
+
         transcript = find_transcript(
             surface=args.surface,
             native_session_id=str(session_id),

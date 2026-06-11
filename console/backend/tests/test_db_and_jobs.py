@@ -158,6 +158,33 @@ def test_job_environment_binds_agent_to_assigned_run():
     assert "Do not use `--new-run`" in prompt
 
 
+def test_job_environment_strips_holdout_token():
+    """The holdout vault token must never reach a research-scoped agent process.
+
+    With it present, an agent-triggered promotion would write real holdout
+    metrics into a run folder it is allowed to read — a leakage channel the
+    integrity scanner does not cover.
+    """
+    import os
+
+    import console.backend.orchestrator.jobs as jobs
+
+    os.environ["AUTORESEARCH_MILESTONE_TOKEN"] = "secret-should-not-propagate"
+    try:
+        env = jobs._build_env(
+            {
+                "scope": "research",
+                "memory_access": "none",
+                "track": "codex",
+                "run_id": "20260610T072525Z",
+            }
+        )
+    finally:
+        os.environ.pop("AUTORESEARCH_MILESTONE_TOKEN", None)
+
+    assert "AUTORESEARCH_MILESTONE_TOKEN" not in env
+
+
 def test_schema_init_runs_once():
     """Reconnecting many times should not re-run schema each time (perf)."""
     with tempfile.TemporaryDirectory() as tmp:

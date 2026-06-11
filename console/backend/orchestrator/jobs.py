@@ -50,6 +50,11 @@ def _make_run_id() -> str:
 
 def _build_env(job: dict) -> dict:
     env = {**os.environ}
+    # Never propagate the holdout vault token into a research-scoped agent: the
+    # agent triggers holdout evaluation on promotion in-process, and with the
+    # token present it would write real holdout metrics into a run folder it is
+    # allowed to read — a leakage channel the integrity scanner does not cover.
+    env.pop("AUTORESEARCH_MILESTONE_TOKEN", None)
     env["AUTORESEARCH_SCOPE"] = job.get("scope", "research")
     env["AUTORESEARCH_MEMORY_ACCESS"] = job.get("memory_access", "none")
     env["AUTORESEARCH_TRACK"] = job["track"]
