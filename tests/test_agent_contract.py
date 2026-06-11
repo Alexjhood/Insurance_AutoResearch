@@ -42,6 +42,21 @@ def test_agent_md_is_in_sync_with_sources():
     )
 
 
+def test_harness_mirrors_match_agent_md():
+    """AGENTS.md / CLAUDE.md must be byte-identical copies of AGENT.md.
+
+    These are the harness-native auto-load files (Codex/OpenCode read AGENTS.md,
+    Claude Code reads CLAUDE.md); they must not drift from the canonical contract.
+    """
+    expected = gen.render()
+    for mirror in gen.AGENT_MIRRORS:
+        assert mirror.exists(), f"{mirror.name} missing; run the generator."
+        assert mirror.read_text(encoding="utf-8") == expected, (
+            f"{mirror.name} is out of sync. "
+            "Regenerate with: python scripts/generate_agent_contract.py"
+        )
+
+
 def test_workflow_commands_exist_in_cli():
     """Every command the contract renders must be a real CLI subcommand."""
     missing = [name for name, _ in gen.WORKFLOW_COMMANDS if name not in COMMANDS]

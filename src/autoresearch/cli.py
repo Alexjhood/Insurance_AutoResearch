@@ -110,7 +110,7 @@ def _cmd_bootstrap_track(config, args) -> int:
     print(json.dumps(result, indent=2, sort_keys=True))
     print(
         f"\nReady: read {result['context']} and continue with "
-        f"`autoresearch --track {config.track_id} --run-id {config.run_id} run-session-cycles 10`."
+        f"`autoresearch --track {config.track_id} --run-id {config.run_id} run-session-cycles 1`."
     )
     return 0
 

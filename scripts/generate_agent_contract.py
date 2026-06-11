@@ -44,6 +44,11 @@ from autoresearch.models.recipe import menu as recipe_menu  # noqa: E402
 from autoresearch.utils.integrity import PROTECTED_RELATIVE_PATHS  # noqa: E402
 
 AGENT_MD = REPO_ROOT / "AGENT.md"
+# Harness-native auto-load copies of the same contract: Codex auto-loads
+# AGENTS.md, Claude Code auto-loads CLAUDE.md, OpenCode reads AGENTS.md. Emitting
+# byte-identical copies puts the contract in each harness's system region ahead
+# of the dynamic seed prompt, removing the agent's start-of-run AGENT.md read.
+AGENT_MIRRORS = [REPO_ROOT / "AGENTS.md", REPO_ROOT / "CLAUDE.md"]
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.toml"
 MANUAL_REL = "docs/OPERATING_MANUAL.md"
 
@@ -137,8 +142,8 @@ every promotion is re-checked on a protected holdout. Each run starts with the
 `global_mean` baseline as champion — your first model only has to beat a flat
 exposure-weighted rate.
 
-For anything not covered here, read **{MANUAL_REL}** (full manual: dataset
-schema, metric panel, gate modes, research-line mechanics, worked examples).
+Escalation only — most runs never need it: **{MANUAL_REL}** has the full manual
+(dataset schema, metric panel, gate modes, research-line mechanics, worked examples).
 
 ## Hard safety constraints — never break
 
@@ -355,21 +360,29 @@ def main() -> int:
 
     _validate_commands()
     content = render()
+    targets = [AGENT_MD, *AGENT_MIRRORS]
 
     if args.check:
-        current = AGENT_MD.read_text(encoding="utf-8") if AGENT_MD.exists() else ""
-        if current != content:
+        stale = [
+            t.relative_to(REPO_ROOT)
+            for t in targets
+            if (t.read_text(encoding="utf-8") if t.exists() else "") != content
+        ]
+        if stale:
+            names = ", ".join(str(p) for p in stale)
             print(
-                "AGENT.md is out of sync with its sources. "
+                f"{names} out of sync with sources. "
                 "Run: python scripts/generate_agent_contract.py",
                 file=sys.stderr,
             )
             return 1
-        print("AGENT.md is in sync.")
+        print("AGENT.md (and harness mirrors) in sync.")
         return 0
 
-    AGENT_MD.write_text(content, encoding="utf-8")
-    print(f"Wrote {AGENT_MD.relative_to(REPO_ROOT)} ({len(content):,} bytes).")
+    for target in targets:
+        target.write_text(content, encoding="utf-8")
+    written = ", ".join(str(t.relative_to(REPO_ROOT)) for t in targets)
+    print(f"Wrote {written} ({len(content):,} bytes each).")
     return 0
 
 

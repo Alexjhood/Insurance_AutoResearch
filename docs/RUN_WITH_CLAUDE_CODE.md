@@ -21,19 +21,23 @@ Claude Code will read `AGENT.md` at the start of every session. No additional co
 Copy and paste this block into Claude Code (replace model name/version as appropriate):
 
 ```
-Read AGENT.md, then bootstrap a new run under track "claude" with
-a timestamped run id and run 3 cycles. Use synthetic data — I have
-already run scripts/generate_synthetic_data.py. Use `--new-run` for
-the bootstrap command. Pass --model-provider anthropic
---model-name claude-sonnet-4-6 to bootstrap-track.
+Read AGENT.md, then bootstrap a new run under track "claude" with a
+timestamped run id: use `--new-run` and pass --model-provider anthropic
+--model-name claude-sonnet-4-6 to bootstrap-track. Capture the run id it
+prints, then open the session with `start-session main --max-cycles 3`
+so the session owns the cycle budget, and run the adaptive loop
+(`run-session-cycles 1` at a time) until the session reports its budget
+is exhausted. The prepared dataset
+data/processed/agent_dataset_search.parquet already exists.
 ```
 
 ## What Happens
 
 - **Bootstrap**: `autoresearch --track claude --new-run bootstrap-track --model-provider anthropic --model-name claude-sonnet-4-6` creates a fresh timestamped run folder, creates the registry, runs the global-mean baseline, initialises the official champion, and exports the handoff context. The `--model-provider` and `--model-name` flags are required so results can be attributed in the cross-run memory aggregator.
+- **Session open**: `autoresearch --track claude --run-id <run-id> start-session main --max-cycles N` opens the supervised session and makes it own the cycle budget, so the session stops itself after N cycles instead of the agent counting.
 - **Handoff read**: the agent reads the latest handoff file to understand the current champion state before proposing anything.
 - **Proposal generation**: the agent writes a proposal JSON and a companion model script to the proposal inbox.
-- **Experiment run**: `autoresearch run-session-cycles N` ingests the proposal, runs the experiment, and compares the challenger to the current champion.
+- **Experiment run**: `autoresearch run-session-cycles 1` ingests the proposal, runs one cycle, and compares the challenger to the current champion; the agent decides, then repeats one cycle at a time.
 - **Promotion or rejection**: if all promotion gate checks pass, the challenger becomes the new champion; otherwise it is rejected and the research log records what was learned.
 
 ## Where to Look Afterward
@@ -79,12 +83,14 @@ autoresearch --track claude --run-id <run-id> telemetry sync \
 and is bound to a run. The telemetry hook deliberately skips unbound analysis
 sessions.
 
-## Recommended Command Pair
+## Recommended Command Sequence
 
 ```bash
 autoresearch --track claude --new-run bootstrap-track \
   --model-provider anthropic --model-name claude-sonnet-4-6
-autoresearch --track claude run-session-cycles 3
+# capture the printed run id, then let the session own the budget:
+autoresearch --track claude --run-id <run-id> start-session main --max-cycles 3
+autoresearch --track claude --run-id <run-id> run-session-cycles 1   # repeat until the budget is exhausted
 ```
 
 ## Run Isolation and Analysis Sessions

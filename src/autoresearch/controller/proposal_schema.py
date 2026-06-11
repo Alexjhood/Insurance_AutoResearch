@@ -300,4 +300,8 @@ def proposal_fingerprint(proposal: dict[str, Any]) -> str:
 def _round_if_float(v: Any) -> Any:
     if isinstance(v, float):
         return round(v, 6)
+    if isinstance(v, dict):
+        return {k: _round_if_float(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_round_if_float(x) for x in v]
     return v

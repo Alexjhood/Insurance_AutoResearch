@@ -24,20 +24,20 @@ _AUTORESEARCH = cfg.AUTORESEARCH_BIN
 
 SEED_TEMPLATES = {
     "claude": dedent("""\
-        Read AGENT.md, then run `autoresearch --track {track} --run-id {run_id} bootstrap-track --model-provider {model_provider} --model-name {model_name}` and complete {cycles} cycles in that exact run. \
-        Use synthetic data — data/processed/agent_dataset_search.parquet already exists. \
+        Read AGENT.md, then run `autoresearch --track {track} --run-id {run_id} bootstrap-track --model-provider {model_provider} --model-name {model_name}`, then `autoresearch --track {track} --run-id {run_id} start-session main --max-cycles {cycles}`, and run the adaptive cycle loop until the session reports its budget is exhausted. \
+        The prepared dataset data/processed/agent_dataset_search.parquet already exists. \
         Do not use `--new-run`. \
         {guidance}
     """),
     "codex": dedent("""\
-        Read AGENT.md, then run `autoresearch --track {track} --run-id {run_id} bootstrap-track --model-provider {model_provider} --model-name {model_name}` and complete {cycles} cycles in that exact run. \
-        Use synthetic data — data/processed/agent_dataset_search.parquet already exists. \
+        Read AGENT.md, then run `autoresearch --track {track} --run-id {run_id} bootstrap-track --model-provider {model_provider} --model-name {model_name}`, then `autoresearch --track {track} --run-id {run_id} start-session main --max-cycles {cycles}`, and run the adaptive cycle loop until the session reports its budget is exhausted. \
+        The prepared dataset data/processed/agent_dataset_search.parquet already exists. \
         Do not use `--new-run`. \
         {guidance}
     """),
     "opencode": dedent("""\
-        Read AGENT.md, then run `autoresearch --track {track} --run-id {run_id} bootstrap-track --model-provider {model_provider} --model-name {model_name}` and complete {cycles} cycles in that exact run. \
-        Use synthetic data — data/processed/agent_dataset_search.parquet already exists. \
+        Read AGENT.md, then run `autoresearch --track {track} --run-id {run_id} bootstrap-track --model-provider {model_provider} --model-name {model_name}`, then `autoresearch --track {track} --run-id {run_id} start-session main --max-cycles {cycles}`, and run the adaptive cycle loop until the session reports its budget is exhausted. \
+        The prepared dataset data/processed/agent_dataset_search.parquet already exists. \
         Do not use `--new-run`. \
         {guidance}
     """),

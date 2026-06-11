@@ -364,7 +364,7 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         template_model = {
             "recipe_ref": "champion",
             "recipe_overrides": {
-                "params": {"num_leaves": "<new_value>"}
+                "params": {"<param>": "<value>"}
             },
         }
     else:
@@ -668,7 +668,7 @@ def _next_supervised_command(config: ProjectConfig, context: dict[str, Any]) -> 
             '--next "<next direction or stop reason>"'
         )
 
-    return f"autoresearch --track {config.track_id} --run-id {config.run_id} run-session-cycle"
+    return f"autoresearch --track {config.track_id} --run-id {config.run_id} run-session-cycles 1"
 
 
 def _pending_auto_reject_reflection(config: ProjectConfig) -> dict[str, Any] | None:
