@@ -261,6 +261,14 @@ def _compact_research_nodes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         learning = row.get("change_summary") or row.get("expected_benefit") or ""
         if len(learning) > 140:
             learning = learning[:140] + "…"
+        cv_score = metrics.get("cv_challenger_score")
+        if cv_score is None:
+            cv_score = metrics.get("challenger_score") if "mean_lift" in metrics else None
+        split_score = metrics.get("split_challenger_score")
+        if split_score is None and "lift" in metrics:
+            split_score = metrics.get("challenger_score")
+        cv_lift = metrics.get("cv_mean_lift", metrics.get("mean_lift"))
+        split_lift = metrics.get("split_lift", metrics.get("lift"))
         result.append({
             "node_id": row.get("node_id"),
             "parent_node_id": row.get("parent_node_id"),
@@ -271,8 +279,10 @@ def _compact_research_nodes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "status": row.get("status"),
             "outcome_type": row.get("outcome_type"),
             "exploration_axis": metadata.get("exploration_axis"),
-            "score": metrics.get("score", metrics.get("mean_score")),
-            "lift": metrics.get("lift", metrics.get("mean_lift")),
+            "cv_score": cv_score,
+            "split_score": split_score,
+            "cv_lift": cv_lift,
+            "split_lift": split_lift,
             "learning": learning,
         })
     return result

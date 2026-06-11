@@ -224,7 +224,7 @@ def test_terminal_rejection_replaces_completed_and_preserves_score(tmp_path: Pat
     rows = lib.list_recipes(config)
     assert len(rows) == 1
     assert rows[0]["outcome"] == "rejected"
-    assert rows[0]["score"] == pytest.approx(0.3738)
+    assert rows[0]["screen_score"] == pytest.approx(0.3738)
 
 
 def test_recipe_library_distinguishes_feature_variants(tmp_path: Path) -> None:
@@ -266,6 +266,68 @@ def test_recipe_library_distinguishes_feature_variants(tmp_path: Path) -> None:
     summaries = {row["experiment_id"]: row["summary"] for row in rows}
     assert "features=except[risk_score_index_e]" in summaries["without"]
     assert "features=only[risk_score_index_e]" in summaries["only"]
+
+
+def test_recipe_summary_distinguishes_parameter_variants(tmp_path: Path) -> None:
+    from autoresearch.models import recipe_library as lib
+
+    config = _make_config(tmp_path)
+    config.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    first = {
+        "structure": "direct",
+        "estimator": "lightgbm",
+        "objective": "tweedie",
+        "encoding": "native_categorical",
+        "params": {"num_leaves": 127, "learning_rate": 0.03},
+    }
+    second = {
+        **first,
+        "params": {"num_leaves": 31, "learning_rate": 0.08},
+    }
+    lib.record_recipe(config, first, experiment_id="first", outcome="rejected", score=0.36)
+    lib.record_recipe(config, second, experiment_id="second", outcome="promoted", score=0.37)
+
+    rows = lib.list_recipes(config)
+    summaries = {row["experiment_id"]: row["summary"] for row in rows}
+
+    assert summaries["first"] != summaries["second"]
+    assert "leaves=127" in summaries["first"]
+    assert "lr=0.03" in summaries["first"]
+    assert "variant=" in summaries["first"]
+
+
+def test_recipe_library_ranks_current_champion_first(tmp_path: Path) -> None:
+    from autoresearch.experiment_registry.registry import set_official_champion
+    from autoresearch.models import recipe_library as lib
+
+    config = _make_config(tmp_path)
+    config.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    older = {
+        "structure": "direct",
+        "estimator": "lightgbm",
+        "objective": "tweedie",
+        "params": {"num_leaves": 127},
+    }
+    current = {
+        "structure": "direct",
+        "estimator": "lightgbm",
+        "objective": "tweedie",
+        "params": {"num_leaves": 31},
+    }
+    lib.record_recipe(config, older, experiment_id="older", outcome="promoted", score=0.39)
+    lib.record_recipe(config, current, experiment_id="current", outcome="promoted", score=0.37)
+    set_official_champion(
+        config.registry_path,
+        champion_id="current",
+        branch_id="main",
+        reason="test",
+        action="promoted",
+    )
+
+    rows = lib.list_recipes(config)
+
+    assert rows[0]["experiment_id"] == "current"
+    assert rows[0]["is_current_champion"] is True
 
 
 # ── C: recipe-aware repair request ────────────────────────────────────────────

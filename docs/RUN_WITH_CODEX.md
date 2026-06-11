@@ -44,9 +44,10 @@ the bootstrap command. Pass --model-provider openai
 
 ## Where to Look Afterward
 
-- `artifacts/tracks/codex/runs/<run-id>/RESEARCH_LOG.md` — the agent's running research log for this run
+- `artifacts/tracks/codex/runs/<run-id>/RESEARCH_LOG.md` — the framework-generated research log for this run
 - `artifacts/tracks/codex/runs/<run-id>/iterations/` — per-cycle experiment and comparison artifacts
 - `artifacts/tracks/codex/runs/<run-id>/telemetry.sqlite` — normalized Codex Desktop usage and tool telemetry
+- `artifacts/tracks/codex/runs/<run-id>/LLM_USAGE.md` — per-experiment and per-user-breakpoint token ledger, including output and reasoning tokens
 - The run detail page in the web Console — live token, cache, reasoning, tool, error, and framework-step summaries
 - The latest `comparison_report.html` inside the most recent `comparison/` folder
 

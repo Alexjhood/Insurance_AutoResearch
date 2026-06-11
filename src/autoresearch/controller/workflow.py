@@ -27,6 +27,7 @@ from autoresearch.controller.proposal_schema import (
 from autoresearch.experiment_registry.registry import (
     get_research_line,
     get_official_champion,
+    latest_incomplete_research_log_entry,
     list_artifacts,
     list_proposals,
     list_research_lines,
@@ -44,6 +45,7 @@ from autoresearch.experiment_registry.registry import (
 from autoresearch.experiment_runner import ComputeBudgetExceeded, PreflightFailed, run_experiment
 from autoresearch.evaluation.validation import ValidationRules, validate_experiment_outputs
 from autoresearch.run_artifacts import next_iteration_dir, proposal_iteration_dir
+from autoresearch.research_log import complete_pending_reflection_from_proposal
 from autoresearch.utils.io import read_json, write_json
 
 
@@ -194,6 +196,12 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
     if proposal is None:
         raise ValueError("No validated proposals are queued")
     proposal = _hydrate_proposal_from_path(proposal)
+    if not complete_pending_reflection_from_proposal(config, proposal):
+        raise ValueError(
+            "The previous cycle still needs reflection. Include "
+            "`previous_cycle_reflection` in this proposal or run "
+            "`record-cycle-reflection` before executing another experiment."
+        )
 
     proposal_id = proposal["proposal_id"]
     if proposal.get("parent_experiment_id") != champion["champion_id"]:
@@ -354,11 +362,12 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
         metrics_summary = {
             "target_mode": config.target_mode,
             "primary_metric": config.primary_metric,
+            "comparison_gate_mode": comp_summary.get("gate_mode"),
             "gate_primary_metric": comp_summary.get("gate_primary_metric"),
-            "challenger_score": round(float(comp_summary.get("challenger_mean_score") or 0), 6),
-            "champion_score": round(float(comp_summary.get("champion_mean_score") or 0), 6),
-            "mean_lift": round(float(comp_summary.get("mean_lift") or 0), 6),
-            "win_rate": round(float(comp_summary.get("challenger_win_rate") or 0), 4),
+            "cv_challenger_score": round(float(comp_summary.get("challenger_mean_score") or 0), 6),
+            "cv_champion_score": round(float(comp_summary.get("champion_mean_score") or 0), 6),
+            "cv_mean_lift": round(float(comp_summary.get("mean_lift") or 0), 6),
+            "cv_win_rate": round(float(comp_summary.get("challenger_win_rate") or 0), 4),
         }
         _upsert_proposal_node(
             config,
@@ -649,6 +658,7 @@ def _validate_and_normalise(
     _hydrate_recipe_reference(config, parsed, champion, reference_errors)
     space = allowed_search_space(config, context.get("agent_schema"))
     errors = reference_errors + validate_proposal(parsed, space)
+    _validate_previous_cycle_reflection(config, parsed, errors)
     if parsed.get("parent_experiment_id") != champion["champion_id"]:
         errors.append("parent_experiment_id must match the current official champion")
     parent_branch = parsed.get("parent_branch_id") or champion["branch_id"]
@@ -661,6 +671,31 @@ def _validate_and_normalise(
     proposal = normalise_proposal(parsed, branch_id=branch_id, parent_branch_id=parent_branch)
     _ensure_research_line(config, proposal, errors)
     return proposal, errors
+
+
+def _validate_previous_cycle_reflection(
+    config: ProjectConfig,
+    parsed: dict[str, Any],
+    errors: list[str],
+) -> None:
+    """Require an auto-reject reflection on the next proposal."""
+
+    pending = latest_incomplete_research_log_entry(config.registry_path)
+    if pending is None or pending.get("comparison_id"):
+        return
+    reflection = parsed.get("previous_cycle_reflection")
+    if not isinstance(reflection, dict):
+        errors.append(
+            "previous_cycle_reflection is required because the prior auto-rejected "
+            f"cycle {pending['cycle']} still needs interpretation and next direction"
+        )
+        return
+    if int(reflection.get("cycle") or -1) != int(pending["cycle"]):
+        errors.append(f"previous_cycle_reflection.cycle must be {pending['cycle']}")
+    if _is_blank(reflection.get("interpretation")):
+        errors.append("previous_cycle_reflection.interpretation is required")
+    if _is_blank(reflection.get("next")):
+        errors.append("previous_cycle_reflection.next is required")
 
 
 def _validate_research_line_navigation(
@@ -1332,22 +1367,22 @@ def _record_recipe_outcome(
 def _screening_metrics_summary(screening: dict[str, Any]) -> dict[str, Any]:
     if not screening:
         return {}
-    keys = [
-        "gate_mode",
-        "gate_metric",
-        "target_mode",
-        "passed",
-        "champion_score",
-        "challenger_score",
-        "lift",
-        "relative_lift",
-        "overlap_rows",
-    ]
+    keys = ["gate_mode", "gate_metric", "target_mode", "passed", "overlap_rows"]
+    renamed = {
+        "champion_score": "split_champion_score",
+        "challenger_score": "split_challenger_score",
+        "lift": "split_lift",
+        "relative_lift": "split_relative_lift",
+    }
     result: dict[str, Any] = {}
     for key in keys:
         if key in screening:
             value = screening[key]
             result[key] = round(float(value), 6) if isinstance(value, float) else value
+    for source, target in renamed.items():
+        if source in screening:
+            value = screening[source]
+            result[target] = round(float(value), 6) if isinstance(value, float) else value
     return result
 
 

@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from tests.test_runner import _make_config, _write_fixtures
-from autoresearch.controller.context import build_llm_context
+from autoresearch.controller.context import _compact_research_nodes, build_llm_context
 from autoresearch.controller.champion import initialise_official_champion
 from autoresearch.experiment_runner import run_experiment
 
@@ -37,6 +37,29 @@ def test_context_size_fresh_registry(tmp_path: Path) -> None:
     _write_fixtures(config)
     context = build_llm_context(config)
     assert len(json.dumps(context)) < 6000
+
+
+def test_research_node_context_keeps_cv_and_split_metrics_distinct() -> None:
+    nodes = _compact_research_nodes(
+        [
+            {
+                "node_id": "promoted",
+                "status": "promoted",
+                "metrics": {
+                    "split_lift": -0.000126,
+                    "split_challenger_score": 0.3733,
+                    "cv_mean_lift": 0.01,
+                    "cv_challenger_score": 0.3742,
+                },
+            }
+        ]
+    )
+
+    assert nodes[0]["cv_lift"] == 0.01
+    assert nodes[0]["split_lift"] == -0.000126
+    assert nodes[0]["cv_score"] == 0.3742
+    assert nodes[0]["split_score"] == 0.3733
+    assert "lift" not in nodes[0]
 
 
 def test_context_size_with_experiment(tmp_path: Path) -> None:

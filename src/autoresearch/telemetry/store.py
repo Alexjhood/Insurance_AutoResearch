@@ -145,12 +145,25 @@ CREATE TABLE IF NOT EXISTS experiment_usage_checkpoints (
     completed_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS llm_usage_checkpoints (
+    checkpoint_key TEXT PRIMARY KEY,
+    checkpoint_type TEXT NOT NULL,
+    label TEXT NOT NULL,
+    status TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    experiment_id TEXT,
+    session_key TEXT,
+    turn_key TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_llm_turns_session ON llm_turns(session_key, turn_index);
 CREATE INDEX IF NOT EXISTS idx_llm_model_calls_turn ON llm_model_calls(turn_key);
 CREATE INDEX IF NOT EXISTS idx_llm_tools_turn ON llm_tool_calls(turn_key);
 CREATE INDEX IF NOT EXISTS idx_workflow_events_time ON workflow_events(started_at, completed_at);
 CREATE INDEX IF NOT EXISTS idx_experiment_usage_time
     ON experiment_usage_checkpoints(completed_at, experiment_id);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_checkpoint_time
+    ON llm_usage_checkpoints(occurred_at, checkpoint_key);
 """
 
 
@@ -656,6 +669,7 @@ def record_experiment_checkpoint(
 ) -> None:
     con = connect(run_dir)
     try:
+        checkpoint_at = completed_at or now_iso()
         with con:
             con.execute(
                 """
@@ -670,9 +684,83 @@ def record_experiment_checkpoint(
                     experiment_id,
                     experiment_name,
                     status,
-                    completed_at or now_iso(),
+                    checkpoint_at,
                 ),
             )
+            con.execute(
+                """
+                INSERT INTO llm_usage_checkpoints (
+                    checkpoint_key, checkpoint_type, label, status, occurred_at,
+                    experiment_id
+                ) VALUES (?,?,?,?,?,?)
+                ON CONFLICT(checkpoint_key) DO UPDATE SET
+                    label=excluded.label,
+                    status=excluded.status,
+                    occurred_at=excluded.occurred_at
+                """,
+                (
+                    f"experiment:{experiment_id}",
+                    "experiment",
+                    experiment_name,
+                    status,
+                    checkpoint_at,
+                    experiment_id,
+                ),
+            )
+    finally:
+        con.close()
+
+
+def record_user_breakpoint(
+    run_dir: Path,
+    *,
+    session_key_value: str,
+) -> str | None:
+    """Record one idempotent checkpoint for the latest completed native turn."""
+
+    con = connect(run_dir)
+    try:
+        turn = con.execute(
+            """
+            SELECT turn_key, turn_index, completed_at
+            FROM llm_turns
+            WHERE session_key=? AND status='completed' AND completed_at IS NOT NULL
+            ORDER BY turn_index DESC
+            LIMIT 1
+            """,
+            (session_key_value,),
+        ).fetchone()
+        if turn is None:
+            return None
+        occurred_at = str(turn["completed_at"])
+        checkpoint_key = f"user_breakpoint:{turn['turn_key']}"
+        session = con.execute(
+            "SELECT surface FROM llm_sessions WHERE session_key=?",
+            (session_key_value,),
+        ).fetchone()
+        surface = str(session["surface"] if session else "agent")
+        with con:
+            con.execute(
+                """
+                INSERT INTO llm_usage_checkpoints (
+                    checkpoint_key, checkpoint_type, label, status, occurred_at,
+                    session_key, turn_key
+                ) VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT(checkpoint_key) DO UPDATE SET
+                    label=excluded.label,
+                    status=excluded.status
+                """,
+                (
+                    checkpoint_key,
+                    "user_breakpoint",
+                    f"User breakpoint ({surface} turn {int(turn['turn_index'])})",
+                    "settled",
+                    occurred_at,
+                    session_key_value,
+                    str(turn["turn_key"]),
+                ),
+            )
+        return checkpoint_key
     finally:
         con.close()
 

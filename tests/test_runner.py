@@ -462,7 +462,14 @@ claim_cap_threshold = 100000
         status="awaiting_decision",
     )
 
-    result = record_decision(config, comp_id, decision="reject", rationale="Insufficient evidence.")
+    result = record_decision(
+        config,
+        comp_id,
+        decision="reject",
+        rationale="Insufficient evidence.",
+        interpretation="The challenger did not establish a reliable improvement.",
+        next_step="Try a materially different modelling approach.",
+    )
 
     assert result["decision"] == "reject"
     assert result["rationale"] == "Insufficient evidence."
@@ -596,7 +603,14 @@ def test_record_decision_promote_updates_champion(tmp_path: Path) -> None:
     artifacts = compare_experiments(config, champ_id, chal_id)
     comp_id = json.loads(artifacts["promotion_report"].read_text())["comparison_id"]
 
-    result = record_decision(config, comp_id, decision="promote", rationale="Clear improvement.")
+    result = record_decision(
+        config,
+        comp_id,
+        decision="promote",
+        rationale="Clear improvement.",
+        interpretation="The challenger produced a clean improvement.",
+        next_step="Build the next experiment from the promoted model.",
+    )
 
     assert result["decision"] == "promote"
     assert get_official_champion(config.registry_path)["champion_id"] == chal_id
@@ -605,7 +619,14 @@ def test_record_decision_promote_updates_champion(tmp_path: Path) -> None:
     assert comp["decided_by"] == "llm"
 
     history_count = len(list_champion_history(config.registry_path))
-    repeated = record_decision(config, comp_id, decision="promote", rationale="Clear improvement.")
+    repeated = record_decision(
+        config,
+        comp_id,
+        decision="promote",
+        rationale="Clear improvement.",
+        interpretation="The challenger produced a clean improvement.",
+        next_step="Build the next experiment from the promoted model.",
+    )
 
     assert repeated["already_recorded"] is True
     assert len(list_champion_history(config.registry_path)) == history_count
@@ -648,7 +669,14 @@ def test_record_decision_local_promote_updates_line_only(tmp_path: Path) -> None
     artifacts = compare_experiments(config, champ_id, chal_id)
     comp_id = json.loads(artifacts["promotion_report"].read_text())["comparison_id"]
 
-    result = record_decision(config, comp_id, decision="local_promote", rationale="Good for this line only.")
+    result = record_decision(
+        config,
+        comp_id,
+        decision="local_promote",
+        rationale="Good for this line only.",
+        interpretation="The change is useful within this research line.",
+        next_step="Continue the line without replacing the global champion.",
+    )
 
     assert result["decision"] == "local_promote"
     assert result["research_line_id"] == "line_local"
@@ -678,7 +706,14 @@ def test_record_decision_promote_blocked_by_guardrail(tmp_path: Path) -> None:
         con.execute("UPDATE comparisons SET guardrail_status = ? WHERE comparison_id = ?", (failing, comp_id))
 
     with pytest.raises(ValueError, match="guardrail"):
-        record_decision(config, comp_id, decision="promote", rationale="trying anyway")
+        record_decision(
+            config,
+            comp_id,
+            decision="promote",
+            rationale="trying anyway",
+            interpretation="The apparent gain conflicts with a hard guardrail.",
+            next_step="Fix the guardrail failure before reconsidering promotion.",
+        )
 
     # Champion unchanged
     assert get_official_champion(config.registry_path)["champion_id"] == champ_id

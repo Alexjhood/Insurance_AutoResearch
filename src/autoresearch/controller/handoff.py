@@ -14,6 +14,7 @@ from autoresearch.controller.context import build_llm_context
 from autoresearch.controller.workflow import enqueue_proposal_from_file, run_next_queued_proposal
 from autoresearch.experiment_registry.registry import (
     get_official_champion,
+    latest_incomplete_research_log_entry,
     list_proposals,
     list_sessions,
     record_proposal,
@@ -105,7 +106,7 @@ def _proposal_template(config: ProjectConfig, context: dict[str, Any]) -> dict[s
             "feature_exclusions": [],
         }
         model_family = "recipe"
-    return {
+    template = {
         "experiment_name": "concise_experiment_name",
         "rationale": "Why this change is worth trying.",
         "change_summary": "Exact modelling/preprocessing change from parent.",
@@ -122,6 +123,14 @@ def _proposal_template(config: ProjectConfig, context: dict[str, Any]) -> dict[s
             "model": model,
         },
     }
+    pending = _pending_auto_reject_reflection(config)
+    if pending is not None:
+        template["previous_cycle_reflection"] = {
+            "cycle": int(pending["cycle"]),
+            "interpretation": "What the previous result taught.",
+            "next": "How that learning shaped this proposal.",
+        }
+    return template
 
 
 def ingest_proposals(config: ProjectConfig) -> dict[str, Any]:
@@ -371,7 +380,7 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
             }
         }
 
-    template_json = json.dumps({
+    template_payload = {
         "experiment_name": "<concise_name>",
         "rationale": "<why this change is worth trying>",
         "change_summary": "<exact modelling/preprocessing change from parent>",
@@ -387,7 +396,15 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
             "target_strategy": template_target_strategy,
             "model": template_model,
         },
-    }, indent=2)
+    }
+    pending_reflection = _pending_auto_reject_reflection(config)
+    if pending_reflection is not None:
+        template_payload["previous_cycle_reflection"] = {
+            "cycle": int(pending_reflection["cycle"]),
+            "interpretation": "<what the previous auto-rejection taught>",
+            "next": "<how that learning shaped this proposal>",
+        }
+    template_json = json.dumps(template_payload, indent=2)
 
     # Escape-hatch shape, shown only as the alternative for novel models.
     script_config_json = json.dumps({
@@ -485,6 +502,16 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "(`proposal_id`, parentage, `branch_action`, the tree-walk fields, the "
         "research-line `label`/`hypothesis`, and the fixed `preprocessing`) — you "
         "do not repeat them.",
+        *(
+            [
+                "",
+                f"Cycle {pending_reflection['cycle']} was auto-rejected and still needs reflection. "
+                "The `previous_cycle_reflection` block below is required; the framework will use it "
+                "to complete that cycle's log before running this proposal.",
+            ]
+            if pending_reflection is not None
+            else []
+        ),
         *deferred_lines,
         "",
         "```json",
@@ -603,6 +630,9 @@ def proposal_schema_document(config: ProjectConfig, context: dict[str, Any]) -> 
             "Parked lines remain in history and reports, but new proposals should not extend them unless tree_policy_override_rationale explains why.",
             "Keep the active run to a small number of coherent research lines; use local promotion for progress inside a line without replacing the global champion.",
             "Only one validated proposal is ingested per context refresh while a proposal is queued or awaiting decision; additional proposal JSON files remain deferred in the inbox.",
+            "When the previous cycle was auto-rejected, the next proposal must include "
+            "previous_cycle_reflection with cycle, interpretation, and next. The framework "
+            "uses it to complete the prior cycle before running the new proposal.",
             f"Active target_mode is {config.target_mode}; use frequency only when the run was explicitly configured for it.",
             "Do not reference milestone_holdout.",
         ],
@@ -617,13 +647,35 @@ def _next_supervised_command(config: ProjectConfig, context: dict[str, Any]) -> 
             return (
                 f"autoresearch --track {config.track_id} --run-id {config.run_id} "
                 f"record-decision {comparison_id} --decision <promote|local_promote|reject> "
-                '--rationale "<why>"'
+                '--rationale "<why>" --interpretation "<what this taught>" '
+                '--next "<next direction>"'
             )
 
-    if not list_sessions(config.registry_path):
+    sessions = list_sessions(config.registry_path)
+    if not sessions:
         return f"autoresearch --track {config.track_id} --run-id {config.run_id} start-session main"
 
+    pending = _pending_auto_reject_reflection(config)
+    latest = sessions[0]
+    if (
+        pending is not None
+        and latest.get("max_cycles") is not None
+        and int(latest.get("current_cycle") or 0) >= int(latest["max_cycles"])
+    ):
+        return (
+            f"autoresearch --track {config.track_id} --run-id {config.run_id} "
+            'record-cycle-reflection --interpretation "<what this taught>" '
+            '--next "<next direction or stop reason>"'
+        )
+
     return f"autoresearch --track {config.track_id} --run-id {config.run_id} run-session-cycle"
+
+
+def _pending_auto_reject_reflection(config: ProjectConfig) -> dict[str, Any] | None:
+    pending = latest_incomplete_research_log_entry(config.registry_path)
+    if pending is None or pending.get("comparison_id"):
+        return None
+    return pending
 
 
 def _render_champion_followup(config: ProjectConfig) -> list[str]:
@@ -664,14 +716,26 @@ def _render_recipe_reuse(config: ProjectConfig, *, limit: int = 8) -> list[str]:
     lines = [
         "## Recipe reuse",
         "",
-        f"Recipes tried so far (scope: `{scope}`), best/most-terminal first. Build on what worked; "
+        f"Recipes tried so far (scope: `{scope}`), current champion first. Build on what worked; "
         "do not re-run a recipe that already lost or failed:",
         "",
     ]
     for r in rows:
-        score = r.get("score")
-        score_str = f"{score:.4f}" if isinstance(score, (int, float)) else "—"
-        lines.append(f"- `{r.get('summary')}` — {r.get('outcome')} (score {score_str})")
+        champion = " **CURRENT CHAMPION**" if r.get("is_current_champion") else ""
+        screen_score = r.get("screen_score", r.get("score"))
+        comparison_score = r.get("comparison_score")
+        comparison_lift = r.get("comparison_lift")
+        metrics = []
+        if isinstance(comparison_score, (int, float)):
+            metrics.append(f"CV score {comparison_score:.4f}")
+        if isinstance(comparison_lift, (int, float)):
+            metrics.append(f"CV lift {comparison_lift:+.4f}")
+        if isinstance(screen_score, (int, float)):
+            metrics.append(f"split score {screen_score:.4f}")
+        metric_text = ", ".join(metrics) if metrics else "no score recorded"
+        lines.append(
+            f"- `{r.get('summary')}`{champion} — {r.get('outcome')} ({metric_text})"
+        )
     lines.append("")
     return lines
 
@@ -750,8 +814,16 @@ def _render_tree_node_lines(nodes: list[dict[str, Any]]) -> list[str]:
         return ["No research-tree nodes yet. Start with a small, well-motivated first hypothesis."]
     lines = ["Recent active-run nodes:"]
     for node in nodes[:8]:
-        lift = node.get("lift")
-        lift_text = f", lift={lift}" if lift is not None else ""
+        cv_lift = node.get("cv_lift")
+        split_lift = node.get("split_lift")
+        if cv_lift is not None and split_lift is not None:
+            lift_text = f", cv_lift={float(cv_lift):+.6f} (split_lift={float(split_lift):+.6f})"
+        elif cv_lift is not None:
+            lift_text = f", cv_lift={float(cv_lift):+.6f}"
+        elif split_lift is not None:
+            lift_text = f", split_lift={float(split_lift):+.6f}"
+        else:
+            lift_text = ""
         axis = node.get("exploration_axis")
         axis_text = f", axis={axis}" if axis else ""
         summary = node.get("learning") or ""
@@ -844,15 +916,19 @@ def render_cycle_summary(summary: dict[str, Any]) -> str:
         f"- official_champion: `{champion.get('champion_id')}`",
     ]
     if metrics:
+        challenger_score = metrics.get("cv_challenger_score", metrics.get("challenger_score"))
+        champion_score = metrics.get("cv_champion_score", metrics.get("champion_score"))
+        mean_lift = metrics.get("cv_mean_lift", metrics.get("mean_lift"))
+        win_rate = metrics.get("cv_win_rate", metrics.get("win_rate"))
         lines += [
             "",
             "## Key metrics",
             f"- target_mode:     {metrics.get('target_mode', 'n/a')}",
             f"- primary_metric:  {metrics.get('primary_metric', 'n/a')}",
-            f"- challenger score: {metrics.get('challenger_score', 'n/a')}",
-            f"- champion score:   {metrics.get('champion_score', 'n/a')}",
-            f"- mean lift:       {metrics.get('mean_lift', 'n/a'):+.6f}" if isinstance(metrics.get('mean_lift'), float) else f"- mean lift:       {metrics.get('mean_lift', 'n/a')}",
-            f"- win rate:        {metrics.get('win_rate', 'n/a')}",
+            f"- CV challenger score: {challenger_score if challenger_score is not None else 'n/a'}",
+            f"- CV champion score:   {champion_score if champion_score is not None else 'n/a'}",
+            f"- CV mean lift:       {mean_lift:+.6f}" if isinstance(mean_lift, float) else f"- CV mean lift:       {mean_lift if mean_lift is not None else 'n/a'}",
+            f"- CV win rate:        {win_rate if win_rate is not None else 'n/a'}",
         ]
     if result.get("comparison_report"):
         lines += ["", f"- comparison report: `{result['comparison_report']}`"]

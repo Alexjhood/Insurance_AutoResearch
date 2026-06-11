@@ -58,6 +58,7 @@ WORKFLOW_COMMANDS: list[tuple[str, str]] = [
     ("list-champion-history", "Show how the champion evolved this run."),
     ("run-session-cycles", "Run N cycles; STOPS at awaiting_decision (no auto-promote)."),
     ("record-decision", "Your verdict: promote | local_promote | reject."),
+    ("record-cycle-reflection", "Complete the final reflection after an auto-rejected cycle."),
     ("park-research-line", "Park an exhausted research line."),
     ("clear-line-champion", "Drop a local incumbent that looks artefactual."),
     ("export-context", "Refresh the handoff/context bundle on demand."),
@@ -189,15 +190,20 @@ existing artifacts to infer intent.
    autoresearch --track <t> --run-id <id> run-session-cycles 1   # stops at awaiting_decision
    # review the metric summary, then:
    autoresearch --track <t> --run-id <id> record-decision <comparison_id> \\
-     --decision promote|local_promote|reject --rationale "..."
+     --decision promote|local_promote|reject --rationale "..." \\
+     --interpretation "what the result taught" --next "next direction"
    ```
    `run-session-cycles` **never auto-promotes** — it always stops for your
    `record-decision`. Repeat propose -> cycle -> decide. **Design the next
    experiment only after reading the current one's result** — N is a budget of
    cycles to spend adaptively, not a slate to plan in advance (see "Adaptive
    search").
-5. **Log** each cycle's hypothesis, outcome, and learning to this run's
-   `RESEARCH_LOG.md`.
+5. **Research logging is framework-owned.** The framework writes hypothesis,
+   changes, outcome, and metrics from registry state. Supply interpretation and
+   next direction with `record-decision`. After an auto-rejection, put
+   `previous_cycle_reflection` in the next proposal; if it was the final cycle,
+   run `record-cycle-reflection --interpretation "..." --next "..."`.
+   `RESEARCH_LOG.md` is generated from these structured records; do not edit it.
 
 ### Workflow commands
 

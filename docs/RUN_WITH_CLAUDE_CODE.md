@@ -38,9 +38,10 @@ the bootstrap command. Pass --model-provider anthropic
 
 ## Where to Look Afterward
 
-- `artifacts/tracks/claude/runs/<run-id>/RESEARCH_LOG.md` — the agent's running research log for this run
+- `artifacts/tracks/claude/runs/<run-id>/RESEARCH_LOG.md` — the framework-generated research log for this run
 - `artifacts/tracks/claude/runs/<run-id>/iterations/` — per-cycle experiment and comparison artifacts
 - `artifacts/tracks/claude/runs/<run-id>/telemetry.sqlite` — normalized Claude Code Desktop usage and tool telemetry
+- `artifacts/tracks/claude/runs/<run-id>/LLM_USAGE.md` — per-experiment and per-user-breakpoint token ledger, including output and reasoning tokens
 - The run detail page in the web Console — live token, cache, tool, error, and framework-step summaries
 - The latest `comparison_report.html` inside the most recent `comparison/` folder
 

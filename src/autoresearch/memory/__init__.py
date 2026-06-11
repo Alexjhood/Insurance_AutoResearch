@@ -68,6 +68,9 @@ def _run_checkpoint(config: "ProjectConfig") -> None:
         return
 
     model_identity = manifest.get("model_identity")
+    if manifest.get("model_identity_conflict"):
+        logger.warning("memory checkpoint skipped: telemetry model identity conflict")
+        return
     if not model_identity or not model_identity.get("provider") or not model_identity.get("name"):
         return
 

@@ -7,7 +7,7 @@ import json
 import re
 import shlex
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -104,6 +104,7 @@ def sync_opencode_session(
     finally:
         con.close()
 
+    identity_result = reconcile_model_identity(run_dir)
     write_usage_report(run_dir)
     return {
         "status": "ok",
@@ -111,6 +112,7 @@ def sync_opencode_session(
         "native_session_id": native_session_id,
         "records_imported": imported,
         "run_dir": str(run_dir),
+        "model_identity": identity_result,
     }
 
 
@@ -123,6 +125,7 @@ def sync_session(
     finalize_turn: bool = False,
     rebuild: bool = False,
     _include_subagents: bool = True,
+    _record_breakpoint: bool = True,
 ) -> dict[str, Any]:
     """Import new complete JSONL records for one native desktop session."""
 
@@ -213,7 +216,6 @@ def sync_session(
     finally:
         con.close()
 
-    write_usage_report(run_dir)
     if surface == "claude" and _include_subagents:
         imported_children = 0
         child_errors = 0
@@ -228,13 +230,115 @@ def sync_session(
                     finalize_turn=True,
                     rebuild=rebuild,
                     _include_subagents=False,
+                    _record_breakpoint=False,
                 )
                 imported_children += 1
             except Exception:
                 child_errors += 1
         result["subagent_transcripts"] = imported_children
         result["subagent_errors"] = child_errors
+    if finalize_turn and _record_breakpoint:
+        store.record_user_breakpoint(run_dir, session_key_value=session_key)
+    if _record_breakpoint:
+        result["model_identity"] = reconcile_model_identity(run_dir)
+        write_usage_report(run_dir)
     return result
+
+
+def reconcile_model_identity(run_dir: Path) -> dict[str, Any]:
+    """Reconcile operator-declared identity with models observed in telemetry."""
+
+    run_dir = Path(run_dir)
+    manifest_path = run_dir / "run_manifest.json"
+    if not manifest_path.exists():
+        return {"status": "manifest_missing"}
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"status": "manifest_unreadable", "error": type(exc).__name__}
+
+    con = store.connect(run_dir)
+    try:
+        rows = con.execute(
+            """
+            SELECT DISTINCT surface, model
+            FROM llm_sessions
+            WHERE model IS NOT NULL AND TRIM(model) <> ''
+            ORDER BY surface, model
+            """
+        ).fetchall()
+    finally:
+        con.close()
+
+    observed = sorted(
+        {
+            (
+                _provider_for_surface(str(row["surface"]), str(row["model"])),
+                _model_name(str(row["model"])),
+            )
+            for row in rows
+        }
+    )
+    observed_identities = [
+        {"provider": provider, "name": name}
+        for provider, name in observed
+        if provider and name
+    ]
+    if not observed_identities:
+        return {"status": "no_observed_model"}
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if len(observed_identities) > 1:
+        conflict = {"observed": observed_identities, "detected_at": now}
+        manifest["model_identity_conflict"] = conflict
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return {"status": "conflict", **conflict}
+
+    observed_identity = observed_identities[0]
+    declared = manifest.get("model_identity")
+    if isinstance(declared, dict) and declared:
+        declared_pair = (
+            str(declared.get("provider") or "").lower().strip(),
+            str(declared.get("name") or "").lower().strip(),
+        )
+        observed_pair = (observed_identity["provider"], observed_identity["name"])
+        if declared_pair != observed_pair and "model_identity_declared" not in manifest:
+            manifest["model_identity_declared"] = declared
+
+    manifest["model_identity"] = {
+        **observed_identity,
+        "version": (
+            str(declared.get("version") or "")
+            if isinstance(declared, dict)
+            and str(declared.get("name") or "").lower().strip() == observed_identity["name"]
+            else ""
+        ),
+        "harness": str(rows[0]["surface"]),
+    }
+    manifest["model_identity_source"] = "telemetry"
+    manifest["model_identity_reconciled_at"] = now
+    manifest.pop("model_identity_conflict", None)
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return {"status": "verified", "identity": manifest["model_identity"]}
+
+
+def _provider_for_surface(surface: str, model: str) -> str:
+    if "/" in model:
+        return model.split("/", 1)[0].lower().strip()
+    return {
+        "codex": "openai",
+        "claude": "anthropic",
+    }.get(surface.lower().strip(), surface.lower().strip())
+
+
+def _model_name(model: str) -> str:
+    return model.split("/", 1)[-1].lower().strip()
 
 
 def find_transcript(
@@ -390,6 +494,7 @@ def _import_codex(
                     "session_key": session_key,
                     "turn_key": current_turn,
                     "occurred_at": timestamp,
+                    "model": _resolved_model(con, current_turn, session_key),
                     "input_tokens": _int(usage.get("input_tokens")),
                     "cached_input_tokens": _int(usage.get("cached_input_tokens")),
                     "uncached_input_tokens": max(
@@ -624,6 +729,23 @@ def _import_claude(
                 )
                 imported += 1
     return imported
+
+
+def _resolved_model(
+    con: sqlite3.Connection,
+    turn_key: str | None,
+    session_key: str,
+) -> str | None:
+    row = con.execute(
+        """
+        SELECT COALESCE(t.model, s.model) AS model
+        FROM llm_sessions s
+        LEFT JOIN llm_turns t ON t.turn_key=?
+        WHERE s.session_key=?
+        """,
+        (turn_key, session_key),
+    ).fetchone()
+    return _str(row["model"]) if row else None
 
 
 def _session_metadata(surface: str, records: list[dict[str, Any]]) -> dict[str, Any]:

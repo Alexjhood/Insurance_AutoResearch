@@ -4,16 +4,26 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 import threading
 import time
 from pathlib import Path
 
 from autoresearch.experiment_registry.experiments import record_experiment
-from autoresearch.telemetry.importer import _should_extract_signals, sync_session
+from autoresearch.telemetry.importer import (
+    _should_extract_signals,
+    reconcile_model_identity,
+    sync_session,
+)
 from autoresearch.telemetry.store import (
+    connect,
+    ensure_turn,
     get_run_telemetry,
     record_experiment_checkpoint,
     record_workflow_event,
+    update_turn_context,
+    upsert_model_call,
+    upsert_session,
 )
 from autoresearch.telemetry.usage_report import write_usage_report
 
@@ -21,6 +31,88 @@ from autoresearch.telemetry.usage_report import write_usage_report
 def _write_jsonl(path: Path, records: list[dict], *, partial: str = "") -> None:
     text = "".join(json.dumps(record) + "\n" for record in records) + partial
     path.write_text(text, encoding="utf-8")
+
+
+def test_telemetry_reconciles_manifest_model_identity(tmp_path):
+    (tmp_path / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "track_id": "codex",
+                "run_id": "run-1",
+                "model_identity": {
+                    "provider": "openai",
+                    "name": "operator-guess",
+                    "version": "",
+                    "harness": "codex",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    transcript = tmp_path / "rollout-identity.jsonl"
+    _write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-06-07T10:00:00.000Z",
+                "type": "turn_context",
+                "payload": {"model": "gpt-observed", "effort": "low"},
+            }
+        ],
+    )
+
+    result = sync_session(
+        run_dir=tmp_path,
+        surface="codex",
+        native_session_id="identity-session",
+        transcript_path=transcript,
+    )
+
+    manifest = json.loads((tmp_path / "run_manifest.json").read_text(encoding="utf-8"))
+    assert result["model_identity"]["status"] == "verified"
+    assert manifest["model_identity"]["name"] == "gpt-observed"
+    assert manifest["model_identity"]["provider"] == "openai"
+    assert manifest["model_identity_declared"]["name"] == "operator-guess"
+    assert manifest["model_identity_source"] == "telemetry"
+
+
+def test_telemetry_records_conflict_for_multiple_observed_models(tmp_path):
+    (tmp_path / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "track_id": "codex",
+                "run_id": "run-1",
+                "model_identity": {"provider": "openai", "name": "gpt-a"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    for session_id, model in (("session-a", "gpt-a"), ("session-b", "gpt-b")):
+        transcript = tmp_path / f"{session_id}.jsonl"
+        _write_jsonl(
+            transcript,
+            [
+                {
+                    "timestamp": "2026-06-07T10:00:00.000Z",
+                    "type": "turn_context",
+                    "payload": {"model": model},
+                }
+            ],
+        )
+        sync_session(
+            run_dir=tmp_path,
+            surface="codex",
+            native_session_id=session_id,
+            transcript_path=transcript,
+        )
+
+    manifest = json.loads((tmp_path / "run_manifest.json").read_text(encoding="utf-8"))
+    result = reconcile_model_identity(tmp_path)
+    assert result["status"] == "conflict"
+    assert [item["name"] for item in manifest["model_identity_conflict"]["observed"]] == [
+        "gpt-a",
+        "gpt-b",
+    ]
 
 
 def test_codex_import_is_idempotent_and_links_workflow(tmp_path):
@@ -248,6 +340,11 @@ def test_experiment_usage_markdown_tracks_incremental_and_cumulative_usage(tmp_p
             "payload": {"type": "task_started", "turn_id": "turn-usage"},
         },
         {
+            "timestamp": "2026-06-07T10:00:00.500Z",
+            "type": "turn_context",
+            "payload": {"model": "gpt-usage-test", "effort": "medium"},
+        },
+        {
             "timestamp": "2026-06-07T10:00:01.000Z",
             "type": "event_msg",
             "payload": {
@@ -289,8 +386,10 @@ def test_experiment_usage_markdown_tracks_incremental_and_cumulative_usage(tmp_p
 
     assert path == tmp_path / "LLM_USAGE.md"
     text = path.read_text(encoding="utf-8")
-    assert "| baseline | completed |" in text
-    assert "| 120 | 120 | 60.0% | 1/1 |" in text
+    assert "| baseline | experiment | completed |" in text
+    assert "| gpt-usage-test | medium | 100 | 60 | 40 | 20 | 5 | 120/120 | 60.0% | 1/1 |" in text
+    assert "| User breakpoint (codex turn 1) | user_breakpoint | settled |" in text
+    assert "Current imported ledger: 100 input" in text
 
 
 def test_recording_experiment_automatically_updates_usage_markdown(tmp_path):
@@ -311,7 +410,271 @@ def test_recording_experiment_automatically_updates_usage_markdown(tmp_path):
     )
 
     text = (tmp_path / "LLM_USAGE.md").read_text(encoding="utf-8")
-    assert "| automatic | completed |" in text
+    assert "| automatic | experiment | completed |" in text
+
+
+def test_usage_report_migrates_legacy_experiment_checkpoints(tmp_path):
+    con = connect(tmp_path)
+    try:
+        con.execute(
+            """
+            INSERT INTO experiment_usage_checkpoints (
+                experiment_id, experiment_name, status, completed_at
+            ) VALUES (?,?,?,?)
+            """,
+            (
+                "legacy-experiment",
+                "legacy",
+                "completed",
+                "2026-06-07T10:00:00.000Z",
+            ),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    write_usage_report(tmp_path)
+
+    text = (tmp_path / "LLM_USAGE.md").read_text(encoding="utf-8")
+    assert "| legacy | experiment | completed |" in text
+
+
+def test_usage_report_attributes_post_experiment_usage_to_user_breakpoint(tmp_path):
+    transcript = tmp_path / "rollout-post-experiment.jsonl"
+    records = [
+        {
+            "timestamp": "2026-06-07T10:00:00.000Z",
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": "turn-post"},
+        },
+        {
+            "timestamp": "2026-06-07T10:00:00.100Z",
+            "type": "turn_context",
+            "payload": {"model": "gpt-post", "effort": "low"},
+        },
+        {
+            "timestamp": "2026-06-07T10:00:01.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": {"total_tokens": 120},
+                    "last_token_usage": {
+                        "input_tokens": 100,
+                        "cached_input_tokens": 60,
+                        "output_tokens": 20,
+                        "reasoning_output_tokens": 5,
+                        "total_tokens": 120,
+                    },
+                },
+            },
+        },
+        {
+            "timestamp": "2026-06-07T10:00:03.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": {"total_tokens": 237},
+                    "last_token_usage": {
+                        "input_tokens": 110,
+                        "cached_input_tokens": 90,
+                        "output_tokens": 7,
+                        "reasoning_output_tokens": 3,
+                        "total_tokens": 117,
+                    },
+                },
+            },
+        },
+        {
+            "timestamp": "2026-06-07T10:00:04.000Z",
+            "type": "event_msg",
+            "payload": {"type": "task_complete", "turn_id": "turn-post"},
+        },
+    ]
+    _write_jsonl(transcript, records)
+    record_experiment_checkpoint(
+        tmp_path,
+        experiment_id="experiment-post",
+        experiment_name="challenger",
+        status="completed",
+        completed_at="2026-06-07T10:00:01.500+00:00",
+    )
+    sync_session(
+        run_dir=tmp_path,
+        surface="codex",
+        native_session_id="post-session",
+        transcript_path=transcript,
+        finalize_turn=True,
+    )
+
+    text = (tmp_path / "LLM_USAGE.md").read_text(encoding="utf-8")
+    assert "| challenger | experiment | completed |" in text
+    assert "| gpt-post | low | 100 | 60 | 40 | 20 | 5 | 120/120 |" in text
+    assert "| User breakpoint (codex turn 1) | user_breakpoint | settled |" in text
+    assert "| gpt-post | low | 110 | 90 | 20 | 7 | 3 | 117/237 |" in text
+    assert "Current imported ledger: 210 input" in text
+    assert "27 output, 8 reasoning, 237 total tokens" in text
+
+
+def test_finalized_continuations_create_one_breakpoint_per_turn(tmp_path):
+    transcript = tmp_path / "rollout-continuations.jsonl"
+    records: list[dict] = []
+    for index in range(1, 4):
+        base = index * 10
+        records.extend(
+            [
+                {
+                    "timestamp": f"2026-06-07T10:00:{base:02d}.000Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": f"turn-{index}"},
+                },
+                {
+                    "timestamp": f"2026-06-07T10:00:{base:02d}.100Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-continuation", "effort": "low"},
+                },
+                {
+                    "timestamp": f"2026-06-07T10:00:{base + 1:02d}.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {"total_tokens": index * 12},
+                            "last_token_usage": {
+                                "input_tokens": 10,
+                                "cached_input_tokens": 5,
+                                "output_tokens": 2,
+                                "reasoning_output_tokens": 1,
+                                "total_tokens": 12,
+                            },
+                        },
+                    },
+                },
+                {
+                    "timestamp": f"2026-06-07T10:00:{base + 2:02d}.000Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_complete", "turn_id": f"turn-{index}"},
+                },
+            ]
+        )
+        _write_jsonl(transcript, records)
+        sync_session(
+            run_dir=tmp_path,
+            surface="codex",
+            native_session_id="continuation-session",
+            transcript_path=transcript,
+            finalize_turn=True,
+        )
+
+    sync_session(
+        run_dir=tmp_path,
+        surface="codex",
+        native_session_id="continuation-session",
+        transcript_path=transcript,
+        finalize_turn=True,
+    )
+    with sqlite3.connect(tmp_path / "telemetry.sqlite") as con:
+        breakpoint_count = con.execute(
+            """
+            SELECT COUNT(*) FROM llm_usage_checkpoints
+            WHERE checkpoint_type='user_breakpoint'
+            """
+        ).fetchone()[0]
+
+    text = (tmp_path / "LLM_USAGE.md").read_text(encoding="utf-8")
+    assert breakpoint_count == 3
+    assert text.count("| user_breakpoint | settled |") == 3
+    assert "36 total tokens" in text
+
+
+def test_usage_report_falls_back_to_turn_model_for_historical_calls(tmp_path):
+    con = connect(tmp_path)
+    try:
+        session_key = upsert_session(
+            con,
+            surface="codex",
+            native_session_id="historical-session",
+            transcript_path=tmp_path / "historical.jsonl",
+            metadata={"model": "session-model"},
+        )
+        turn_key = ensure_turn(
+            con,
+            session_key_value=session_key,
+            native_turn_id="historical-turn",
+            started_at="2026-06-07T10:00:00.000Z",
+        )
+        update_turn_context(con, turn_key, model="turn-model", effort="high")
+        upsert_model_call(
+            con,
+            {
+                "call_key": "historical-call",
+                "session_key": session_key,
+                "turn_key": turn_key,
+                "occurred_at": "2026-06-07T10:00:01.000Z",
+                "input_tokens": 8,
+                "output_tokens": 2,
+                "reasoning_tokens": 1,
+                "total_tokens": 10,
+            },
+        )
+        con.commit()
+    finally:
+        con.close()
+    record_experiment_checkpoint(
+        tmp_path,
+        experiment_id="historical-experiment",
+        experiment_name="historical",
+        status="completed",
+        completed_at="2026-06-07T10:00:02.000Z",
+    )
+    write_usage_report(tmp_path)
+
+    text = (tmp_path / "LLM_USAGE.md").read_text(encoding="utf-8")
+    assert "| turn-model | high |" in text
+
+
+def test_usage_report_shows_unassigned_live_overhead(tmp_path):
+    transcript = tmp_path / "rollout-live.jsonl"
+    _write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-06-07T10:00:00.000Z",
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "live-turn"},
+            },
+            {
+                "timestamp": "2026-06-07T10:00:01.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {"total_tokens": 15},
+                        "last_token_usage": {
+                            "input_tokens": 12,
+                            "cached_input_tokens": 4,
+                            "output_tokens": 3,
+                            "reasoning_output_tokens": 2,
+                            "total_tokens": 15,
+                        },
+                    },
+                },
+            },
+        ],
+    )
+    sync_session(
+        run_dir=tmp_path,
+        surface="codex",
+        native_session_id="live-session",
+        transcript_path=transcript,
+        finalize_turn=False,
+    )
+
+    text = (tmp_path / "LLM_USAGE.md").read_text(encoding="utf-8")
+    assert "| Between-cycle / wrap-up overhead | overhead | current import |" in text
+    assert "Current imported ledger: 12 input" in text
+    assert "3 output, 2 reasoning, 15 total tokens" in text
 
 
 def test_deferred_codex_settle_waits_for_late_task_complete(tmp_path):

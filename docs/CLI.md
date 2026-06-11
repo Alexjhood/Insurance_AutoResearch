@@ -54,9 +54,13 @@ Flags:
 | `--force-data` | No | Rebuild shared data artifacts before bootstrapping |
 | `--skip-baselines` | No | Do not run the global-mean starting baseline if the registry is empty |
 
-Writes: `model_identity` into `run_manifest.json`; registry, the global-mean
-starting experiment, official champion, proposal templates, and handoff context
-under the run directory.
+Writes the operator-declared `model_identity` into `run_manifest.json`; registry,
+the global-mean starting experiment, official champion, proposal templates, and
+handoff context under the run directory. The first telemetry sync verifies this
+identity against the model reported by the harness. A mismatch preserves the
+original value as `model_identity_declared` and makes the observed identity
+canonical. Multiple observed identities create `model_identity_conflict` and
+block memory harvesting until the run is investigated.
 
 ### `init-registry`
 
@@ -328,6 +332,17 @@ Run up to N local-side session cycles.
 autoresearch --track demo --run-id quickstart run-session-cycles 3
 ```
 
+### `record-cycle-reflection`
+
+Complete the interpretation and next-direction fields after an auto-rejected
+cycle when there is no next proposal to carry `previous_cycle_reflection`.
+
+```bash
+autoresearch --track demo --run-id quickstart record-cycle-reflection \
+  --interpretation "The simpler model removed useful segmentation." \
+  --next "Stop at the current champion."
+```
+
 ---
 
 ## Milestone / Integrity
@@ -562,10 +577,15 @@ run-scoped `telemetry.sqlite` contains normalized token, cache, reasoning,
 tool-call, timing, error, and workflow-attribution records. Raw prompts and
 full tool output are not copied into the run.
 
-Each recorded experiment also updates `LLM_USAGE.md` in the run directory.
-The compact table reports incremental and cumulative tokens, model calls, tool
-calls, failures, and cache usage at every experiment checkpoint. Later
-transcript imports refresh the same file as additional provider records arrive.
+Each recorded experiment and finalized desktop turn updates `LLM_USAGE.md` in
+the run directory. The table reports incremental input, cached, uncached,
+output, reasoning, and total tokens at experiment checkpoints and at every
+user-visible breakpoint. This keeps the ledger truthful when a user requests X
+experiments, later continues with Y, and then continues with Z. Usage that has
+been imported but does not yet belong to a settled checkpoint is shown
+explicitly as between-cycle or wrap-up overhead. Model attribution falls back
+from the provider call to its turn and native session, so historical Codex
+records without a call-level model remain attributable.
 
 ```bash
 # Human-readable JSON report
@@ -582,6 +602,9 @@ autoresearch --track claude --run-id 20260604T064305Z telemetry sync \
 Imports are incremental and idempotent. Re-running `telemetry sync` reads only
 new complete JSONL records and does not double-count provider requests or tool
 calls. Workflow attribution is rebuilt deterministically on every import.
+Telemetry sync also reconciles `run_manifest.json` model identity with the
+harness-observed model. The command result reports `verified`, `conflict`,
+`no_observed_model`, or `manifest_missing` for that reconciliation.
 Provider-reported dollar cost remains `null` when the desktop product
 does not expose it; the system does not guess a cost.
 

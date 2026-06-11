@@ -197,6 +197,26 @@ CREATE TABLE IF NOT EXISTS session_events (
     details_json TEXT,
     FOREIGN KEY (session_id) REFERENCES auto_sessions(session_id)
 );
+
+CREATE TABLE IF NOT EXISTS research_log_entries (
+    session_id TEXT NOT NULL,
+    cycle INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    proposal_id TEXT,
+    experiment_id TEXT,
+    comparison_id TEXT,
+    hypothesis TEXT NOT NULL,
+    changes TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    metrics_json TEXT NOT NULL,
+    interpretation TEXT,
+    next_step TEXT,
+    completed_at TEXT,
+    PRIMARY KEY (session_id, cycle),
+    FOREIGN KEY (session_id) REFERENCES auto_sessions(session_id),
+    FOREIGN KEY (proposal_id) REFERENCES proposals(proposal_id)
+);
 """
 
 
@@ -287,7 +307,17 @@ def registry_counts(path: Path) -> dict[str, int]:
     """Return table counts for dashboard status checks."""
 
     if not path.exists():
-        return {"experiments": 0, "artifacts": 0, "comparisons": 0, "proposals": 0, "branches": 0, "sessions": 0}
+        return {
+            "experiments": 0,
+            "artifacts": 0,
+            "comparisons": 0,
+            "proposals": 0,
+            "branches": 0,
+            "sessions": 0,
+            "research_nodes": 0,
+            "research_lines": 0,
+            "research_log_entries": 0,
+        }
     init_registry(path)
     with sqlite3.connect(path) as con:
         exp_count = con.execute("SELECT COUNT(*) FROM experiments").fetchone()[0]
@@ -298,6 +328,7 @@ def registry_counts(path: Path) -> dict[str, int]:
         session_count = con.execute("SELECT COUNT(*) FROM auto_sessions").fetchone()[0]
         node_count = con.execute("SELECT COUNT(*) FROM research_nodes").fetchone()[0]
         line_count = con.execute("SELECT COUNT(*) FROM research_lines").fetchone()[0]
+        log_count = con.execute("SELECT COUNT(*) FROM research_log_entries").fetchone()[0]
     return {
         "experiments": int(exp_count),
         "artifacts": int(art_count),
@@ -307,4 +338,5 @@ def registry_counts(path: Path) -> dict[str, int]:
         "sessions": int(session_count),
         "research_nodes": int(node_count),
         "research_lines": int(line_count),
+        "research_log_entries": int(log_count),
     }

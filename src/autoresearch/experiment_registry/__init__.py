@@ -29,6 +29,14 @@ from autoresearch.experiment_registry.sessions import (
     get_session,
     list_session_events,
 )
+from autoresearch.experiment_registry.research_log import (
+    upsert_research_log_entry,
+    complete_research_log_entry,
+    list_research_log_entries,
+    get_research_log_entry,
+    find_research_log_entry_by_comparison,
+    latest_incomplete_research_log_entry,
+)
 from autoresearch.experiment_registry.research_tree import (
     upsert_research_node,
     list_research_nodes,
@@ -71,6 +79,12 @@ __all__ = [
     "list_sessions",
     "get_session",
     "list_session_events",
+    "upsert_research_log_entry",
+    "complete_research_log_entry",
+    "list_research_log_entries",
+    "get_research_log_entry",
+    "find_research_log_entry_by_comparison",
+    "latest_incomplete_research_log_entry",
     "upsert_research_node",
     "list_research_nodes",
     "find_research_node_by_experiment",

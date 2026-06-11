@@ -20,6 +20,7 @@ from autoresearch.controller.handoff import (
 from autoresearch.controller.session import (
     create_session,
     pause_session,
+    record_cycle_reflection,
     resume_session,
     run_session_cycle,
     run_session_cycles,
@@ -65,6 +66,7 @@ _TELEMETRY_WORKFLOW_COMMANDS = {
     "start-session",
     "run-session-cycle",
     "run-session-cycles",
+    "record-cycle-reflection",
     "export-context",
 }
 
@@ -182,6 +184,8 @@ def _cmd_record_decision(config, args) -> int:
         args.comparison_id,
         decision=args.decision,
         rationale=args.rationale,
+        interpretation=args.interpretation,
+        next_step=args.next_step,
     )
     print(f"Decision recorded: {result['decision']}")
     print(f"Rationale: {result['rationale']}")
@@ -416,6 +420,18 @@ def _cmd_run_session_cycles(config, args) -> int:
     return 0
 
 
+def _cmd_record_cycle_reflection(config, args) -> int:
+    result = record_cycle_reflection(
+        config,
+        interpretation=args.interpretation,
+        next_step=args.next_step,
+        session_id=args.session_id,
+        cycle=args.cycle,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
 def _cmd_compare_tracks(config, args) -> int:
     from autoresearch.tracks import compare_tracks
 
@@ -482,6 +498,12 @@ def _cmd_memory(config, args) -> int:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             except Exception as exc:
                 print(f"Cannot read manifest: {exc}")
+                return 1
+            if manifest.get("model_identity_conflict"):
+                print(
+                    "run_manifest.json has conflicting telemetry model identities. "
+                    "Resolve the conflict before harvesting."
+                )
                 return 1
             identity = manifest.get("model_identity")
             if not identity:
@@ -794,6 +816,7 @@ COMMANDS = {
     "stop-session": _cmd_stop_session,
     "run-session-cycle": _cmd_run_session_cycle,
     "run-session-cycles": _cmd_run_session_cycles,
+    "record-cycle-reflection": _cmd_record_cycle_reflection,
     "compare-tracks": _cmd_compare_tracks,
     "list-tracks": _cmd_list_tracks,
     "memory": _cmd_memory,
@@ -883,6 +906,10 @@ def build_parser() -> argparse.ArgumentParser:
                                  help="LLM's final verdict.")
     decision_parser.add_argument("--rationale", required=True,
                                  help="Written justification for the decision.")
+    decision_parser.add_argument("--interpretation", required=True,
+                                 help="What this result taught the research process.")
+    decision_parser.add_argument("--next", dest="next_step", required=True,
+                                 help="The next research direction or why the run should stop.")
     subparsers.add_parser("list-promotions", help="Print volatility-aware comparison and promotion decisions.")
     init_champion = subparsers.add_parser("init-official-champion", help="Initialise official champion as the global-mean baseline for the active target.")
     init_champion.add_argument("--experiment-id", default=None)
@@ -941,6 +968,14 @@ def build_parser() -> argparse.ArgumentParser:
     multi_parser = subparsers.add_parser("run-session-cycles", help="Run up to N local-side session cycles.")
     multi_parser.add_argument("count", type=int)
     multi_parser.add_argument("--session-id", default=None)
+    reflection_parser = subparsers.add_parser(
+        "record-cycle-reflection",
+        help="Complete the reflection for an auto-rejected cycle.",
+    )
+    reflection_parser.add_argument("--interpretation", required=True)
+    reflection_parser.add_argument("--next", dest="next_step", required=True)
+    reflection_parser.add_argument("--cycle", type=int, default=None)
+    reflection_parser.add_argument("--session-id", default=None)
     compare_tracks_parser = subparsers.add_parser(
         "compare-tracks",
         help="Compare the official champions of two research tracks without promoting either.",

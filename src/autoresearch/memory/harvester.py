@@ -371,6 +371,13 @@ def harvest_all(memory_path: Path, tracks_base: Path | None = None) -> dict[str,
             continue
 
         model_identity = manifest.get("model_identity")
+        if manifest.get("model_identity_conflict"):
+            logger.warning(
+                "harvest_all: run_manifest.json in %s has conflicting telemetry model identities — skipping",
+                run_dir,
+            )
+            skipped += 1
+            continue
         if not model_identity or not model_identity.get("provider") or not model_identity.get("name"):
             logger.warning(
                 "harvest_all: run_manifest.json in %s has no model_identity — "

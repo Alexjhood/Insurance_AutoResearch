@@ -170,9 +170,9 @@ After every comparison, the framework writes `decision = "pending_llm"`. **You m
 
 ### How to record your decision
 ```bash
-autoresearch --track <track> record-decision <comparison_id> --decision promote --rationale "Challenger improved gini_weighted by X and reduced APL by Y, indicating better rank discrimination and safer pricing."
-autoresearch --track <track> record-decision <comparison_id> --decision local_promote --rationale "Challenger is useful progress for the named research line, but not enough to replace the global champion."
-autoresearch --track <track> record-decision <comparison_id> --decision reject  --rationale "Win rate 0.48 in the close-call band even after escalation; insufficient evidence."
+autoresearch --track <track> record-decision <comparison_id> --decision promote --rationale "Clear panel improvement." --interpretation "The new model captured stable signal." --next "Build from the promoted model."
+autoresearch --track <track> record-decision <comparison_id> --decision local_promote --rationale "Useful line-local progress." --interpretation "This framing helps within the line." --next "Continue the line without replacing the global champion."
+autoresearch --track <track> record-decision <comparison_id> --decision reject --rationale "Insufficient evidence." --interpretation "The apparent lift was not stable." --next "Rotate to a materially different approach."
 ```
 
 The comparison_id appears in the `compare-experiments` output and in `list-promotions`.
@@ -683,19 +683,31 @@ cat artifacts/comparisons/<comparison_id>/promotion_report.json | python3 -m jso
 
 If promoted: a holdout report is auto-written to `artifacts/milestone_reports/<comparison_id>.md`. **Read it** — it tells you the SV→holdout overfitting gap.
 
-### Step 6 — Update the research log
+### Step 6 — Complete the structured research log
 
-Append to `artifacts/tracks/<track>/runs/<run-id>/RESEARCH_LOG.md` (this run's log only — do not read or write logs from other runs or prior sessions):
+The framework generates
+`artifacts/tracks/<track>/runs/<run-id>/RESEARCH_LOG.md`; do not edit it by
+hand. Proposal, outcome, and metric fields come from registry state.
 
-```markdown
-## Cycle N — YYYY-MM-DD
-**Hypothesis**: ...
-**Changes**: ...
-**Outcome**: promoted / inconclusive / failed
-**Metrics**: SV Gini = X.XXXXX (vs champion Y.YYYYY, Δ = ...)
-**Holdout**: (if promoted) Gini = X.XXXXX, SV→holdout gap = ±...
-**Interpretation**: ...
-**Next**: ...
+For a comparison that needs an LLM verdict, provide the scientific reflection
+with the decision:
+
+```bash
+autoresearch --track <track> --run-id <run-id> record-decision <comparison-id> \
+  --decision promote|local_promote|reject \
+  --rationale "<decision justification>" \
+  --interpretation "<what this result taught>" \
+  --next "<next research direction>"
+```
+
+For an auto-rejected cycle, include the `previous_cycle_reflection` block shown
+in the next handoff proposal template. If the auto-rejection is the final
+cycle, complete it directly:
+
+```bash
+autoresearch --track <track> --run-id <run-id> record-cycle-reflection \
+  --interpretation "<what this result taught>" \
+  --next "<next direction or why the run should stop>"
 ```
 
 ---

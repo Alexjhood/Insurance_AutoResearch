@@ -44,11 +44,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/codex_research_log_guard.py\"",
-            "statusMessage": "research log guard"
-          },
-          {
-            "type": "command",
             "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/import_agent_telemetry.py\" --surface codex --finalize-turn",
             "statusMessage": "saving run telemetry"
           }

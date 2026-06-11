@@ -23,6 +23,7 @@ harvester behaves). Reading is what the access gate protects.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -134,15 +135,57 @@ def _fingerprint(model_spec: dict[str, Any]) -> str:
     return json.dumps(model_spec, sort_keys=True, separators=(",", ":"))
 
 
-def _model_summary(recipe: dict[str, Any], model_spec: dict[str, Any]) -> str:
+def _model_summary(
+    recipe: dict[str, Any],
+    model_spec: dict[str, Any],
+    *,
+    variant_id: str,
+) -> str:
     summary = recipe_summary(recipe)
+    details = _recipe_details(recipe)
+    if details:
+        summary += f" ({details})"
     included = model_spec.get("feature_inclusions")
     excluded = model_spec.get("feature_exclusions")
     if isinstance(included, list) and included:
         summary += f" features=only[{','.join(included)}]"
     if isinstance(excluded, list) and excluded:
         summary += f" features=except[{','.join(excluded)}]"
-    return summary
+    return f"{summary} [variant={variant_id}]"
+
+
+def _recipe_details(recipe: dict[str, Any]) -> str:
+    aliases = {
+        "learning_rate": "lr",
+        "num_leaves": "leaves",
+        "n_estimators": "trees",
+        "max_depth": "depth",
+        "min_child_samples": "min_child",
+        "reg_alpha": "l1",
+        "reg_lambda": "l2",
+        "colsample_bytree": "colsample",
+    }
+
+    def stage_details(stage: dict[str, Any], prefix: str = "") -> list[str]:
+        details = [
+            f"{prefix}{aliases.get(str(key), key)}={value}"
+            for key, value in sorted((stage.get("params") or {}).items())
+        ]
+        if stage.get("early_stopping") is not None:
+            details.append(f"{prefix}early_stop={stage['early_stopping']}")
+        return details
+
+    if recipe.get("structure", "direct") == "frequency_severity":
+        details: list[str] = []
+        for stage_name in ("frequency", "severity"):
+            stage = (recipe.get("stages") or {}).get(stage_name) or {}
+            details.extend(stage_details(stage, prefix=f"{stage_name[:4]}."))
+    else:
+        details = stage_details(recipe)
+    if len(details) > 5:
+        hidden = len(details) - 5
+        details = details[:5] + [f"+{hidden} more"]
+    return ", ".join(details)
 
 
 def _append(path: Path, entry: dict[str, Any]) -> None:
@@ -162,6 +205,8 @@ def record_recipe(
     feature_inclusions: list[str] | None = None,
     feature_exclusions: list[str] | None = None,
     model_spec: dict[str, Any] | None = None,
+    comparison_score: float | None = None,
+    comparison_lift: float | None = None,
 ) -> None:
     """Record a recipe and its outcome. Never raises into the caller."""
 
@@ -177,13 +222,22 @@ def record_recipe(
             feature_exclusions=feature_exclusions,
             model_spec=model_spec,
         )
+        fingerprint = _fingerprint(reusable_spec)
+        variant_id = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:8]
         entry: dict[str, Any] = {
             "recipe": recipe,
             "model_spec": reusable_spec,
-            "summary": _model_summary(recipe, reusable_spec),
+            "summary": _model_summary(recipe, reusable_spec, variant_id=variant_id),
+            "variant_id": variant_id,
             "experiment_id": experiment_id,
             "outcome": canonical_outcome(outcome),
-            "score": None if score is None else round(float(score), 6),
+            "screen_score": None if score is None else round(float(score), 6),
+            "comparison_score": (
+                None if comparison_score is None else round(float(comparison_score), 6)
+            ),
+            "comparison_lift": (
+                None if comparison_lift is None else round(float(comparison_lift), 6)
+            ),
             "track_id": config.track_id,
             "run_id": config.run_id,
             "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -226,7 +280,25 @@ def _read_ledger(path: Path) -> list[dict[str, Any]]:
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line:
-                rows.append(json.loads(line))
+                row = json.loads(line)
+                if "screen_score" not in row and "score" in row:
+                    row["screen_score"] = row.get("score")
+                if not row.get("variant_id"):
+                    model_spec = _row_model_spec(row)
+                    if model_spec is not None:
+                        fingerprint = _fingerprint(model_spec)
+                        row["variant_id"] = hashlib.sha256(
+                            fingerprint.encode("utf-8")
+                        ).hexdigest()[:8]
+                model_spec = _row_model_spec(row)
+                recipe = model_spec.get("recipe") if model_spec else None
+                if isinstance(recipe, dict) and row.get("variant_id"):
+                    row["summary"] = _model_summary(
+                        recipe,
+                        model_spec,
+                        variant_id=str(row["variant_id"]),
+                    )
+                rows.append(row)
     except (OSError, json.JSONDecodeError):
         return rows
     return rows
@@ -253,17 +325,27 @@ def _dedup_best(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             replace = _entry_rank(row) > _entry_rank(current)
         if replace:
             replacement = dict(row)
-            if replacement.get("score") is None and isinstance(current.get("score"), (int, float)):
-                replacement["score"] = current["score"]
+            for metric in ("screen_score", "comparison_score", "comparison_lift"):
+                if replacement.get(metric) is None and isinstance(current.get(metric), (int, float)):
+                    replacement[metric] = current[metric]
             best[key] = replacement
-        elif current.get("score") is None and isinstance(row.get("score"), (int, float)):
-            best[key] = {**current, "score": row["score"]}
+        else:
+            merged = dict(current)
+            changed = False
+            for metric in ("screen_score", "comparison_score", "comparison_lift"):
+                if merged.get(metric) is None and isinstance(row.get(metric), (int, float)):
+                    merged[metric] = row[metric]
+                    changed = True
+            if changed:
+                best[key] = merged
     return list(best.values())
 
 
 def _entry_rank(row: dict[str, Any]) -> tuple[int, float]:
     outcome_rank = _OUTCOME_RANK.get(str(row.get("outcome", "")), 0)
-    score = row.get("score")
+    score = row.get("comparison_score")
+    if not isinstance(score, (int, float)):
+        score = row.get("screen_score", row.get("score"))
     return (outcome_rank, float(score) if isinstance(score, (int, float)) else float("-inf"))
 
 
@@ -290,5 +372,28 @@ def list_recipes(config: ProjectConfig, *, limit: int = 20) -> list[dict[str, An
                     ]
             rows = rows + global_rows
 
-    ranked = sorted(_dedup_best(rows), key=_entry_rank, reverse=True)
+    deduped = _dedup_best(rows)
+    champion_id = None
+    try:
+        from autoresearch.experiment_registry.registry import get_official_champion
+
+        champion = get_official_champion(config.registry_path)
+        champion_id = champion.get("champion_id") if champion else None
+    except Exception:
+        pass
+    annotated = []
+    for row in deduped:
+        item = dict(row)
+        item["is_current_champion"] = bool(
+            champion_id
+            and item.get("experiment_id") == champion_id
+            and item.get("track_id") == config.track_id
+            and item.get("run_id") == config.run_id
+        )
+        annotated.append(item)
+    ranked = sorted(
+        annotated,
+        key=lambda row: (bool(row.get("is_current_champion")), *_entry_rank(row)),
+        reverse=True,
+    )
     return ranked[:limit]

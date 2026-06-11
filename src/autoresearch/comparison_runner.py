@@ -439,7 +439,12 @@ def compare_against_current_champion(
             evaluate_on_holdout(config, challenger_id, comparison_id)
             # Same finalisation as the supervised path: record the recipe outcome
             # and (re)generate the champion follow-up artifacts.
-            _record_recipe_outcome_and_template(config, challenger_id, "promote")
+            _record_recipe_outcome_and_template(
+                config,
+                challenger_id,
+                "promote",
+                comparison={"paired_summary": report.get("comparison_summary") or {}},
+            )
 
     return artifacts
 
@@ -461,7 +466,12 @@ def _load_guardrail_status(comp: dict[str, Any]) -> dict[str, Any]:
         return {}
 
 
-def _record_recipe_outcome_and_template(config, challenger_id: str, decision: str) -> None:
+def _record_recipe_outcome_and_template(
+    config,
+    challenger_id: str,
+    decision: str,
+    comparison: dict[str, Any] | None = None,
+) -> None:
     """Record a recipe's final outcome (#6) and regenerate the champion template (#8).
 
     Best-effort: any failure here is logged and swallowed so it can never block a
@@ -490,6 +500,7 @@ def _record_recipe_outcome_and_template(config, challenger_id: str, decision: st
             except Exception:
                 recipe = None
         if isinstance(recipe, dict) and recipe:
+            paired = (comparison or {}).get("paired_summary") or {}
             record_recipe(
                 config,
                 recipe,
@@ -497,6 +508,8 @@ def _record_recipe_outcome_and_template(config, challenger_id: str, decision: st
                 outcome=decision,
                 target_strategy=target_strategy,
                 model_spec=model_spec,
+                comparison_score=paired.get("challenger_mean_score"),
+                comparison_lift=paired.get("mean_lift"),
             )
 
         if decision == "promote":
@@ -513,6 +526,8 @@ def record_decision(
     *,
     decision: str,
     rationale: str,
+    interpretation: str,
+    next_step: str,
 ) -> dict[str, Any]:
     """Record the LLM's global promote, local promote, or reject verdict.
 
@@ -539,8 +554,12 @@ def record_decision(
     from datetime import datetime, timezone
 
     decision = decision.lower().strip()
+    interpretation = interpretation.strip()
+    next_step = next_step.strip()
     if decision not in ("promote", "local_promote", "reject"):
         raise ValueError(f"decision must be 'promote', 'local_promote', or 'reject', got {decision!r}")
+    if not interpretation or not next_step:
+        raise ValueError("interpretation and next_step are required for every decision")
 
     # Find the comparison record to locate artifacts
     all_comps = list_comparisons(config.registry_path)
@@ -590,6 +609,8 @@ def record_decision(
             "proposal_id": proposal_id,
             "research_line_id": line_id,
             "guardrail_result": _load_guardrail_status(comp),
+            "interpretation": interpretation,
+            "next_step": next_step,
         }
         _refresh_decision_outputs(
             config,
@@ -608,6 +629,8 @@ def record_decision(
             "proposal_id": proposal_id,
             "research_line_id": line_id,
             "guardrail_result": _load_guardrail_status(comp),
+            "interpretation": interpretation,
+            "next_step": next_step,
             "already_recorded": True,
         }
 
@@ -742,7 +765,7 @@ def record_decision(
 
     # Record the recipe outcome (#6) and, on promotion, regenerate the champion
     # template (#8). Both are best-effort and must never block a decision.
-    _record_recipe_outcome_and_template(config, challenger_id, decision)
+    _record_recipe_outcome_and_template(config, challenger_id, decision, comparison=comp)
 
     final_decision = {
         "decision": decision,
@@ -753,6 +776,8 @@ def record_decision(
         "local_promoted": decision == "local_promote",
         "guardrail_passed": guardrail_result.get("passed", True),
         "guardrail_failures": guardrail_result.get("failures", []),
+        "interpretation": interpretation,
+        "next_step": next_step,
     }
 
     # Update the decision.json artifact
@@ -779,6 +804,8 @@ def record_decision(
             "proposal_id": proposal_id,
             "research_line_id": line_id,
             "guardrail_result": guardrail_result,
+            "interpretation": interpretation,
+            "next_step": next_step,
         },
     )
 
@@ -791,6 +818,8 @@ def record_decision(
         "proposal_id": proposal_id,
         "research_line_id": line_id,
         "guardrail_result": guardrail_result,
+        "interpretation": interpretation,
+        "next_step": next_step,
     }
 
 
@@ -833,26 +862,18 @@ def _refresh_decision_outputs(
     except Exception:
         pass
 
-    try:
-        from autoresearch.controller.session import record_session_decision
+    from autoresearch.controller.session import record_session_decision
 
-        state = record_session_decision(
-            config,
-            comparison_id=comparison_id,
-            decision=decision,
-            details=result,
-        )
-        if state is None:
-            from autoresearch.controller.handoff import export_context_bundle
+    state = record_session_decision(
+        config,
+        comparison_id=comparison_id,
+        decision=decision,
+        details=result,
+    )
+    if state is None:
+        from autoresearch.controller.handoff import export_context_bundle
 
-            export_context_bundle(config)
-    except Exception:
-        try:
-            from autoresearch.controller.handoff import export_context_bundle
-
-            export_context_bundle(config)
-        except Exception:
-            pass
+        export_context_bundle(config)
 
 
 def _finalise_comparison_report(

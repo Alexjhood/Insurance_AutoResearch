@@ -402,6 +402,34 @@ def test_harvest_all_skips_runs_without_identity(tmp_path: Path) -> None:
     assert result["harvested"] == 0
 
 
+def test_harvest_all_skips_runs_with_identity_conflict(tmp_path: Path) -> None:
+    tracks = tmp_path / "tracks" / "mytrack" / "runs" / "run1"
+    tracks.mkdir(parents=True)
+    registry = tracks / "registry.sqlite"
+    _make_registry(registry, [])
+    (tracks / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "track_id": "mytrack",
+                "run_id": "run1",
+                "model_identity": {"provider": "openai", "name": "gpt-a"},
+                "model_identity_conflict": {
+                    "observed": [
+                        {"provider": "openai", "name": "gpt-a"},
+                        {"provider": "openai", "name": "gpt-b"},
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = harvest_all(tmp_path / "memory.sqlite", tracks_base=tmp_path / "tracks")
+
+    assert result["skipped"] == 1
+    assert result["harvested"] == 0
+
+
 def test_harvest_all_harvests_run_with_identity(tmp_path: Path) -> None:
     tracks = tmp_path / "tracks" / "mytrack" / "runs" / "run1"
     tracks.mkdir(parents=True)

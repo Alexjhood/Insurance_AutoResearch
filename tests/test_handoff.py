@@ -6,7 +6,14 @@ import pytest
 
 from autoresearch.config import ProjectConfig, _resolve_run_id, ensure_project_dirs, load_config
 from autoresearch.controller.champion import initialise_official_champion
-from autoresearch.controller.handoff import export_context_bundle, inbox_status, ingest_proposals, write_proposal_template
+from autoresearch.controller.handoff import (
+    _render_recipe_reuse,
+    _render_tree_node_lines,
+    export_context_bundle,
+    inbox_status,
+    ingest_proposals,
+    write_proposal_template,
+)
 from autoresearch.controller.proposal_schema import allowed_search_space, validate_proposal
 from autoresearch.controller.workflow import ExperimentNeedsRepair, run_next_queued_proposal
 from autoresearch.experiment_registry.registry import (
@@ -463,6 +470,61 @@ def test_research_tree_metadata_survives_status_only_update(tmp_path: Path) -> N
     assert node["tree_metadata"]["exploration_axis"] == "model_family"
 
 
+def test_tree_node_handoff_labels_cv_and_split_lift() -> None:
+    lines = _render_tree_node_lines(
+        [
+            {
+                "node_id": "winner",
+                "status": "promoted",
+                "outcome_type": "promoted",
+                "cv_lift": 0.01,
+                "split_lift": -0.000126,
+                "learning": "One-hot encoding won under paired CV.",
+            }
+        ]
+    )
+
+    assert "cv_lift=+0.010000 (split_lift=-0.000126)" in lines[1]
+    assert ", lift=" not in lines[1]
+
+
+def test_recipe_reuse_handoff_marks_current_champion_and_metric_types(tmp_path: Path) -> None:
+    from autoresearch.models.recipe_library import record_recipe
+
+    config = _config(tmp_path)
+    config.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    recipe = {
+        "structure": "direct",
+        "estimator": "lightgbm",
+        "objective": "tweedie",
+        "params": {"num_leaves": 31},
+    }
+    record_recipe(
+        config,
+        recipe,
+        experiment_id="champion",
+        outcome="promoted",
+        score=0.37,
+        comparison_score=0.38,
+        comparison_lift=0.01,
+    )
+    set_official_champion(
+        config.registry_path,
+        champion_id="champion",
+        branch_id="main",
+        reason="test",
+        action="promoted",
+    )
+
+    text = "\n".join(_render_recipe_reuse(config))
+
+    assert "CURRENT CHAMPION" in text
+    assert "CV score 0.3800" in text
+    assert "CV lift +0.0100" in text
+    assert "split score 0.3700" in text
+    assert "leaves=31" in text
+
+
 def test_create_line_at_cap_requires_and_applies_parking(tmp_path: Path) -> None:
     config = _config(tmp_path)
     _record_direct(config)
@@ -730,7 +792,14 @@ def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=Non
     assert get_official_champion(config.registry_path)["champion_id"] == champion_id  # unchanged
 
     # Agent records the decision — this finalises promotion + proposal status.
-    res = record_decision(config, comparison_id, decision="promote", rationale="Improves the panel.")
+    res = record_decision(
+        config,
+        comparison_id,
+        decision="promote",
+        rationale="Improves the panel.",
+        interpretation="The challenger improves the metric panel consistently.",
+        next_step="Use the promoted model as the next parent.",
+    )
     assert res["decision"] == "promote"
     assert get_official_champion(config.registry_path)["champion_id"] == challenger_id
     record = next(p for p in list_proposals(config.registry_path) if p["proposal_id"] == proposal["proposal_id"])

@@ -380,9 +380,16 @@ def test_codex_hooks_json_uses_codex_schema_and_wires_guards():
     assert any("scripts/run_scope_guard.py" in command for command in commands("SessionStart"))
     assert any("scripts/run_scope_guard.py" in command for command in commands("PreToolUse"))
     assert any("scripts/run_scope_guard.py" in command for command in commands("PostToolUse"))
-    assert any("scripts/codex_research_log_guard.py" in command for command in commands("Stop"))
+    assert not any("research_log_guard" in command for command in commands("Stop"))
     assert any("scripts/import_agent_telemetry.py" in command for command in commands("SessionStart"))
     assert any("scripts/import_agent_telemetry.py" in command for command in commands("Stop"))
+
+
+def test_retired_codex_research_log_hook_has_compatibility_shim():
+    shim = Path(__file__).resolve().parents[1] / "scripts" / "codex_research_log_guard.py"
+
+    assert shim.exists()
+    assert "Compatibility no-op" in shim.read_text(encoding="utf-8")
 
 
 def test_claude_hooks_wire_desktop_telemetry():

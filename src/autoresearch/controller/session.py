@@ -15,12 +15,21 @@ from autoresearch.controller.handoff import (
 )
 from autoresearch.controller.workflow import ExperimentNeedsRepair, run_next_queued_proposal
 from autoresearch.experiment_registry.registry import (
+    complete_research_log_entry,
+    find_research_log_entry_by_comparison,
     get_official_champion,
+    latest_incomplete_research_log_entry,
     list_proposals,
     list_session_events,
     list_sessions,
+    next_queued_proposal,
     record_session_event,
+    upsert_research_log_entry,
     upsert_session,
+)
+from autoresearch.research_log import (
+    complete_pending_reflection_from_proposal,
+    render_research_log,
 )
 from autoresearch.utils.io import read_json, write_json
 
@@ -33,6 +42,7 @@ SESSION_STATES = {
     "evaluating",
     "comparing",
     "awaiting_decision",
+    "awaiting_reflection",
     "promoted",
     "rejected",
     "inconclusive",
@@ -100,6 +110,12 @@ def stop_session(config: ProjectConfig, session_id: str | None = None) -> dict[s
     """Request a clean stop after current work."""
 
     state = _require_session(config, session_id)
+    pending = latest_incomplete_research_log_entry(config.registry_path)
+    if pending is not None:
+        raise ValueError(
+            f"Cycle {pending['cycle']} still needs reflection. Run `record-cycle-reflection` "
+            "before stopping the session."
+        )
     state["stop_requested"] = True
     state["state"] = "completed"
     state["completed_at"] = _now()
@@ -159,8 +175,16 @@ def run_session_cycle(config: ProjectConfig, session_id: str | None = None) -> d
     inbox = inbox_status(config)
     queued_before = _queued_count(config)
     if inbox["inbox_json_count"] == 0 and queued_before == 0:
-        state["state"] = "waiting_for_proposal"
-        _persist_state(config, state, event_type="waiting_for_proposal", message="Waiting for an external proposal file.")
+        pending = latest_incomplete_research_log_entry(config.registry_path)
+        state["state"] = "awaiting_reflection" if pending is not None else "waiting_for_proposal"
+        message = (
+            f"Cycle {pending['cycle']} needs interpretation and next direction. "
+            "Include `previous_cycle_reflection` in the next proposal or run "
+            "`record-cycle-reflection`."
+            if pending is not None
+            else "Waiting for an external proposal file."
+        )
+        _persist_state(config, state, event_type=state["state"], message=message)
         export_context_bundle(config)
         return state
 
@@ -172,6 +196,22 @@ def run_session_cycle(config: ProjectConfig, session_id: str | None = None) -> d
         state["state"] = "waiting_for_proposal"
         state["latest_ingest_summary"] = ingest_summary
         _persist_state(config, state, event_type="waiting_for_proposal", message="No validated proposal is queued.")
+        export_context_bundle(config)
+        return state
+
+    if not _complete_pending_reflection_from_queued_proposal(config):
+        pending = latest_incomplete_research_log_entry(config.registry_path)
+        state["state"] = "awaiting_reflection"
+        _persist_state(
+            config,
+            state,
+            event_type="awaiting_reflection",
+            message=(
+                f"Cycle {pending['cycle']} needs interpretation and next direction. "
+                "Add `previous_cycle_reflection` to the next proposal or run "
+                "`record-cycle-reflection`."
+            ),
+        )
         export_context_bundle(config)
         return state
 
@@ -194,13 +234,14 @@ def run_session_cycle(config: ProjectConfig, session_id: str | None = None) -> d
     state["current_cycle"] += 1
     state["latest_cycle_result"] = result
     state["latest_ingest_summary"] = ingest_summary
+    _record_cycle_log_entry(config, state, result)
 
     if state["current_cycle"] % 5 == 0:
         from autoresearch.memory import maybe_memory_checkpoint
         maybe_memory_checkpoint(config, state)
 
     if result.get("decision") == "auto_reject":
-        state["state"] = "rejected"
+        state["state"] = "awaiting_reflection"
         _persist_state(
             config,
             state,
@@ -208,7 +249,10 @@ def run_session_cycle(config: ProjectConfig, session_id: str | None = None) -> d
             proposal_id=result.get("proposal_id"),
             experiment_id=result.get("experiment_id"),
             comparison_id=result.get("comparison_id"),
-            message=f"Proposal auto-rejected: {result.get('auto_reject_reason')}",
+            message=(
+                f"Proposal auto-rejected: {result.get('auto_reject_reason')}. "
+                "Reflection is required before the next cycle or session completion."
+            ),
             details=result,
         )
     else:
@@ -232,13 +276,7 @@ def run_session_cycle(config: ProjectConfig, session_id: str | None = None) -> d
     _write_latest_cycle_summary(config, state)
 
     if state.get("max_cycles") is not None and state["current_cycle"] >= state["max_cycles"]:
-        state["state"] = "completed"
-        state["completed_at"] = _now()
-        _persist_state(config, state, event_type="completed", message="Session reached max_cycles.")
-    elif state.get("stop_requested"):
-        state["state"] = "completed"
-        state["completed_at"] = _now()
-        _persist_state(config, state, event_type="completed", message="Session stopped after current cycle.")
+        state["budget_exhausted"] = True
 
     export_context_bundle(config)
     return state
@@ -254,7 +292,7 @@ def run_session_cycles(config: ProjectConfig, count: int, session_id: str | None
         state = run_session_cycle(config, session_id)
         states.append(state)
         if state["state"] in {
-            "awaiting_decision", "waiting_for_proposal", "waiting_for_repair",
+            "awaiting_decision", "awaiting_reflection", "waiting_for_proposal", "waiting_for_repair",
             "paused", "failed", "completed",
         }:
             break
@@ -274,10 +312,35 @@ def record_session_decision(
     if state is None:
         return None
     latest = state.get("latest_cycle_result") or {}
-    if comparison_id and latest.get("comparison_id") not in {None, comparison_id}:
+    if comparison_id and latest.get("comparison_id") != comparison_id:
         return None
 
+    interpretation = str((details or {}).get("interpretation") or "").strip()
+    next_step = str((details or {}).get("next_step") or "").strip()
+    if not interpretation or not next_step:
+        raise ValueError("Decision reflection requires both interpretation and next_step.")
+    entry = find_research_log_entry_by_comparison(config.registry_path, comparison_id)
+    if entry is not None and (
+        not str(entry.get("interpretation") or "").strip()
+        or not str(entry.get("next_step") or "").strip()
+    ):
+        rationale = str((details or {}).get("rationale") or "").strip()
+        outcome = decision if not rationale else f"{decision}: {rationale}"
+        complete_research_log_entry(
+            config.registry_path,
+            session_id=entry["session_id"],
+            cycle=int(entry["cycle"]),
+            interpretation=interpretation,
+            next_step=next_step,
+            outcome=outcome,
+            completed_at=_now(),
+        )
+        render_research_log(config)
+
     state["state"] = "promoted" if decision in {"promote", "local_promote"} else "rejected"
+    if _session_should_complete(state):
+        state["state"] = "completed"
+        state["completed_at"] = _now()
     state["latest_decision_result"] = details or {}
     _persist_state(
         config,
@@ -288,6 +351,62 @@ def record_session_decision(
         comparison_id=comparison_id,
         message=f"Decision recorded: {decision}.",
         details=details or {},
+    )
+    export_context_bundle(config)
+    return state
+
+
+def record_cycle_reflection(
+    config: ProjectConfig,
+    *,
+    interpretation: str,
+    next_step: str,
+    session_id: str | None = None,
+    cycle: int | None = None,
+) -> dict[str, Any]:
+    """Complete an auto-rejected cycle when there is no next proposal."""
+
+    state = _require_session(config, session_id)
+    interpretation = interpretation.strip()
+    next_step = next_step.strip()
+    if not interpretation or not next_step:
+        raise ValueError("Both interpretation and next_step are required.")
+    entry = latest_incomplete_research_log_entry(config.registry_path)
+    if entry is None:
+        raise ValueError("No cycle is awaiting research-log reflection.")
+    if cycle is not None and int(entry["cycle"]) != int(cycle):
+        raise ValueError(
+            f"Latest incomplete cycle is {entry['cycle']}, not requested cycle {cycle}."
+        )
+    if entry.get("comparison_id"):
+        raise ValueError("This cycle is awaiting `record-decision`, not `record-cycle-reflection`.")
+
+    complete_research_log_entry(
+        config.registry_path,
+        session_id=entry["session_id"],
+        cycle=int(entry["cycle"]),
+        interpretation=interpretation,
+        next_step=next_step,
+        completed_at=_now(),
+    )
+    render_research_log(config)
+    state["latest_reflection_result"] = {
+        "cycle": int(entry["cycle"]),
+        "interpretation": interpretation,
+        "next_step": next_step,
+    }
+    state["state"] = "completed" if _session_should_complete(state) else "rejected"
+    if state["state"] == "completed":
+        state["completed_at"] = _now()
+    _persist_state(
+        config,
+        state,
+        event_type="reflection_recorded",
+        proposal_id=entry.get("proposal_id"),
+        experiment_id=entry.get("experiment_id"),
+        comparison_id=entry.get("comparison_id"),
+        message=f"Research reflection recorded for cycle {entry['cycle']}.",
+        details=state["latest_reflection_result"],
     )
     export_context_bundle(config)
     return state
@@ -305,6 +424,62 @@ def _base_state(session_id: str, name: str, max_cycles: int | None) -> dict[str,
         "stop_requested": False,
         "official_champion": None,
     }
+
+
+def _record_cycle_log_entry(
+    config: ProjectConfig,
+    state: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    proposal_id = result.get("proposal_id")
+    proposal = next(
+        (item for item in list_proposals(config.registry_path) if item.get("proposal_id") == proposal_id),
+        {},
+    )
+    if result.get("decision") == "auto_reject":
+        reason = str(result.get("auto_reject_reason") or "Framework auto-rejection.")
+        outcome = f"auto_reject: {reason}"
+    else:
+        outcome = "awaiting LLM decision"
+    upsert_research_log_entry(
+        config.registry_path,
+        session_id=state["session_id"],
+        cycle=int(state["current_cycle"]),
+        proposal_id=proposal_id,
+        experiment_id=result.get("experiment_id"),
+        comparison_id=result.get("comparison_id"),
+        hypothesis=str(proposal.get("rationale") or "No hypothesis recorded."),
+        changes=str(proposal.get("change_summary") or "No change summary recorded."),
+        outcome=outcome,
+        metrics=result.get("metrics_summary") or {},
+    )
+    render_research_log(config)
+
+
+def _complete_pending_reflection_from_queued_proposal(
+    config: ProjectConfig,
+) -> bool:
+    entry = latest_incomplete_research_log_entry(config.registry_path)
+    if entry is None:
+        return True
+    if entry.get("comparison_id"):
+        return False
+    proposal = next_queued_proposal(config.registry_path)
+    if proposal is None or not proposal.get("proposal_path"):
+        return False
+    try:
+        payload = read_json(Path(proposal["proposal_path"]))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    return complete_pending_reflection_from_proposal(config, payload)
+
+
+def _session_should_complete(state: dict[str, Any]) -> bool:
+    max_cycles = state.get("max_cycles")
+    return bool(
+        state.get("stop_requested")
+        or (max_cycles is not None and int(state.get("current_cycle") or 0) >= int(max_cycles))
+    )
 
 
 def _persist_state(
