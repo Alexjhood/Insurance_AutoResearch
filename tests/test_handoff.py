@@ -12,8 +12,10 @@ from autoresearch.controller.handoff import (
     export_context_bundle,
     inbox_status,
     ingest_proposals,
+    render_handoff_markdown,
     write_proposal_template,
 )
+from autoresearch.controller.context import build_llm_context
 from autoresearch.controller.proposal_schema import allowed_search_space, validate_proposal
 from autoresearch.controller.workflow import ExperimentNeedsRepair, run_next_queued_proposal
 from autoresearch.experiment_registry.registry import (
@@ -247,6 +249,34 @@ def test_export_context_and_template(tmp_path: Path) -> None:
     assert "experiment_name" in schema["required"]
     assert "parent_experiment_id" not in schema["required"]
     assert "parent_experiment_id" in schema["controller_derived"]
+
+
+def test_delta_handoff_drops_static_blocks_keeps_dynamic_state(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _record_direct(config)
+    initialise_official_champion(config)
+    context = build_llm_context(config)
+
+    full = render_handoff_markdown(config, context)
+    delta = render_handoff_markdown(config, context, delta=True)
+
+    # Static blocks duplicated from the contract are present in full, gone in delta.
+    assert "## Proposal quick-start" in full
+    assert "## Key constraints" in full
+    assert "Escape hatch (novel models only)" in full
+    assert "## Proposal quick-start" not in delta
+    assert "## Key constraints" not in delta
+    assert "Escape hatch (novel models only)" not in delta
+
+    # Dynamic state the agent needs every cycle is retained in both.
+    for body in (full, delta):
+        assert "## Current state" in body
+        assert "**Champion**" in body
+        assert "**Next command**" in body
+
+    assert "(delta)" in delta
+    # The delta view is materially shorter.
+    assert len(delta) < len(full)
 
 
 def _minimal_proposal() -> dict:

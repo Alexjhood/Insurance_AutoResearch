@@ -306,12 +306,21 @@ def inbox_status(config: ProjectConfig) -> dict[str, Any]:
     }
 
 
-def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> str:
+def render_handoff_markdown(
+    config: ProjectConfig, context: dict[str, Any], *, delta: bool = False
+) -> str:
     """Render a self-contained handoff file for external agents.
 
     Embeds the proposal template, key constraints, and champion metrics inline
     so the agent can start writing a proposal immediately without reading
     additional files (proposal_schema.json, proposal_template.json, context.json).
+
+    When ``delta`` is true, the static blocks (proposal template, escape hatch,
+    override block, key constraints, exploration-tree guidance) are omitted and
+    only the dynamic run state (champion, next command, active lines, recommended
+    actions, recent nodes, learnings, recipe ledger) is rendered. The static
+    content is duplicated from the AGENT.md/CLAUDE.md contract and does not change
+    cycle-to-cycle, so a mid-run refresh need not re-pay for it.
     """
     champion = context.get("official_champion") or {}
     champion_id = champion.get("champion_id", "FILL_IN_CHAMPION_ID")
@@ -470,21 +479,24 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
                 "```",
             ]
 
-    lines = [
-        "# Auto-Research Handoff",
-        "",
-        "This handoff is the authoritative context for proposing the next experiment — "
-        "champion, recent results and learnings, recommended tree actions, key constraints, "
-        "and the full proposal template are all inline below. Read `AGENT.md` for the runtime "
-        "contract; the files under \"Optional drill-down\" only when you need more detail.",
-        "",
-        "## Current state",
-        "",
-        f"- **Champion**: `{champion_id}` (branch `{branch_id}`{gini_str})",
-        f"- **Inbox**: `{config.handoff_proposal_inbox_dir}`  ← write the proposal JSON here",
-        f"- **Next command**: `{_next_supervised_command(config, context)}`",
-        *_render_champion_followup(config),
-        "",
+    # Dynamic run-state intro that the agent needs every cycle: a pending
+    # auto-reject reflection requirement and any deferred-proposal warning.
+    pending_reflection_lines = (
+        [
+            "",
+            f"Cycle {pending_reflection['cycle']} was auto-rejected and still needs reflection. "
+            "The `previous_cycle_reflection` block in the proposal is required; the framework will "
+            "use it to complete that cycle's log before running this proposal.",
+        ]
+        if pending_reflection is not None
+        else []
+    )
+
+    # Static blocks (proposal template, escape hatch, override block, key
+    # constraints, exploration-tree guidance). These are duplicated from the
+    # AGENT.md/CLAUDE.md contract and do not change cycle-to-cycle, so the
+    # `--delta` handoff omits them.
+    static_lines = [
         "## Proposal quick-start",
         "",
         f"Copy this to `{config.handoff_proposal_inbox_dir}/proposal_<name>.json` and fill in the `<...>` fields.",
@@ -502,17 +514,6 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "(`proposal_id`, parentage, `branch_action`, the tree-walk fields, the "
         "research-line `label`/`hypothesis`, and the fixed `preprocessing`) — you "
         "do not repeat them.",
-        *(
-            [
-                "",
-                f"Cycle {pending_reflection['cycle']} was auto-rejected and still needs reflection. "
-                "The `previous_cycle_reflection` block below is required; the framework will use it "
-                "to complete that cycle's log before running this proposal.",
-            ]
-            if pending_reflection is not None
-            else []
-        ),
-        *deferred_lines,
         "",
         "```json",
         template_json,
@@ -562,7 +563,11 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         "- By default the controller takes the top recommended tree action. To choose a different one, set `tree_action`/`selected_tree_action_id` in the override block; if you ignore the recommended action, include `tree_policy_override_rationale`.",
         "- Prefer genuine exploration over repetitive small retunes. A useful child idea should change the hypothesis, representation, target framing, or error mode it addresses.",
         "- Clear failures and auto-rejections are evidence. Reflect on them, then branch only when the child idea is materially different.",
-        "",
+    ]
+
+    # Dynamic run-state blocks: active/parked research lines, recommended
+    # actions, recent nodes, learnings, recipe ledger, playbook. Always shown.
+    run_state_lines = [
         *research_line_lines,
         *parked_line_lines,
         "",
@@ -572,13 +577,61 @@ def render_handoff_markdown(config: ProjectConfig, context: dict[str, Any]) -> s
         *learning_lines,
         *_render_recipe_reuse(config),
         *_playbook_link_lines,
+    ]
+
+    current_state_lines = [
+        "## Current state",
         "",
+        f"- **Champion**: `{champion_id}` (branch `{branch_id}`{gini_str})",
+        f"- **Inbox**: `{config.handoff_proposal_inbox_dir}`  ← write the proposal JSON here",
+        f"- **Next command**: `{_next_supervised_command(config, context)}`",
+        *_render_champion_followup(config),
+        *pending_reflection_lines,
+        *deferred_lines,
+        "",
+    ]
+
+    drilldown_lines = [
         "## Optional drill-down",
         "",
         "The handoff above is authoritative for proposing. Read these only when you "
         "need detail it does not already carry:",
         f"- Full context JSON: `{config.handoff_context_dir / 'latest_context.json'}`",
         f"- Narrative research log: `{config.research_log_path}`",
+    ]
+
+    if delta:
+        lines = [
+            "# Auto-Research Handoff (delta)",
+            "",
+            "Dynamic run state only. The proposal template, key constraints, and "
+            "exploration-tree guidance are unchanged from the full handoff (and the "
+            "`AGENT.md`/`CLAUDE.md` contract already in context) — run "
+            "`show-latest-handoff` without `--delta` for the full version.",
+            "",
+            *current_state_lines,
+            "## Run state",
+            "",
+            *run_state_lines,
+            "",
+            *drilldown_lines,
+        ]
+        return "\n".join(lines) + "\n"
+
+    lines = [
+        "# Auto-Research Handoff",
+        "",
+        "This handoff is the authoritative context for proposing the next experiment — "
+        "champion, recent results and learnings, recommended tree actions, key constraints, "
+        "and the full proposal template are all inline below. Read `AGENT.md` for the runtime "
+        "contract; the files under \"Optional drill-down\" only when you need more detail.",
+        "",
+        *current_state_lines,
+        *static_lines,
+        "",
+        *run_state_lines,
+        "",
+        *drilldown_lines,
     ]
     return "\n".join(lines) + "\n"
 

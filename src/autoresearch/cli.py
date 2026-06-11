@@ -192,6 +192,23 @@ def _cmd_record_decision(config, args) -> int:
     print(f"Decided at: {result['decided_at']}")
     if not result.get("guardrail_result", {}).get("passed", True):
         print(f"Guardrail failures: {result['guardrail_result']['failures']}")
+
+    # Post-decision state, so the agent does not need to follow up with
+    # show-latest-handoff / list-champion-history / session-status to learn the
+    # new champion and the next command.
+    from autoresearch.controller.context import build_llm_context
+    from autoresearch.controller.handoff import _next_supervised_command
+    from autoresearch.experiment_registry.champions import get_official_champion
+
+    champion = get_official_champion(config.registry_path) or {}
+    context = build_llm_context(config)
+    print("--- next state ---")
+    if champion:
+        print(
+            f"Champion: {champion.get('champion_id')} "
+            f"(branch {champion.get('branch_id')})"
+        )
+    print(f"Next command: {_next_supervised_command(config, context)}")
     return 0
 
 
@@ -370,6 +387,15 @@ def _cmd_run_latest_proposal_cycle(config, args) -> int:
 
 
 def _cmd_show_latest_handoff(config, args) -> int:
+    if getattr(args, "delta", False):
+        # Render the dynamic-only view on demand; the cached latest_handoff.md
+        # is always the full version.
+        from autoresearch.controller.context import build_llm_context
+        from autoresearch.controller.handoff import render_handoff_markdown
+
+        context = build_llm_context(config)
+        print(render_handoff_markdown(config, context, delta=True))
+        return 0
     path = config.handoff_handoffs_dir / "latest_handoff.md"
     if not path.exists():
         outputs = export_context_bundle(config)
@@ -946,7 +972,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Alias for ingest-proposals; validates inbox files and queues valid proposals.",
     )
     subparsers.add_parser("run-latest-proposal-cycle", help="Ingest newest inbox proposal and run one gated cycle.")
-    subparsers.add_parser("show-latest-handoff", help="Print the latest handoff Markdown summary.")
+    show_handoff_parser = subparsers.add_parser(
+        "show-latest-handoff", help="Print the latest handoff Markdown summary."
+    )
+    show_handoff_parser.add_argument(
+        "--delta",
+        action="store_true",
+        help="Print only the dynamic run state (champion, next command, active "
+        "lines, recent results), omitting the static template/constraints that are "
+        "already in the contract. Cheaper for mid-run refreshes.",
+    )
     subparsers.add_parser("show-proposal-inbox-status", help="Print handoff inbox and processed-folder status.")
     start_session = subparsers.add_parser("start-session", help="Create a supervised autonomous research session.")
     start_session.add_argument("name")

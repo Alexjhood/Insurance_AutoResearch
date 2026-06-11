@@ -82,7 +82,12 @@ existing artifacts to infer intent.
    `record-decision`. Repeat propose -> cycle -> decide. **Design the next
    experiment only after reading the current one's result** — N is a budget of
    cycles to spend adaptively, not a slate to plan in advance (see "Adaptive
-   search").
+   search"). `record-decision` prints the post-decision champion and the next
+   command in its own output, so you do **not** need to follow it with
+   `show-latest-handoff`, `list-champion-history`, or `session-status` — those
+   are for the rare case you need detail the decision output did not carry. On a
+   mid-run refresh, prefer `show-latest-handoff --delta` (dynamic state only;
+   the template and constraints are already in this contract).
 5. **Research logging is framework-owned.** The framework writes hypothesis,
    changes, outcome, and metrics from registry state. Supply interpretation and
    next direction with `record-decision`. After an auto-rejection, put
