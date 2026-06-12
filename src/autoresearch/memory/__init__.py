@@ -10,7 +10,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
+
+from autoresearch.memory.store import default_memory_store_path
 
 if TYPE_CHECKING:
     from autoresearch.config import ProjectConfig
@@ -51,11 +54,45 @@ def maybe_memory_checkpoint(config: "ProjectConfig", state: dict[str, Any]) -> N
         _run_checkpoint(config)
     except Exception as exc:
         logger.warning("memory checkpoint failed (non-fatal): %s", exc)
+        _record_checkpoint_failure(config, exc)
+
+
+def _record_checkpoint_failure(config: "ProjectConfig", exc: Exception) -> None:
+    """Surface a checkpoint failure as a file in the run dir.
+
+    The memory store lives outside the working tree, so on a sandboxed track
+    (e.g. Codex with an empty ``writable_roots``) every write raises a
+    ``PermissionError`` that ``maybe_memory_checkpoint`` swallows into a logger
+    nobody reads — the run looks healthy while contributing nothing to memory.
+    Writing the error into the run's own ``results/`` dir makes the failure
+    visible to the operator/handoff without breaking the session loop
+    (process_review_20260610_followup.md E1).
+    """
+    try:
+        results_dir = config.handoff_results_dir
+        results_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "error": f"{type(exc).__name__}: {exc}",
+            "memory_path": str(default_memory_store_path()),
+            "track_id": getattr(config, "track_id", ""),
+            "run_id": getattr(config, "run_id", ""),
+            "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "hint": (
+                "The cross-run memory store is outside the working tree. On a "
+                "sandboxed track this is usually a write-permission error — add the "
+                "memory root to the sandbox's writable_roots (Codex: "
+                ".codex/config.toml [sandbox_workspace_write].writable_roots)."
+            ),
+        }
+        (results_dir / "memory_checkpoint_error.json").write_text(
+            json.dumps(payload, indent=2), encoding="utf-8"
+        )
+    except Exception as inner:  # never let diagnostics break the loop
+        logger.debug("could not record memory checkpoint failure: %s", inner)
 
 
 def _run_checkpoint(config: "ProjectConfig") -> None:
     from autoresearch.memory import harvester
-    from autoresearch.memory.store import default_memory_store_path
 
     memory_path = default_memory_store_path()
     manifest_path = config.artifacts_dir / "run_manifest.json"

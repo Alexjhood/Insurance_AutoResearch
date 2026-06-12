@@ -91,11 +91,8 @@ def _categorise_insights(
         else:
             works.append(ins)
 
-    # Any insight not already in a bucket goes into 'works'
-    covered = set(ins["insight_id"] for ins in plateaus + leverage)
-    works = [ins for ins in works if ins["insight_id"] not in covered] + [
-        ins for ins in insights if ins["insight_id"] not in covered and ins not in works
-    ]
+    # The loop above is mutually exclusive (if/elif/else), so every insight lands
+    # in exactly one bucket — no reconciliation pass needed.
     return works, plateaus, leverage
 
 

@@ -388,6 +388,76 @@ def test_peak_gini_ignores_failed_experiments(tmp_path: Path) -> None:
     )
 
 
+def test_peak_gini_excludes_comparison_rejected_experiment(tmp_path: Path) -> None:
+    """A completed-but-rejected experiment (e.g. the exposure artifact) must not top the board.
+
+    Regression test for E2: peak_gini was blind to the decision layer, so a
+    `status='completed'` experiment that the CV/comparison layer *rejected*
+    (the exposure-ranking artifact, gini 0.46) would still crown the leaderboard
+    and steer future runs toward a phantom.
+    """
+    memory = tmp_path / "memory.sqlite"
+    registry = tmp_path / "registry.sqlite"
+    m_real = tmp_path / "real.json"
+    m_artifact = tmp_path / "artifact.json"
+    _make_metrics(m_real, gini=0.37)
+    _make_metrics(m_artifact, gini=0.46)
+
+    _make_registry(
+        registry,
+        [
+            {"experiment_id": "e_real", "status": "completed",
+             "created_at": "2026-01-01T01:00:00Z", "metrics_path": str(m_real)},
+            {"experiment_id": "e_artifact", "status": "completed",
+             "created_at": "2026-01-01T02:00:00Z", "metrics_path": str(m_artifact)},
+        ],
+        comparisons=[
+            {"comparison_id": "cmp_artifact", "champion_id": "e_real",
+             "challenger_id": "e_artifact", "decision": "reject"},
+        ],
+    )
+    identity = {"provider": "x", "name": "y"}
+    harvest_run(memory, registry, identity, track_id="t", run_id="r")
+
+    with sqlite3.connect(memory) as con:
+        row = con.execute("SELECT peak_gini FROM runs WHERE run_uid='t/r'").fetchone()
+    assert row is not None
+    assert abs(row[0] - 0.37) < 1e-9, (
+        f"Expected peak_gini=0.37 (rejected artifact excluded), got {row[0]}"
+    )
+
+
+def test_peak_gini_keeps_promoted_high_scorer(tmp_path: Path) -> None:
+    """A promoted high scorer must still count toward peak_gini (only rejects are dropped)."""
+    memory = tmp_path / "memory.sqlite"
+    registry = tmp_path / "registry.sqlite"
+    m_low = tmp_path / "low.json"
+    m_high = tmp_path / "high.json"
+    _make_metrics(m_low, gini=0.30)
+    _make_metrics(m_high, gini=0.41)
+
+    _make_registry(
+        registry,
+        [
+            {"experiment_id": "e_low", "status": "completed",
+             "created_at": "2026-01-01T01:00:00Z", "metrics_path": str(m_low)},
+            {"experiment_id": "e_high", "status": "completed",
+             "created_at": "2026-01-01T02:00:00Z", "metrics_path": str(m_high)},
+        ],
+        comparisons=[
+            {"comparison_id": "cmp_high", "champion_id": "e_low",
+             "challenger_id": "e_high", "decision": "promote"},
+        ],
+    )
+    identity = {"provider": "x", "name": "y"}
+    harvest_run(memory, registry, identity, track_id="t", run_id="r")
+
+    with sqlite3.connect(memory) as con:
+        row = con.execute("SELECT peak_gini FROM runs WHERE run_uid='t/r'").fetchone()
+    assert row is not None
+    assert abs(row[0] - 0.41) < 1e-9
+
+
 def test_harvest_all_skips_runs_without_identity(tmp_path: Path) -> None:
     tracks = tmp_path / "tracks" / "mytrack" / "runs" / "run1"
     tracks.mkdir(parents=True)

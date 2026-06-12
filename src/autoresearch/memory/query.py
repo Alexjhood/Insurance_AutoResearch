@@ -26,6 +26,23 @@ def _check_access(access: str) -> None:
         )
 
 
+def _require_own_identity(access: str, own_model_id: str | None) -> None:
+    """Fail closed when 'own' access cannot resolve the caller's own model id.
+
+    Without this, an 'own'-scoped query with an underivable own_model_id (missing
+    or corrupt manifest identity) added no WHERE clause and silently returned
+    *every* model's data — a lock that opens when confused
+    (process_review_20260610_followup.md E3). Deny instead.
+    """
+    if access == "own" and not own_model_id:
+        raise AccessDeniedError(
+            "Memory access is 'own' but this run's own model identity could not be "
+            "resolved (missing/corrupt run_manifest.json model_identity). Refusing "
+            "to return all models' data. Run `autoresearch memory backfill-identity` "
+            "or set AUTORESEARCH_MEMORY_ACCESS explicitly."
+        )
+
+
 def query_insights(
     memory_path: Path,
     access: str,
@@ -43,6 +60,7 @@ def query_insights(
     With access='all', returns all models (fully attributed).
     """
     _check_access(access)
+    _require_own_identity(access, own_model_id)
     if not memory_path.exists():
         return []
 
@@ -50,10 +68,11 @@ def query_insights(
     params: list[Any] = []
 
     if access == "own":
-        effective_model = model_id or own_model_id
-        if effective_model:
-            clauses.append("i.model_id = ?")
-            params.append(effective_model)
+        # Under 'own', the filter is always the caller's own model id. An explicit
+        # model_id argument can only narrow within own (a divergent one must not
+        # become a peek into another model's insights).
+        clauses.append("i.model_id = ?")
+        params.append(own_model_id)
     elif model_id:
         clauses.append("i.model_id = ?")
         params.append(model_id)
@@ -82,13 +101,14 @@ def query_experiments(
 ) -> list[dict[str, Any]]:
     """Retrieve experiments from the aggregator."""
     _check_access(access)
+    _require_own_identity(access, own_model_id)
     if not memory_path.exists():
         return []
 
     clauses: list[str] = []
     params: list[Any] = []
 
-    if access == "own" and own_model_id:
+    if access == "own":
         clauses.append("r.model_id = ?")
         params.append(own_model_id)
 
@@ -114,6 +134,15 @@ def query_experiments(
 # Canned analytical queries
 # ---------------------------------------------------------------------------
 
+# Experiments whose comparison decision was an explicit reject must not surface
+# as peaks/jumps — they include known artifacts caught at the decision layer
+# (process_review_20260610_followup.md E2). Mirrors harvester._rejected_challenger_ids.
+_NOT_REJECTED = (
+    "e.experiment_id NOT IN ("
+    "SELECT challenger_id FROM comparisons "
+    "WHERE challenger_id IS NOT NULL AND LOWER(decision) = 'reject')"
+)
+
 _ANALYSES = {
     "peak-gini-by-framing": """
         SELECT r.model_id, m.provider, e.target_strategy, e.model_family,
@@ -123,6 +152,7 @@ _ANALYSES = {
         JOIN runs r ON r.run_uid = e.run_uid
         JOIN models m ON m.model_id = r.model_id
         WHERE e.status = 'completed' AND e.gini_weighted IS NOT NULL
+        AND {not_rejected}
         {model_filter}
         GROUP BY r.model_id, e.target_strategy, e.model_family
         ORDER BY peak_gini DESC
@@ -135,6 +165,7 @@ _ANALYSES = {
         JOIN runs r ON r.run_uid = e.run_uid
         JOIN models m ON m.model_id = r.model_id
         WHERE e.status = 'completed' AND e.gini_weighted IS NOT NULL
+        AND {not_rejected}
         {model_filter}
         GROUP BY r.model_id, e.model_family, e.target_strategy
         HAVING peak_gini < {threshold}
@@ -149,6 +180,7 @@ _ANALYSES = {
         JOIN runs r ON r.run_uid = e.run_uid
         JOIN models m ON m.model_id = r.model_id
         WHERE e.status = 'completed' AND e.gini_weighted IS NOT NULL
+        AND {not_rejected}
         {model_filter}
         ORDER BY gini_jump DESC
         LIMIT 20
@@ -179,6 +211,7 @@ def run_analysis(
 ) -> list[dict[str, Any]]:
     """Run a named canned analysis. Returns a list of result rows."""
     _check_access(access)
+    _require_own_identity(access, own_model_id)
     if analysis_name not in _ANALYSES:
         raise ValueError(
             f"Unknown analysis {analysis_name!r}. "
@@ -201,6 +234,7 @@ def run_analysis(
         model_filter=model_filter,
         model_filter_runs=model_filter_runs,
         threshold=float(threshold),
+        not_rejected=_NOT_REJECTED,
     )
 
     with sqlite3.connect(memory_path) as con:

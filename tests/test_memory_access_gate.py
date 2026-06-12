@@ -207,6 +207,42 @@ def test_query_insights_all_returns_all_models(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# E3: 'own' must FAIL CLOSED when the run's own identity is underivable.
+# Previously these returned every model's data (a lock that opens when confused).
+# ---------------------------------------------------------------------------
+
+
+def test_query_insights_own_without_identity_fails_closed(tmp_path: Path) -> None:
+    memory = tmp_path / "memory.sqlite"
+    _populate_store(memory)
+    with pytest.raises(AccessDeniedError, match="own model identity"):
+        query_insights(memory, "own", own_model_id=None)
+
+
+def test_query_experiments_own_without_identity_fails_closed(tmp_path: Path) -> None:
+    memory = tmp_path / "memory.sqlite"
+    _populate_store(memory)
+    with pytest.raises(AccessDeniedError, match="own model identity"):
+        query_experiments(memory, "own", own_model_id=None)
+
+
+def test_run_analysis_own_without_identity_fails_closed(tmp_path: Path) -> None:
+    memory = tmp_path / "memory.sqlite"
+    _populate_store(memory)
+    with pytest.raises(AccessDeniedError, match="own model identity"):
+        run_analysis(memory, "own", "peak-gini-by-framing", own_model_id=None)
+
+
+def test_query_insights_own_ignores_divergent_model_id(tmp_path: Path) -> None:
+    """Under 'own', an explicit model_id for another model must not leak its rows."""
+    memory = tmp_path / "memory.sqlite"
+    _populate_store(memory)
+    rows = query_insights(memory, "own", model_id="x/y", own_model_id="a/b")
+    assert all(r["model_id"] == "a/b" for r in rows)
+    assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
 # Canned analyses
 # ---------------------------------------------------------------------------
 
@@ -225,3 +261,34 @@ def test_run_analysis_unknown_name_raises(tmp_path: Path) -> None:
     init_memory_store(memory)
     with pytest.raises(ValueError, match="Unknown analysis"):
         run_analysis(memory, "all", "nonexistent-analysis")
+
+
+def test_peak_gini_by_framing_excludes_rejected(tmp_path: Path) -> None:
+    """E2 at the query layer: a rejected high scorer must not surface as a framing peak."""
+    memory = tmp_path / "memory.sqlite"
+    init_memory_store(memory)
+    with sqlite3.connect(memory) as con:
+        con.execute("INSERT INTO models (model_id, provider, name) VALUES ('a/b','a','b')")
+        con.execute(
+            "INSERT INTO runs (run_uid, model_id, n_experiments, n_promotions, peak_gini)"
+            " VALUES ('t/r','a/b',2,0,0.37)"
+        )
+        con.execute(
+            "INSERT INTO experiments (experiment_uid, run_uid, experiment_id, status,"
+            " target_strategy, model_family, gini_weighted)"
+            " VALUES ('t/r/e_real','t/r','e_real','completed','direct','lightgbm',0.37)"
+        )
+        con.execute(
+            "INSERT INTO experiments (experiment_uid, run_uid, experiment_id, status,"
+            " target_strategy, model_family, gini_weighted)"
+            " VALUES ('t/r/e_art','t/r','e_art','completed','direct','lightgbm',0.46)"
+        )
+        con.execute(
+            "INSERT INTO comparisons (comparison_uid, run_uid, champion_id, challenger_id, decision)"
+            " VALUES ('t/r/c','t/r','e_real','e_art','reject')"
+        )
+
+    rows = run_analysis(memory, "all", "peak-gini-by-framing")
+    peaks = [r["peak_gini"] for r in rows]
+    assert peaks, "expected at least one framing row"
+    assert max(peaks) < 0.40, f"rejected artifact (0.46) leaked into framing peaks: {peaks}"

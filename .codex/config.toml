@@ -8,4 +8,9 @@ approvals_reviewer = "user"
 network_access = true
 exclude_tmpdir_env_var = false
 exclude_slash_tmp = false
-writable_roots = []
+# The cross-run memory aggregator + global recipe ledger live OUTSIDE the working
+# tree, under ~/.autoresearch/<project>/memory (see memory.store.memory_root).
+# Without this whitelist the Codex sandbox blocks every memory write — checkpoints,
+# the recipe ledger, and playbook rebuilds all fail silently, so a Codex run reads
+# shared memory but never contributes (process_review_20260610_followup.md E1).
+writable_roots = ["~/.autoresearch"]

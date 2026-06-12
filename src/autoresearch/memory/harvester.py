@@ -152,11 +152,19 @@ def harvest_run(
         )
         # Only completed experiments can represent a true search-split peak.
         # Failed/timed-out experiments with a stray partial metric must not top the board.
+        # AND: an experiment whose comparison was *rejected* must not top the board
+        # either. A `completed` experiment can still be a known artifact that the
+        # CV/decision layer rejected (e.g. the exposure-ranking incident); peak_gini
+        # is otherwise blind to the decision and would crown the phantom, steering
+        # future runs toward it (process_review_20260610_followup.md E2).
+        rejected_ids = _rejected_challenger_ids(comparisons_raw)
         peak_gini = max(
             (
                 r["gini_weighted"]
                 for r in exp_rows
-                if r["gini_weighted"] is not None and r.get("status") == "completed"
+                if r["gini_weighted"] is not None
+                and r.get("status") == "completed"
+                and r["experiment_id"] not in rejected_ids
             ),
             default=None,
         )
@@ -241,6 +249,22 @@ def harvest_run(
                     cmp.get("created_at"),
                 ),
             )
+
+
+def _rejected_challenger_ids(comparisons_raw: list[dict[str, Any]]) -> set[str]:
+    """Experiment ids whose comparison decision was an explicit reject.
+
+    Used to keep rejected experiments (e.g. known artifacts caught at the
+    decision layer) off the leaderboard peak. Promote / local_promote / pending
+    challengers are kept.
+    """
+    rejected: set[str] = set()
+    for cmp in comparisons_raw:
+        decision = (cmp.get("decision") or cmp.get("promotion_decision") or "").lower()
+        challenger = cmp.get("challenger_id")
+        if challenger and decision == "reject":
+            rejected.add(challenger)
+    return rejected
 
 
 def _fetch_experiments(src: sqlite3.Connection) -> list[dict[str, Any]]:

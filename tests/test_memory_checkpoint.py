@@ -98,6 +98,7 @@ def test_session_does_not_call_checkpoint_on_non_multiples() -> None:
 def test_checkpoint_never_raises_into_loop(tmp_path: Path) -> None:
     """maybe_memory_checkpoint must swallow exceptions — the loop must not crash."""
     cfg = _make_config(tmp_path)
+    cfg.handoff_results_dir = tmp_path / "results"
 
     def exploding_inner(config):
         raise RuntimeError("simulated disk full")
@@ -105,6 +106,27 @@ def test_checkpoint_never_raises_into_loop(tmp_path: Path) -> None:
     with patch("autoresearch.memory._run_checkpoint", exploding_inner):
         # Must not raise
         maybe_memory_checkpoint(cfg, {"current_cycle": 5})
+
+
+def test_checkpoint_failure_is_surfaced_as_file(tmp_path: Path) -> None:
+    """E1: a swallowed checkpoint failure (e.g. sandbox write-deny) must leave a
+    visible error file in the run's results dir, not vanish into a logger."""
+    cfg = _make_config(tmp_path)
+    results_dir = tmp_path / "results"
+    cfg.handoff_results_dir = results_dir
+
+    def exploding_inner(config):
+        raise PermissionError("Operation not permitted: ~/.autoresearch/.../memory.sqlite")
+
+    with patch("autoresearch.memory._run_checkpoint", exploding_inner):
+        maybe_memory_checkpoint(cfg, {"current_cycle": 5})
+
+    error_file = results_dir / "memory_checkpoint_error.json"
+    assert error_file.exists(), "checkpoint failure was not surfaced as a file"
+    payload = json.loads(error_file.read_text(encoding="utf-8"))
+    assert "PermissionError" in payload["error"]
+    assert payload["track_id"] == "t"
+    assert payload["run_id"] == "r"
 
 
 def test_checkpoint_no_raise_when_manifest_missing(tmp_path: Path) -> None:
