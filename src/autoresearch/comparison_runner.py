@@ -19,6 +19,7 @@ from autoresearch.evaluation.resampling import (
     cv_bootstrap_comparison,
     evaluate_guardrails,
     paired_comparison,
+    paired_prediction_lift_bootstrap,
     paired_cv_comparison,
     promotion_decision,
     repeated_scores,
@@ -35,6 +36,17 @@ from autoresearch.experiment_registry.registry import (
 from autoresearch.run_artifacts import next_iteration_dir
 from autoresearch.reporting import write_comparison_html_report
 from autoresearch.utils.io import read_json, write_json
+
+
+DECISION_REASON_CODES = {
+    "clear_win",
+    "line_progress",
+    "noise",
+    "inferior",
+    "artifact_suspected",
+    "calibration",
+    "other",
+}
 
 
 def run_repeated_evaluation(config: ProjectConfig, experiment_id: str) -> dict[str, Path]:
@@ -92,6 +104,7 @@ def compare_experiments(
     *,
     output_dir: Path | None = None,
     record: bool = True,
+    local_incumbent_id: str | None = None,
 ) -> dict[str, Path]:
     """Run a paired volatility-aware comparison and persist promotion evidence."""
 
@@ -199,13 +212,25 @@ def compare_experiments(
         guardrail_result = evaluate_guardrails(chal_panel, comparison_summary)
         escalated = False
 
+    cluster_ids = None
+    if {"partition_idx", "fold_idx"}.issubset(per_resample.columns):
+        cluster_ids = per_resample[["partition_idx", "fold_idx"]]
     bootstrap = bootstrap_lift_summary(
         per_resample["lift"],
         iterations=config.bootstrap_iterations,
         seed=config.resampling_seed + 1,
         confidence_level=config.confidence_level,
         n_comparisons=max(1, bonferroni_count),
+        cluster_ids=cluster_ids,
     )
+    comparison_summary["lift_ci_lower"] = bootstrap["interval_lower"]
+    comparison_summary["lift_ci_upper"] = bootstrap["interval_upper"]
+    not_clearly_worse = float(bootstrap["interval_upper"]) >= 0.0
+    guardrail_result.setdefault("checks", {})["not_clearly_worse"] = not_clearly_worse
+    guardrail_result["failures"] = [
+        name for name, passed in guardrail_result["checks"].items() if not passed
+    ]
+    guardrail_result["passed"] = not guardrail_result["failures"]
     advisory_decision = promotion_decision(
         comparison_summary,
         bootstrap,
@@ -213,6 +238,17 @@ def compare_experiments(
         challenger_diagnostics=challenger_diagnostics,
         n_prior_comparisons=bonferroni_count,
     )
+    local_incumbent_comparison = _build_local_incumbent_comparison(
+        config,
+        official_champion_id=champion_id,
+        local_incumbent_id=local_incumbent_id,
+        challenger_id=challenger_id,
+        target_mode=champion_target_mode,
+        partition_indices=sorted(
+            int(value) for value in per_resample.get("partition_idx", pd.Series([0])).unique()
+        ),
+    )
+    comparison_summary["local_incumbent_comparison"] = local_incumbent_comparison
 
     # Comparison always starts as pending — LLM decides via record-decision.
     pending_decision = {
@@ -245,6 +281,7 @@ def compare_experiments(
         "advisory_promotion_decision": advisory_decision,
         "guardrail_result": guardrail_result,
         "metric_lift_table": metric_lift_table,
+        "local_incumbent_comparison": local_incumbent_comparison,
         "escalated": escalated,
     }
     per_resample_path = out_dir / "paired_resample_scores.csv"
@@ -268,6 +305,7 @@ def compare_experiments(
         bootstrap_summary=bootstrap,
         decision=pending_decision,
         metric_lift_table=metric_lift_table,
+        local_incumbent_comparison=local_incumbent_comparison,
         per_partition=per_resample,
         output_path=html_report_path,
     )
@@ -371,12 +409,44 @@ def screen_challenger_single_split(
     lift = champion_score - challenger_score if lower_better else challenger_score - champion_score
     relative_lift = lift / max(abs(champion_score), 1e-12)
     finite = all(pd.notna(v) for v in (champion_score, challenger_score, lift, relative_lift))
-    passed = bool(finite and lift >= min_abs and relative_lift >= min_rel)
+    uncertainty: dict[str, Any]
+    min_bootstrap_rows = int(getattr(config, "screening_min_bootstrap_rows", 30))
+    if finite and len(paired) >= min_bootstrap_rows:
+        uncertainty = paired_prediction_lift_bootstrap(
+            paired[actual_col],
+            paired[champion_merged_col],
+            paired[challenger_merged_col],
+            paired["exposure"],
+            primary_metric=gate_metric,
+            iterations=int(getattr(config, "screening_bootstrap_iterations", 200)),
+            seed=int(getattr(config, "resampling_seed", 0)) + 17,
+            confidence_level=float(getattr(config, "screening_confidence_level", 0.90)),
+            tweedie_power=config.tweedie_power,
+            target_mode=target_mode,
+        )
+        clearly_worse = (
+            uncertainty["lift_ci_upper"] < min_abs
+            or uncertainty["relative_lift_ci_upper"] < min_rel
+        )
+    else:
+        uncertainty = {
+            "uncertainty_method": "point_fallback_small_sample",
+            "bootstrap_iterations": 0,
+            "confidence_level": None,
+            "lift_ci_lower": float(lift),
+            "lift_ci_upper": float(lift),
+            "relative_lift_ci_lower": float(relative_lift),
+            "relative_lift_ci_upper": float(relative_lift),
+        }
+        clearly_worse = lift < min_abs or relative_lift < min_rel
+    passed = bool(finite and not clearly_worse)
     reason = (
-        "passed low-hurdle single-split screen"
+        "passed uncertainty-aware low-hurdle single-split screen"
         if passed
         else (
-            f"single-split lift {lift:.6g} / relative {relative_lift:.6g} "
+            f"single-split upper confidence bounds "
+            f"{uncertainty['lift_ci_upper']:.6g} absolute / "
+            f"{uncertainty['relative_lift_ci_upper']:.6g} relative "
             f"below low hurdle ({min_abs:.6g}, {min_rel:.6g})"
         )
     )
@@ -389,6 +459,7 @@ def screen_challenger_single_split(
         "lift": float(lift),
         "relative_lift": float(relative_lift),
         "overlap_rows": int(len(paired)),
+        **uncertainty,
         "champion_metric_panel": champion_panel,
         "challenger_metric_panel": challenger_panel,
     }
@@ -526,6 +597,7 @@ def record_decision(
     *,
     decision: str,
     rationale: str,
+    reason_code: str | None = None,
     interpretation: str,
     next_step: str,
 ) -> dict[str, Any]:
@@ -558,6 +630,15 @@ def record_decision(
     next_step = next_step.strip()
     if decision not in ("promote", "local_promote", "reject"):
         raise ValueError(f"decision must be 'promote', 'local_promote', or 'reject', got {decision!r}")
+    reason_code = (reason_code or {
+        "promote": "clear_win",
+        "local_promote": "line_progress",
+        "reject": "other",
+    }[decision]).strip().lower()
+    if reason_code not in DECISION_REASON_CODES:
+        raise ValueError(
+            "reason_code must be one of: " + ", ".join(sorted(DECISION_REASON_CODES))
+        )
     if not interpretation or not next_step:
         raise ValueError("interpretation and next_step are required for every decision")
 
@@ -604,6 +685,7 @@ def record_decision(
             "comparison_id": comparison_id,
             "decision": existing_decision,
             "rationale": comp.get("decision_rationale") or rationale,
+            "reason_code": comp.get("decision_reason_code") or reason_code,
             "decided_by": comp.get("decided_by") or "llm",
             "decided_at": comp.get("decided_at"),
             "proposal_id": proposal_id,
@@ -624,6 +706,7 @@ def record_decision(
             "comparison_id": comparison_id,
             "decision": existing_decision,
             "rationale": comp.get("decision_rationale") or rationale,
+            "reason_code": comp.get("decision_reason_code") or reason_code,
             "decided_by": comp.get("decided_by") or "llm",
             "decided_at": comp.get("decided_at"),
             "proposal_id": proposal_id,
@@ -758,6 +841,7 @@ def record_decision(
         comparison_id,
         decision=decision,
         rationale=rationale,
+        reason_code=reason_code,
         decided_by="llm",
         decided_at=decided_at,
         guardrail_status=guardrail_result or None,
@@ -770,6 +854,7 @@ def record_decision(
     final_decision = {
         "decision": decision,
         "rationale": rationale,
+        "reason_code": reason_code,
         "decided_by": "llm",
         "decided_at": decided_at,
         "promoted": decision == "promote",
@@ -799,6 +884,7 @@ def record_decision(
             "comparison_id": comparison_id,
             "decision": decision,
             "rationale": rationale,
+            "reason_code": reason_code,
             "decided_by": "llm",
             "decided_at": decided_at,
             "proposal_id": proposal_id,
@@ -813,6 +899,7 @@ def record_decision(
         "comparison_id": comparison_id,
         "decision": decision,
         "rationale": rationale,
+        "reason_code": reason_code,
         "decided_by": "llm",
         "decided_at": decided_at,
         "proposal_id": proposal_id,
@@ -894,6 +981,7 @@ def _finalise_comparison_report(
         comparison_summary = payload.get("comparison_summary", {})
         bootstrap_summary = payload.get("bootstrap_summary", {})
         metric_lift_table = payload.get("metric_lift_table", [])
+        local_incumbent_comparison = payload.get("local_incumbent_comparison")
         advisory = payload.get("advisory_promotion_decision", {})
 
         # Carry advisory checks/thresholds into the final decision so the
@@ -920,6 +1008,7 @@ def _finalise_comparison_report(
             bootstrap_summary=bootstrap_summary,
             decision=render_decision,
             metric_lift_table=metric_lift_table,
+            local_incumbent_comparison=local_incumbent_comparison,
             per_partition=per_partition,
             output_path=html_path,
         )
@@ -1059,12 +1148,16 @@ def _run_cv_bootstrap_comparison(
         enabled=config.claim_capping_enabled,
     )
 
-    # Base partition (index 0)
-    champ_folds_0 = get_or_build_fold_predictions(config, champion_id, 0, frame)
-    chal_folds_0 = get_or_build_fold_predictions(config, challenger_id, 0, frame)
+    base_partition_index = _base_partition_index(config)
+    champ_folds_0 = get_or_build_fold_predictions(
+        config, champion_id, base_partition_index, frame
+    )
+    chal_folds_0 = get_or_build_fold_predictions(
+        config, challenger_id, base_partition_index, frame
+    )
 
-    champion_fp: dict[int, list] = {0: champ_folds_0}
-    challenger_fp: dict[int, list] = {0: chal_folds_0}
+    champion_fp: dict[int, list] = {base_partition_index: champ_folds_0}
+    challenger_fp: dict[int, list] = {base_partition_index: chal_folds_0}
 
     per_sample, summary = cv_bootstrap_comparison(
         champion_fold_predictions=champion_fp,
@@ -1077,6 +1170,7 @@ def _run_cv_bootstrap_comparison(
     )
     summary["champion_id"] = champion_id
     summary["challenger_id"] = challenger_id
+    summary["base_partition_index"] = base_partition_index
 
     escalated = False
     win_rate = summary["challenger_win_rate"]
@@ -1084,7 +1178,7 @@ def _run_cv_bootstrap_comparison(
     if escalation_lo <= win_rate <= escalation_hi and escalation_n > 0:
         # Close call — add more partitions
         pre_escalation_win_rate = win_rate
-        for p_idx in range(1, escalation_n + 1):
+        for p_idx in range(base_partition_index + 1, base_partition_index + escalation_n + 1):
             champion_fp[p_idx] = get_or_build_fold_predictions(config, champion_id, p_idx, frame)
             challenger_fp[p_idx] = get_or_build_fold_predictions(config, challenger_id, p_idx, frame)
 
@@ -1100,6 +1194,7 @@ def _run_cv_bootstrap_comparison(
         summary["champion_id"] = champion_id
         summary["challenger_id"] = challenger_id
         summary["pre_escalation_win_rate"] = pre_escalation_win_rate
+        summary["base_partition_index"] = base_partition_index
         escalated = True
 
     summary["escalated"] = escalated
@@ -1129,6 +1224,96 @@ def _run_cv_bootstrap_comparison(
 
     guardrail_result = evaluate_guardrails(challenger_agg, summary)
     return per_sample, summary, guardrail_result, escalated
+
+
+def _base_partition_index(config: ProjectConfig) -> int:
+    """Rotate the base fold partition after a configurable number of comparisons."""
+
+    interval = max(1, int(getattr(config, "partition_rotation_interval", 5)))
+    comparison_count = len(list_comparisons(config.registry_path))
+    window = comparison_count // interval
+    partition_span = 1 + max(0, int(getattr(config, "escalation_partitions", 2)))
+    return window * partition_span
+
+
+def _build_local_incumbent_comparison(
+    config: ProjectConfig,
+    *,
+    official_champion_id: str,
+    local_incumbent_id: str | None,
+    challenger_id: str,
+    target_mode: str,
+    partition_indices: list[int],
+) -> dict[str, Any] | None:
+    """Build CV-grade line-local evidence on the official comparison partitions."""
+
+    if not local_incumbent_id or local_incumbent_id == official_champion_id:
+        return None
+
+    from autoresearch.cv_cache import get_or_build_fold_predictions
+    from autoresearch.data.holdout_vault import load_search_dataset
+    from autoresearch.data.preprocessing import apply_claim_capping
+    from autoresearch.models.dispatcher import RAW_CLAIM_COST
+
+    frame = load_search_dataset(config.processed_dir, config.agent_dataset_name)
+    frame, _ = apply_claim_capping(
+        frame,
+        claim_column=RAW_CLAIM_COST,
+        threshold=config.claim_cap_threshold,
+        enabled=config.claim_capping_enabled,
+    )
+    incumbent_folds: dict[int, list[pd.DataFrame]] = {}
+    challenger_folds: dict[int, list[pd.DataFrame]] = {}
+    for partition_index in partition_indices:
+        incumbent_folds[partition_index] = get_or_build_fold_predictions(
+            config,
+            local_incumbent_id,
+            partition_index,
+            frame,
+        )
+        challenger_folds[partition_index] = get_or_build_fold_predictions(
+            config,
+            challenger_id,
+            partition_index,
+            frame,
+        )
+
+    per_sample, summary = cv_bootstrap_comparison(
+        champion_fold_predictions=incumbent_folds,
+        challenger_fold_predictions=challenger_folds,
+        gate_primary_metric=getattr(config, "gate_primary_metric", "gini_weighted"),
+        bootstrap_per_fold=getattr(config, "bootstrap_per_fold", 20),
+        tweedie_power=config.tweedie_power,
+        seed=getattr(config, "cv_seed", config.resampling_seed),
+        target_mode=target_mode,
+    )
+    summary["champion_id"] = local_incumbent_id
+    summary["challenger_id"] = challenger_id
+    summary["comparison_role"] = "local_incumbent"
+    bootstrap = bootstrap_lift_summary(
+        per_sample["lift"],
+        iterations=config.bootstrap_iterations,
+        seed=config.resampling_seed + 29,
+        confidence_level=config.confidence_level,
+        cluster_ids=per_sample[["partition_idx", "fold_idx"]],
+    )
+    summary["lift_ci_lower"] = bootstrap["interval_lower"]
+    summary["lift_ci_upper"] = bootstrap["interval_upper"]
+    metric_lift_table = _build_metric_lift_table(
+        config,
+        local_incumbent_id,
+        challenger_id,
+        per_sample,
+        summary,
+    )
+    return {
+        "incumbent_id": local_incumbent_id,
+        "challenger_id": challenger_id,
+        "partition_indices": partition_indices,
+        "comparison_summary": summary,
+        "bootstrap_summary": bootstrap,
+        "metric_lift_table": metric_lift_table,
+    }
 
 
 def _run_cv_comparison(

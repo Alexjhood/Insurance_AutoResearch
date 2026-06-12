@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS comparisons (
     challenger_win_rate REAL,
     std_lift REAL,
     decision TEXT,
+    decision_reason_code TEXT,
     guardrail_status TEXT,
     created_at TEXT,
     FOREIGN KEY (run_uid) REFERENCES runs(run_uid)
@@ -97,6 +98,11 @@ def init_memory_store(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as con:
         con.executescript(SCHEMA)
+        comparison_columns = {
+            row[1] for row in con.execute("PRAGMA table_info(comparisons)").fetchall()
+        }
+        if "decision_reason_code" not in comparison_columns:
+            con.execute("ALTER TABLE comparisons ADD COLUMN decision_reason_code TEXT")
     return path
 
 

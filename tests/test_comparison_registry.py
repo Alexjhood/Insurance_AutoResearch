@@ -36,9 +36,11 @@ def test_record_comparison_round_trips(tmp_path: Path) -> None:
         "cmp",
         decision="reject",
         rationale="LLM rejected.",
+        reason_code="noise",
         decided_at="2026-06-04T00:00:00Z",
     )
 
     rows = list_comparisons(registry_path)
     assert rows[0]["promotion_decision"] == "promote"
     assert rows[0]["final_decision"] == "reject"
+    assert rows[0]["decision_reason_code"] == "noise"

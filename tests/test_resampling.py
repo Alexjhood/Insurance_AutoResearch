@@ -105,6 +105,25 @@ def test_bootstrap_and_promotion_decision() -> None:
     assert decision["decision"] == "promote"
 
 
+def test_clustered_bootstrap_uses_fold_as_independent_unit() -> None:
+    """Repeated within-fold samples must not masquerade as independent folds."""
+    fold_lifts = np.array([-0.010, -0.005, 0.015, 0.020])
+    lifts = pd.Series(np.repeat(fold_lifts, 20))
+    clusters = pd.Series(np.repeat(np.arange(4), 20))
+
+    summary = bootstrap_lift_summary(
+        lifts,
+        iterations=5000,
+        seed=7,
+        confidence_level=0.9,
+        cluster_ids=clusters,
+    )
+
+    assert summary["uncertainty_method"] == "cluster_bootstrap"
+    assert summary["n_independent_units"] == 4
+    assert summary["interval_lower"] < 0 < summary["interval_upper"]
+
+
 def _make_cv_frame_and_folds(n: int = 100) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Minimal dataset + fold assignments for CV tests."""
     rng = np.random.default_rng(42)
@@ -323,6 +342,8 @@ def test_cv_bootstrap_comparison_sample_count() -> None:
     assert summary["bootstrap_per_fold"] == 5
     assert summary["n_samples"] == 1 * 4 * 5
     assert len(per_sample) == 20
+    assert summary["n_independent_units"] == 4
+    assert len(summary["independent_unit_mean_lifts"]) == 4
 
 
 def test_cv_bootstrap_comparison_win_rate_in_bounds() -> None:

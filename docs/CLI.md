@@ -158,6 +158,23 @@ autoresearch --track demo --run-id quickstart compare-to-champion <challenger-id
 
 Writes: comparison report and promotion decision to the run's `iterations/` directory.
 
+### `record-decision`
+
+Record the supervised verdict, structured outcome category, interpretation,
+and next research direction for a pending comparison.
+
+```bash
+autoresearch --track demo --run-id quickstart record-decision <comparison-id> \
+  --decision reject \
+  --reason-code noise \
+  --rationale "The apparent lift is not stable across folds." \
+  --interpretation "This variant does not add reliable ranking signal." \
+  --next "Rotate to a different target framing."
+```
+
+Reason codes: `clear_win`, `line_progress`, `noise`, `inferior`,
+`artifact_suspected`, `calibration`, `other`.
+
 ### `list-promotions`
 
 Print all volatility-aware comparison and promotion decisions.

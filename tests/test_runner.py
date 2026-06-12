@@ -467,6 +467,7 @@ claim_cap_threshold = 100000
         comp_id,
         decision="reject",
         rationale="Insufficient evidence.",
+        reason_code="noise",
         interpretation="The challenger did not establish a reliable improvement.",
         next_step="Try a materially different modelling approach.",
     )
@@ -474,11 +475,13 @@ claim_cap_threshold = 100000
     assert result["decision"] == "reject"
     assert result["rationale"] == "Insufficient evidence."
     assert result["decided_by"] == "llm"
+    assert result["reason_code"] == "noise"
 
     comps = list_comparisons(config.registry_path)
     comp = next(c for c in comps if c["comparison_id"] == comp_id)
     assert comp["decision"] == "reject"
     assert comp["decision_rationale"] == "Insufficient evidence."
+    assert comp["decision_reason_code"] == "noise"
     proposal = next(p for p in list_proposals(config.registry_path) if p["proposal_id"] == "reject_prop")
     assert proposal["status"] == "rejected"
     context = json.loads((config.handoff_context_dir / "latest_context.json").read_text())
@@ -587,6 +590,31 @@ def test_bonferroni_family_includes_current_comparison(tmp_path: Path) -> None:
     assert second_boot["n_comparisons_bonferroni"] == 2
 
 
+def test_base_partition_rotates_after_five_comparisons(tmp_path: Path) -> None:
+    from autoresearch.comparison_runner import _base_partition_index
+    from autoresearch.experiment_registry.registry import record_comparison
+
+    config = replace(
+        _make_config(tmp_path),
+        partition_rotation_interval=5,
+        escalation_partitions=2,
+    )
+    assert _base_partition_index(config) == 0
+    for index in range(5):
+        record_comparison(
+            config.registry_path,
+            comparison_id=f"rotation_{index}",
+            champion_id="champion",
+            challenger_id=f"challenger_{index}",
+            paired_summary={"mean_lift": 0.0, "challenger_win_rate": 0.5},
+            bootstrap_summary={"interval_lower": -0.1, "interval_upper": 0.1},
+            promotion_decision="pending_llm",
+            promotion_rationale="pending",
+            artifacts={},
+        )
+    assert _base_partition_index(config) == 3
+
+
 def test_record_decision_promote_updates_champion(tmp_path: Path) -> None:
     """record_decision('promote') with passing guardrails updates the official champion."""
     from autoresearch.comparison_runner import record_decision
@@ -602,6 +630,15 @@ def test_record_decision_promote_updates_champion(tmp_path: Path) -> None:
 
     artifacts = compare_experiments(config, champ_id, chal_id)
     comp_id = json.loads(artifacts["promotion_report"].read_text())["comparison_id"]
+    # This test exercises decision bookkeeping with two constant fixtures. The
+    # tie-aware Gini correctly gives them zero discrimination, so explicitly
+    # isolate the bookkeeping path from the separately-tested guardrail path.
+    import sqlite3
+    with sqlite3.connect(config.registry_path) as con:
+        con.execute(
+            "UPDATE comparisons SET guardrail_status = ? WHERE comparison_id = ?",
+            (json.dumps({"passed": True, "failures": [], "checks": {}}), comp_id),
+        )
 
     result = record_decision(
         config,
@@ -684,6 +721,55 @@ def test_record_decision_local_promote_updates_line_only(tmp_path: Path) -> None
     assert get_research_line(config.registry_path, "line_local")["current_experiment_id"] == chal_id
     comp = next(c for c in list_comparisons(config.registry_path) if c["comparison_id"] == comp_id)
     assert comp["decision"] == "local_promote"
+
+
+def test_comparison_includes_local_incumbent_cv_evidence(tmp_path: Path) -> None:
+    """A line-local verdict gets paired CV evidence against its own incumbent."""
+    config, champ_id, chal_id = _setup_two_experiments(tmp_path, "localcv")
+    local_id = champ_id
+
+    artifacts = compare_experiments(
+        config,
+        champ_id,
+        chal_id,
+        local_incumbent_id=local_id,
+    )
+    report = json.loads(artifacts["promotion_report"].read_text())
+
+    assert report["local_incumbent_comparison"] is None
+
+    third_config = tmp_path / "localcv_third.toml"
+    third_config.write_text(
+        """
+experiment_name = "localcv_third"
+model_family = "global_mean"
+target_strategy = "direct_pure_premium"
+
+[preprocessing]
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[model]
+""".strip(),
+        encoding="utf-8",
+    )
+    third_id = json.loads(
+        run_experiment(config, third_config)["config_snapshot"].read_text(encoding="utf-8")
+    )["experiment_id"]
+
+    artifacts = compare_experiments(
+        config,
+        champ_id,
+        third_id,
+        local_incumbent_id=chal_id,
+    )
+    report = json.loads(artifacts["promotion_report"].read_text())
+    local = report["local_incumbent_comparison"]
+
+    assert local["incumbent_id"] == chal_id
+    assert local["challenger_id"] == third_id
+    assert local["comparison_summary"]["n_independent_units"] >= 1
+    assert local["bootstrap_summary"]["uncertainty_method"] == "cluster_bootstrap"
 
 
 def test_record_decision_promote_blocked_by_guardrail(tmp_path: Path) -> None:

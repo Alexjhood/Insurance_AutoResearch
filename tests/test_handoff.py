@@ -952,6 +952,11 @@ def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=Non
     assert diagnostic_report["gate_mode"] == "single_partition"
     assert diagnostic_report["comparison_summary"]["n_resamples"] == 1
     assert diagnostic_report["bootstrap_summary"]["bootstrap_iterations"] == 1
+    assert result["screening"]["uncertainty_method"] in {
+        "paired_row_bootstrap",
+        "point_fallback_small_sample",
+    }
+    assert result["screening"]["lift_ci_upper"] < result["screening"]["min_absolute_lift"]
     assert proposals[0]["status"] == "rejected"
     assert any(node["node_id"] == "clear_loser_1" and node["outcome_type"] == "clear_loser" for node in nodes)
     assert (config.handoff_results_dir / "latest_nonpromotion_summary.md").exists()

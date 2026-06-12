@@ -51,6 +51,7 @@ def _make_registry(path: Path, experiments: list[dict], comparisons: list[dict] 
                 paired_summary TEXT,
                 promotion_decision TEXT,
                 decision TEXT,
+                decision_reason_code TEXT,
                 guardrail_status TEXT
             );
             CREATE TABLE IF NOT EXISTS champion_history (
@@ -95,8 +96,8 @@ def _make_registry(path: Path, experiments: list[dict], comparisons: list[dict] 
                 """
                 INSERT INTO comparisons
                     (comparison_id, champion_id, challenger_id, paired_summary,
-                     promotion_decision, decision, guardrail_status)
-                VALUES (?,?,?,?,?,?,?)
+                     promotion_decision, decision, decision_reason_code, guardrail_status)
+                VALUES (?,?,?,?,?,?,?,?)
                 """,
                 (
                     cmp["comparison_id"],
@@ -105,6 +106,7 @@ def _make_registry(path: Path, experiments: list[dict], comparisons: list[dict] 
                     json.dumps(cmp.get("paired_summary", {})),
                     cmp.get("promotion_decision", "reject"),
                     cmp.get("decision"),
+                    cmp.get("decision_reason_code"),
                     cmp.get("guardrail_status"),
                 ),
             )
@@ -200,6 +202,7 @@ def test_harvest_run_comparisons(tmp_path: Path) -> None:
                 "paired_summary": {"mean_lift": 0.05, "challenger_win_rate": 0.75, "std_lift": 0.01},
                 "promotion_decision": "promote",
                 "decision": "promote",
+                "decision_reason_code": "clear_win",
             }
         ],
     )
@@ -207,10 +210,14 @@ def test_harvest_run_comparisons(tmp_path: Path) -> None:
     harvest_run(memory, registry, identity, track_id="t", run_id="r")
 
     with sqlite3.connect(memory) as con:
-        row = con.execute("SELECT mean_lift, decision FROM comparisons WHERE run_uid='t/r'").fetchone()
+        row = con.execute(
+            "SELECT mean_lift, decision, decision_reason_code "
+            "FROM comparisons WHERE run_uid='t/r'"
+        ).fetchone()
     assert row is not None
     assert abs(row[0] - 0.05) < 1e-9
     assert row[1] == "promote"
+    assert row[2] == "clear_win"
 
 
 def test_harvest_run_skips_without_provider_name(tmp_path: Path) -> None:

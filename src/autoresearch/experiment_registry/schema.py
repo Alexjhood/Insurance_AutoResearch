@@ -269,6 +269,7 @@ def _migrate_comparisons(con: sqlite3.Connection) -> None:
         "decision_rationale": "TEXT",
         "decided_by": "TEXT",
         "decided_at": "TEXT",
+        "decision_reason_code": "TEXT",
         "guardrail_status": "TEXT",
     }
     for column, definition in columns.items():

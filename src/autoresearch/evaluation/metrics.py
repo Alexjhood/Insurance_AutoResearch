@@ -269,8 +269,11 @@ def _rank_gini_weighted(actual: np.ndarray, predicted: np.ndarray, weights: np.n
     predicted_pp = predicted / safe_w
     actual_rate = actual / safe_w
 
-    # Sort by predicted rate ascending (same orientation as gini_weighted)
-    order = np.argsort(predicted_pp)
+    # Sort by predicted rate ascending (same orientation as gini_weighted).
+    # Equal predictions have no ordering information, so aggregate their mass
+    # before integrating the Lorenz curve instead of inheriting input row order.
+    order = np.argsort(predicted_pp, kind="stable")
+    predicted_ordered = predicted_pp[order]
     w = safe_w[order]
     actual_rate_ordered = actual_rate[order]
 
@@ -284,11 +287,16 @@ def _rank_gini_weighted(actual: np.ndarray, predicted: np.ndarray, weights: np.n
     rank_values = np.empty(len(w))
     rank_values[rank_order] = midpoints
 
-    cum_w = np.cumsum(w) / w.sum()
-    total_rank = rank_values.sum()
+    grouped_w, grouped_rank = _aggregate_tied_prediction_mass(
+        predicted_ordered,
+        w,
+        rank_values,
+    )
+    cum_w = np.cumsum(grouped_w) / grouped_w.sum()
+    total_rank = grouped_rank.sum()
     if total_rank < 1e-12:
         return float("nan")
-    cum_rank = np.cumsum(rank_values) / total_rank
+    cum_rank = np.cumsum(grouped_rank) / total_rank
 
     cum_w = np.concatenate([[0.0], cum_w])
     cum_rank = np.concatenate([[0.0], cum_rank])
@@ -415,9 +423,13 @@ def _gini_weighted(actual: np.ndarray, predicted: np.ndarray, weights: np.ndarra
         return float("nan")
     safe_w = np.clip(weights, 1e-12, None)
     predicted_pp = predicted / safe_w
-    order = np.argsort(predicted_pp)
-    w = weights[order]
-    y = actual[order]
+    order = np.argsort(predicted_pp, kind="stable")
+    predicted_ordered = predicted_pp[order]
+    w, y = _aggregate_tied_prediction_mass(
+        predicted_ordered,
+        safe_w[order],
+        actual[order],
+    )
     cum_w = np.cumsum(w) / w.sum()
     cum_y = np.cumsum(y) / y.sum() if y.sum() > 0 else cum_w
     # Prepend origin so the trapezoidal rule covers the full [0,1]×[0,1] square
@@ -426,6 +438,21 @@ def _gini_weighted(actual: np.ndarray, predicted: np.ndarray, weights: np.ndarra
     _trapz = getattr(np, "trapezoid", None) or getattr(np, "trapz")
     lorenz_area = float(_trapz(cum_y, cum_w))
     return float(1 - 2 * lorenz_area)
+
+
+def _aggregate_tied_prediction_mass(
+    predicted_rate: np.ndarray,
+    weights: np.ndarray,
+    values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Aggregate exposure and outcome mass for equal predicted rates."""
+
+    if len(predicted_rate) == 0:
+        return weights, values
+    starts = np.concatenate(
+        ([0], np.flatnonzero(predicted_rate[1:] != predicted_rate[:-1]) + 1)
+    )
+    return np.add.reduceat(weights, starts), np.add.reduceat(values, starts)
 
 
 def _double_lift_slope(actual_pp: np.ndarray, predicted_pp: np.ndarray, weights: np.ndarray) -> float:

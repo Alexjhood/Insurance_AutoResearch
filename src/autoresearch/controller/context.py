@@ -179,6 +179,7 @@ def _compact_comparisons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "decision",
         "final_decision",
         "decision_rationale",
+        "decision_reason_code",
     ]
     return [{key: row.get(key) for key in keys} for row in rows]
 

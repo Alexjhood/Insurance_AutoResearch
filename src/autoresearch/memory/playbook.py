@@ -170,6 +170,9 @@ def build_playbook(
             "## Leaderboard summary",
             "",
             f"- Best observed gini: **{gini_str}** (`{facts['top_model']}`)",
+            "- Scores harvested before 2026-06-12 used pre-tie-aware Gini "
+            "(input-order tie-breaking) and can be inflated by ~0.02 for "
+            "near-flat models; treat small cross-era gaps as noise.",
             f"- Structural threshold (rate-Tweedie escape band): **{facts['threshold']:.3f}**",
         ]
         if facts["plateau_models"]:

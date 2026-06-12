@@ -31,6 +31,11 @@ def test_init_creates_all_tables(tmp_path: Path) -> None:
             ).fetchall()
         }
     assert {"models", "runs", "experiments", "comparisons", "insights"} <= tables
+    with sqlite3.connect(db) as con:
+        comparison_columns = {
+            row[1] for row in con.execute("PRAGMA table_info(comparisons)").fetchall()
+        }
+    assert "decision_reason_code" in comparison_columns
 
 
 def test_init_is_idempotent(tmp_path: Path) -> None:

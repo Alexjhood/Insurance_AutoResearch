@@ -130,7 +130,7 @@ If an experiment times out, the framework marks it `failed` with a `compute_budg
 
 ## What you are optimising
 
-**Primary KPI & gate metric**: `gini_weighted` — higher is better. The exposure-weighted Lorenz-area Gini is both the headline business KPI and the metric the `cv_bootstrap` gate ranks challengers on (win rate, lift, escalation trigger). `rank_gini_weighted` is still computed alongside it for reference (bounded-influence Somers' D), but it no longer drives the gate.
+**Primary KPI & gate metric**: `gini_weighted` — higher is better. The exposure-weighted Lorenz-area Gini is both the headline business KPI and the metric the `cv_bootstrap` gate ranks challengers on (win rate, lift, escalation trigger). `rank_gini_weighted` is still computed alongside it for reference (bounded-influence Somers' D), but it no longer drives the gate. Since 2026-06-12 the Gini is tie-aware (tied predictions carry no ordering signal; a constant model scores exactly 0); scores recorded before that date used input-order tie-breaking and can be inflated by ~0.02 for near-flat models.
 
 **The decision is yours, not a threshold.** The framework computes the full metric panel across all bootstrap×fold samples and a set of *advisory* gates, but it does not auto-promote. You review everything and call `record-decision` (see "You own the decision" below). Hard guardrails can only block clearly-broken promotions — they never promote for you.
 
@@ -165,21 +165,22 @@ After every comparison, the framework writes `decision = "pending_llm"`. **You m
 1. **Full metric table**: check `gini_weighted`, `rank_gini_weighted`, `asym_pricing_loss`, calibration ratio.
 2. **Advisory gate panel**: did the challenger pass or fail the configured thresholds?
 3. **Guardrail status** (shown in the report banner): any hard-fail blocks promotion regardless of your choice.
-4. **Escalation**: if win rate was in the close-call band [0.40, 0.60], escalation added extra partitions — the post-escalation win rate is the one to read.
-5. **Asymmetric Pricing Loss (APL)**: lower is better. `asym_pricing_loss` penalises under-pricing 4× over-pricing. A challenger with a good Gini but high APL is writing profitable policies in the wrong segments.
+4. **Escalation**: if win rate was in the close-call band [0.50, 0.75] (one fold-unit either side of the 0.60 promotion threshold), escalation added extra partitions — the post-escalation win rate is the one to read.
+5. **Independent evidence**: confidence intervals and the gate win rate operate on whole `(partition, fold)` units. The effective evidence count is normally 4 folds, or 12 after escalation; the 20 within-fold bootstraps describe row noise rather than 20 independent model fits.
+6. **Asymmetric Pricing Loss (APL)**: lower is better. `asym_pricing_loss` penalises under-pricing 4× over-pricing. A challenger with a good Gini but high APL is writing profitable policies in the wrong segments.
 
 ### How to record your decision
 ```bash
-autoresearch --track <track> record-decision <comparison_id> --decision promote --rationale "Clear panel improvement." --interpretation "The new model captured stable signal." --next "Build from the promoted model."
-autoresearch --track <track> record-decision <comparison_id> --decision local_promote --rationale "Useful line-local progress." --interpretation "This framing helps within the line." --next "Continue the line without replacing the global champion."
-autoresearch --track <track> record-decision <comparison_id> --decision reject --rationale "Insufficient evidence." --interpretation "The apparent lift was not stable." --next "Rotate to a materially different approach."
+autoresearch --track <track> record-decision <comparison_id> --decision promote --reason-code clear_win --rationale "Clear panel improvement." --interpretation "The new model captured stable signal." --next "Build from the promoted model."
+autoresearch --track <track> record-decision <comparison_id> --decision local_promote --reason-code line_progress --rationale "Useful line-local progress." --interpretation "This framing helps within the line." --next "Continue the line without replacing the global champion."
+autoresearch --track <track> record-decision <comparison_id> --decision reject --reason-code noise --rationale "Insufficient evidence." --interpretation "The apparent lift was not stable." --next "Rotate to a materially different approach."
 ```
 
 The comparison_id appears in the `compare-experiments` output and in `list-promotions`.
 
 On `promote`: guardrails are re-checked; hard fails block the promotion with an error message. On success, the holdout evaluation fires automatically and the proposal also becomes the local incumbent for its research line.
 
-On `local_promote`: the proposal becomes the local incumbent for its research line, but the official champion and holdout remain unchanged. Use this when a line has made coherent progress that is worth extending, but the whole run should not yet switch champion.
+On `local_promote`: the proposal becomes the local incumbent for its research line, but the official champion and holdout remain unchanged. When it differs from the global champion, the report includes a second cluster-bootstrap comparison against the line incumbent on the same partitions.
 
 On `reject`: the official champion is retained. Treat the result as evidence for future line design.
 
@@ -234,10 +235,12 @@ The comparison gate has three modes, configured via `gate_mode` in `default.toml
 
 ### `cv_bootstrap` (default)
 
-Generates a **unique fold partition per run** (seed derived from run_id), then bootstrap-resamples each fold ×20. All (fold × bootstrap) samples contribute to the win rate and CI. Gate metric: `gini_weighted`.
+Generates a deterministic fold partition from the run id, then bootstrap-resamples each fold ×20. Confidence intervals use a hierarchical cluster bootstrap that treats each `(partition, fold)` as one independent unit. Gate metric: `gini_weighted`.
 
 - Base comparison: 1 partition × 4 folds × 20 bootstrap = **80 samples**.
-- Close call (win rate in [0.40, 0.60]): escalation adds 2 extra partitions → **240 samples**.
+- Close call (win rate in [0.50, 0.75]): escalation adds 2 extra partitions → **240 samples**. The band spans one fold-unit either side of the 0.60 promotion threshold because base-path win rates are quantised to quarters.
+- Effective independent units: **4 folds** on the base path and **12 folds** after escalation.
+- The base partition rotates after every 5 recorded full comparisons to limit long-run adaptive overfitting.
 - Champion fold predictions are **cached** — only the challenger needs to be refit (4 fits vs old 16–32).
 - **~8× cheaper** than the old `repeated_cv` default on the common path.
 
@@ -251,7 +254,7 @@ Evaluates on the fixed `search_validation` split with 30 bootstrap resamples. CI
 
 ### Single-split screening
 
-Before the expensive CV/bootstrap comparison, every valid challenger is screened once on the full `search_validation` split. This is a low hurdle, not a promotion gate: clearly worse challengers are auto-rejected, while similar or better challengers proceed to full comparison and LLM decision. If the proposal's research line already has a local incumbent, this screen compares against that local incumbent; otherwise it falls back to the official champion. Auto-rejections still write a cheap diagnostic comparison report using a single paired eval-split sample; this report is for analysis only and is not recorded as an official pending comparison. Auto-rejections are also written to the research tree and non-promotion summaries; read them as evidence for the next proposal.
+Before the expensive CV/bootstrap comparison, every valid challenger is screened on the full `search_validation` split. A paired row bootstrap estimates uncertainty from the existing predictions without refitting. The challenger is auto-rejected only when the interval's upper bound is below the configured clear-loser hurdle; uncertain cases proceed to full comparison. Very small diagnostic datasets use an explicit point-estimate fallback. If the line has a local incumbent, screening compares against it; otherwise it falls back to the official champion.
 
 ---
 

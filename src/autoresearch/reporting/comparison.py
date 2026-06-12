@@ -86,6 +86,7 @@ def write_comparison_html_report(
     bootstrap_summary: dict[str, Any],
     decision: dict[str, Any],
     metric_lift_table: list[dict[str, Any]] | None = None,
+    local_incumbent_comparison: dict[str, Any] | None = None,
     per_partition: Any = None,
     output_path: Path,
 ) -> Path:
@@ -199,6 +200,7 @@ def write_comparison_html_report(
         history_points=history_points,
         line_history_points=line_history_points,
         metric_lift_table=metric_lift_table or [],
+        local_incumbent_comparison=local_incumbent_comparison,
         diag_data=diag_data,
         interp_data=interp_data,
     )
@@ -731,6 +733,7 @@ def _render_html(
     history_points: list,
     line_history_points: list,
     metric_lift_table: list[dict[str, Any]] | None = None,
+    local_incumbent_comparison: dict[str, Any] | None = None,
     diag_data: dict | None = None,
     interp_data: dict | None = None,
 ) -> str:
@@ -760,6 +763,7 @@ def _render_html(
     guardrail_passed = decision.get("guardrail_passed", True)
     guardrail_failures = decision.get("guardrail_failures", [])
     advisory_str = decision.get("advisory_decision", "")
+    reason_code = decision.get("reason_code", "")
     decided_by = decision.get("decided_by", "")
     decided_at = decision.get("decided_at", "")
 
@@ -791,6 +795,7 @@ def _render_html(
         n_partitions_label = f"{n_resamples} bootstrap resamples"
 
     _metric_table = metric_lift_table or []
+    local_incumbent_html = _local_incumbent_summary(local_incumbent_comparison)
     _diag_data = diag_data or {"champion": {}, "challenger": {}}
     _interp_data = interp_data or {"champion": {}, "challenger": {}}
     data_script = (
@@ -1863,6 +1868,7 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();render
   <div class="banner">
     <strong>{escape(decision_label)}</strong>
     <span>{escape(decision.get("rationale", ""))}</span>
+    {f'<br><span style="font-size:12px">Reason code: {escape(reason_code)}</span>' if reason_code else ''}
     {f'<br><span style="font-size:12px">Advisory: {escape(advisory_str)} · Decided by: {escape(decided_by)} at {escape(decided_at)}</span>' if decided_by else ''}
     {f'<br><span style="font-size:12px;color:#7a1a1a">⚠ Guardrail failures: {escape(", ".join(guardrail_failures))}</span>' if not guardrail_passed else ''}
   </div>
@@ -1900,6 +1906,8 @@ renderLift();renderDoubleLift();renderGini();renderHist();renderHistory();render
     <h2>Statistical Summary</h2>
     <div class="card" style="padding:12px">{summary_html}</div>
   </div>
+
+  {local_incumbent_html}
 
   <div class="section">
     <h2>Experiment Details</h2>
@@ -2230,7 +2238,11 @@ def _gate_table(
 
     gate_mode_str = comparison_summary.get("gate_mode", "single_partition")
     gate_metric_str = comparison_summary.get("gate_primary_metric") or comparison_summary.get("primary_metric", "gini_weighted")
-    n_partitions = comparison_summary.get("n_partitions") or comparison_summary.get("n_resamples", 30)
+    n_partitions = (
+        comparison_summary.get("n_independent_units")
+        or comparison_summary.get("n_partitions")
+        or comparison_summary.get("n_resamples", 30)
+    )
     if gate_mode_str == "repeated_cv":
         context_label = f"repeated CV ({comparison_summary.get('n_folds', 4)}×{comparison_summary.get('n_repeats', 4)} partitions)"
     else:
@@ -2242,10 +2254,10 @@ def _gate_table(
         f"Gate mode: <strong>{escape(context_label)}</strong> — "
         f"decision metric: <strong>{escape(gate_metric_str)}</strong></th></tr>",
         "<tr><th>Gate</th><th>Threshold</th><th>Challenger value</th><th>Result</th></tr>",
-        _row(f"Win rate across {n_partitions} partitions/resamples", f"≥ {min_win:.0f}%", f"{win_rate*100:.1f}%",
+        _row(f"Win rate across {n_partitions} independent fold units", f"≥ {min_win:.0f}%", f"{win_rate*100:.1f}%",
              checks.get("challenger_win_rate")),
-        _row("Mean lift > 0", "> 0.0000", f"{mean_lift:+.5f}",
-             checks.get("mean_lift_positive")),
+        _row("Mean lift threshold", f"≥ {thresholds.get('minimum_mean_lift', 0.0):.4f}", f"{mean_lift:+.5f}",
+             checks.get("mean_lift_threshold_met", checks.get("mean_lift_positive"))),
         _row("Absolute lift", f"≥ {thresholds.get('min_absolute_lift', 0.0):.4f}",
              f"{mean_lift:+.5f}", checks.get("absolute_lift")),
         _row("Relative lift", f"≥ {min_rel_pct:.3f}%", f"{rel_lift_pct:+.4f}%",
@@ -2270,6 +2282,34 @@ def _gate_table(
         ))
     rows.append("</table>")
     return "\n".join(rows)
+
+
+def _local_incumbent_summary(evidence: dict[str, Any] | None) -> str:
+    if not evidence:
+        return ""
+    summary = evidence.get("comparison_summary") or {}
+    bootstrap = evidence.get("bootstrap_summary") or {}
+    incumbent_id = str(evidence.get("incumbent_id") or "")
+    mean_lift = float(summary.get("mean_lift") or 0.0)
+    win_rate = float(summary.get("challenger_win_rate") or 0.0)
+    lower = float(bootstrap.get("interval_lower") or 0.0)
+    upper = float(bootstrap.get("interval_upper") or 0.0)
+    independent_units = int(bootstrap.get("n_independent_units") or 0)
+    return f"""
+  <div class="section">
+    <h2>Research-Line Incumbent Evidence</h2>
+    <p class="chart-note">This evidence supports a possible local promotion. It compares the challenger with the current line incumbent on the same CV partitions used above.</p>
+    <div class="card" style="padding:12px">
+      <table>
+        <tr><th>Line incumbent</th><td><code>{escape(incumbent_id)}</code></td></tr>
+        <tr><th>Mean lift</th><td>{mean_lift:+.6f}</td></tr>
+        <tr><th>Win rate</th><td>{win_rate:.1%}</td></tr>
+        <tr><th>Cluster-bootstrap interval</th><td>[{lower:+.6f}, {upper:+.6f}]</td></tr>
+        <tr><th>Independent fold units</th><td>{independent_units}</td></tr>
+      </table>
+    </div>
+  </div>
+"""
 
 
 def _experiment_diff_discussion(
@@ -2465,6 +2505,8 @@ def _summary_table(comparison_summary: dict[str, Any], bootstrap_summary: dict[s
         "Bootstrap CI lower": bootstrap_summary.get("interval_lower"),
         "Bootstrap CI upper": bootstrap_summary.get("interval_upper"),
         "P(challenger > champion)": bootstrap_summary.get("probability_challenger_outperforms"),
+        "Uncertainty method": bootstrap_summary.get("uncertainty_method"),
+        "Independent fold units": bootstrap_summary.get("n_independent_units"),
         "Bonferroni-adjusted confidence": bootstrap_summary.get("adjusted_confidence_level"),
     })
 

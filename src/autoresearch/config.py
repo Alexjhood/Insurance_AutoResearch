@@ -98,6 +98,10 @@ class ProjectConfig:
     screening_enabled: bool = True
     screening_min_absolute_lift: float = -0.001
     screening_min_relative_lift: float = -0.002
+    screening_bootstrap_iterations: int = 200
+    screening_confidence_level: float = 0.90
+    screening_min_bootstrap_rows: int = 30
+    partition_rotation_interval: int = 5
     # handoff
     running_stale_minutes: int = 30
     # model identity (required for memory harvest; optional at config-load time)
@@ -228,9 +232,10 @@ def load_config(
         gate_mode=str(evaluation.get("gate_mode", "cv_bootstrap")),
         gate_primary_metric=str(evaluation.get("gate_primary_metric", "gini_weighted")),
         bootstrap_per_fold=int(resampling.get("bootstrap_per_fold", 20)),
-        escalation_win_rate_low=float(resampling.get("escalation_win_rate_low", 0.40)),
-        escalation_win_rate_high=float(resampling.get("escalation_win_rate_high", 0.60)),
+        escalation_win_rate_low=float(resampling.get("escalation_win_rate_low", 0.50)),
+        escalation_win_rate_high=float(resampling.get("escalation_win_rate_high", 0.75)),
         escalation_partitions=int(resampling.get("escalation_partitions", 2)),
+        partition_rotation_interval=int(resampling.get("partition_rotation_interval", 5)),
         repeated_resamples=int(resampling["repeated_resamples"]),
         bootstrap_iterations=int(resampling["bootstrap_iterations"]),
         resample_fraction=float(resampling["resample_fraction"]),
@@ -266,6 +271,9 @@ def load_config(
         screening_enabled=bool(screening_cfg.get("enabled", True)),
         screening_min_absolute_lift=float(screening_cfg.get("min_absolute_lift", -0.001)),
         screening_min_relative_lift=float(screening_cfg.get("min_relative_lift", -0.002)),
+        screening_bootstrap_iterations=int(screening_cfg.get("bootstrap_iterations", 200)),
+        screening_confidence_level=float(screening_cfg.get("confidence_level", 0.90)),
+        screening_min_bootstrap_rows=int(screening_cfg.get("min_bootstrap_rows", 30)),
         running_stale_minutes=int(raw.get("handoff", {}).get("running_stale_minutes", 30)),
         structural_gini_threshold=float(memory_cfg.get("structural_gini_threshold", 0.37)),
         recipe_reuse_scope=str(recipes_cfg.get("reuse_scope", "run")).strip().lower(),

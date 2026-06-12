@@ -76,6 +76,7 @@ existing artifacts to infer intent.
    # review the metric summary, then:
    autoresearch --track <t> --run-id <id> record-decision <comparison_id> \
      --decision promote|local_promote|reject --rationale "..." \
+     --reason-code clear_win|line_progress|noise|inferior|artifact_suspected|calibration|other \
      --interpretation "what the result taught" --next "next direction"
    ```
    `run-session-cycles` **never auto-promotes** — it always stops for your
@@ -198,7 +199,7 @@ from the handoff. Column constants (`from autoresearch.models.dispatcher import`
 Per-experiment wall-clock budget: **10 min for the first 5 experiments,
 +5 min every 5 thereafter** — `budget_minutes = 10 + 5 × (N // 5)`.
 The challenger is refit ~5× per comparison (1 fit + 4 CV folds), so budget your
-single fit at ~1/5 of that. A close call (win rate in [0.40, 0.60]) escalates to
+single fit at ~1/5 of that. A close call (win rate in [0.50, 0.75]) escalates to
 more folds — up to ~13× the single fit, *outside* the budget alarm — so leave
 headroom. Watch `n_estimators × (1/learning_rate)`, `num_leaves`/`max_depth`,
 and row count.
@@ -212,6 +213,11 @@ penalises under-pricing 4×), and the calibration ratio. Then:
 - **promote** — clean win; replaces the global champion + fires holdout eval.
 - **local_promote** — useful progress for its research line, not a champion.
 - **reject** — insufficient/contradictory evidence; keep it as a learning.
+
+Record a structured `--reason-code` with the free-text rationale:
+`clear_win`, `line_progress`, `noise`, `inferior`, `artifact_suspected`,
+`calibration`, or `other`. This keeps cross-run memory queryable without
+discarding the scientific explanation.
 
 ### Adaptive search — design experiments from results, not in advance
 

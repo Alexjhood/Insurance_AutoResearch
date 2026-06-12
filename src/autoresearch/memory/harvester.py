@@ -233,10 +233,11 @@ def harvest_run(
                     comparison_uid, run_uid,
                     champion_id, challenger_id,
                     mean_lift, challenger_win_rate, std_lift,
-                    decision, guardrail_status, created_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                    decision, decision_reason_code, guardrail_status, created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(comparison_uid) DO UPDATE SET
                     decision=excluded.decision,
+                    decision_reason_code=excluded.decision_reason_code,
                     guardrail_status=excluded.guardrail_status
                 """,
                 (
@@ -245,6 +246,7 @@ def harvest_run(
                     paired.get("mean_lift"), paired.get("challenger_win_rate"),
                     paired.get("std_lift") or paired.get("between_partition_std"),
                     cmp.get("decision") or cmp.get("promotion_decision"),
+                    cmp.get("decision_reason_code"),
                     cmp.get("guardrail_status"),
                     cmp.get("created_at"),
                 ),
@@ -283,10 +285,19 @@ def _fetch_experiments(src: sqlite3.Connection) -> list[dict[str, Any]]:
 
 def _fetch_comparisons(src: sqlite3.Connection) -> list[dict[str, Any]]:
     try:
+        columns = {
+            row[1] for row in src.execute("PRAGMA table_info(comparisons)").fetchall()
+        }
+        reason_select = (
+            "decision_reason_code"
+            if "decision_reason_code" in columns
+            else "NULL AS decision_reason_code"
+        )
         cur = src.execute(
-            """
+            f"""
             SELECT comparison_id, created_at, champion_id, challenger_id,
-                   paired_summary, promotion_decision, decision, guardrail_status
+                   paired_summary, promotion_decision, decision,
+                   {reason_select}, guardrail_status
             FROM comparisons
             """
         )

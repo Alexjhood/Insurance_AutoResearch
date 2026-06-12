@@ -42,6 +42,20 @@ def test_inflating_predictions_does_not_change_gini() -> None:
     assert abs(panel_scaled["gini_weighted"] - panel_base["gini_weighted"]) < 0.01
 
 
+def test_constant_predictions_have_zero_discrimination() -> None:
+    """Tied predictions carry no ordering signal, regardless of input row order."""
+    actual = [0.0, 100.0, 0.0, 200.0, 0.0, 50.0]
+    predicted = [50.0] * len(actual)
+
+    panel = _panel(actual, predicted)
+    reversed_panel = _panel(list(reversed(actual)), predicted)
+
+    assert panel["gini_weighted"] == pytest.approx(0.0, abs=1e-12)
+    assert panel["rank_gini_weighted"] == pytest.approx(0.0, abs=1e-12)
+    assert reversed_panel["gini_weighted"] == pytest.approx(0.0, abs=1e-12)
+    assert reversed_panel["rank_gini_weighted"] == pytest.approx(0.0, abs=1e-12)
+
+
 def test_zero_predictions_make_ratio_near_zero() -> None:
     actual = [100.0, 200.0, 300.0]
     panel = _panel(actual, [1e-6, 1e-6, 1e-6])

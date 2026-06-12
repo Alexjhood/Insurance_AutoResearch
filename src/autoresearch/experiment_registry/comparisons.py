@@ -71,6 +71,7 @@ def update_comparison_decision(
     *,
     decision: str,
     rationale: str,
+    reason_code: str | None = None,
     decided_by: str = "llm",
     decided_at: str,
     guardrail_status: dict[str, Any] | None = None,
@@ -84,6 +85,7 @@ def update_comparison_decision(
             UPDATE comparisons
             SET decision = ?,
                 decision_rationale = ?,
+                decision_reason_code = ?,
                 decided_by = ?,
                 decided_at = ?,
                 guardrail_status = COALESCE(?, guardrail_status)
@@ -92,6 +94,7 @@ def update_comparison_decision(
             (
                 decision,
                 rationale,
+                reason_code,
                 decided_by,
                 decided_at,
                 dumps(guardrail_status) if guardrail_status is not None else None,

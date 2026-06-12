@@ -332,6 +332,7 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
                     "diagnostic_comparison_report": str(diagnostic_comparison.get("promotion_report", "")),
                     "diagnostic_gate_mode": "single_partition",
                     "local_research_line_champion_id": local_champion_id,
+                    "screening": screening,
                     "metrics_summary": _screening_metrics_summary(screening),
                 }
 
@@ -340,6 +341,7 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
             champion["champion_id"],
             experiment_id,
             output_dir=iteration_dir / "comparison",
+            local_incumbent_id=local_champion_id,
         )
         report = read_json(comparison_outputs["promotion_report"])
         comparison_id = report["comparison_id"]
@@ -369,6 +371,22 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
             "cv_mean_lift": round(float(comp_summary.get("mean_lift") or 0), 6),
             "cv_win_rate": round(float(comp_summary.get("challenger_win_rate") or 0), 4),
         }
+        local_evidence = report.get("local_incumbent_comparison")
+        if local_evidence:
+            local_summary = local_evidence.get("comparison_summary") or {}
+            metrics_summary.update({
+                "local_incumbent_id": local_evidence.get("incumbent_id"),
+                "local_cv_mean_lift": round(float(local_summary.get("mean_lift") or 0), 6),
+                "local_cv_win_rate": round(float(local_summary.get("challenger_win_rate") or 0), 4),
+                "local_cv_lift_ci_lower": round(
+                    float(local_summary.get("lift_ci_lower") or 0),
+                    6,
+                ),
+                "local_cv_lift_ci_upper": round(
+                    float(local_summary.get("lift_ci_upper") or 0),
+                    6,
+                ),
+            })
         _upsert_proposal_node(
             config,
             proposal,

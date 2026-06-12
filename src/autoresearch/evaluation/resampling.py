@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 
 from autoresearch.evaluation.metrics import (
+    _gini_weighted,
+    _rank_gini_weighted,
     full_metric_panel,
     infer_target_mode,
     lower_is_better,
@@ -432,11 +434,17 @@ def cv_bootstrap_comparison(
 
     mean_lift = float(per_sample["lift"].mean())
     std_lift = float(per_sample["lift"].std(ddof=0))
-    win_rate = float(per_sample["challenger_won"].mean())
+    bootstrap_sample_win_rate = float(per_sample["challenger_won"].mean())
     champ_gate_col = f"champ_{gate_primary_metric}"
     chal_gate_col = f"chal_{gate_primary_metric}"
     champion_mean_score = float(per_sample[champ_gate_col].mean()) if champ_gate_col in per_sample else float("nan")
     challenger_mean_score = float(per_sample[chal_gate_col].mean()) if chal_gate_col in per_sample else float("nan")
+    independent_unit_means = (
+        per_sample.groupby(["partition_idx", "fold_idx"], sort=True)["lift"]
+        .mean()
+        .astype(float)
+    )
+    win_rate = float((independent_unit_means > 0).mean())
 
     summary: dict[str, Any] = {
         "gate_mode": "cv_bootstrap",
@@ -455,7 +463,11 @@ def cv_bootstrap_comparison(
         "median_lift": float(per_sample["lift"].median()),
         "std_lift": std_lift,
         "between_partition_std": std_lift,
+        "independent_unit_std": float(independent_unit_means.std(ddof=0)),
+        "n_independent_units": int(len(independent_unit_means)),
+        "independent_unit_mean_lifts": independent_unit_means.tolist(),
         "challenger_win_rate": win_rate,
+        "bootstrap_sample_win_rate": bootstrap_sample_win_rate,
         "champion_mean_score": champion_mean_score,
         "challenger_mean_score": challenger_mean_score,
     }
@@ -529,8 +541,9 @@ def bootstrap_lift_summary(
     seed: int,
     confidence_level: float,
     n_comparisons: int = 1,
+    cluster_ids: pd.Series | pd.DataFrame | None = None,
 ) -> dict[str, Any]:
-    """Bootstrap the mean paired lift, with optional Bonferroni correction."""
+    """Bootstrap mean paired lift, optionally resampling independent clusters."""
 
     values = lifts.astype(float).to_numpy()
     if len(values) == 0:
@@ -544,9 +557,35 @@ def bootstrap_lift_summary(
 
     rng = np.random.default_rng(seed)
     means = np.empty(iterations, dtype=float)
-    for i in range(iterations):
-        sample = rng.choice(values, size=len(values), replace=True)
-        means[i] = sample.mean()
+    uncertainty_method = "iid_bootstrap"
+    n_independent_units = len(values)
+    if cluster_ids is None:
+        for i in range(iterations):
+            sample = rng.choice(values, size=len(values), replace=True)
+            means[i] = sample.mean()
+    else:
+        cluster_frame = _normalise_cluster_ids(cluster_ids, len(values))
+        cluster_frame["_lift"] = values
+        grouped = [
+            group["_lift"].to_numpy(dtype=float)
+            for _, group in cluster_frame.groupby(
+                [column for column in cluster_frame.columns if column != "_lift"],
+                sort=True,
+                dropna=False,
+            )
+        ]
+        if not grouped:
+            raise ValueError("cluster_ids produced no independent groups")
+        uncertainty_method = "cluster_bootstrap"
+        n_independent_units = len(grouped)
+        for i in range(iterations):
+            selected = rng.integers(0, len(grouped), size=len(grouped))
+            sampled_cluster_means = np.empty(len(selected), dtype=float)
+            for j, group_idx in enumerate(selected):
+                group = grouped[int(group_idx)]
+                within = rng.choice(group, size=len(group), replace=True)
+                sampled_cluster_means[j] = within.mean()
+            means[i] = sampled_cluster_means.mean()
 
     alpha = 1.0 - adjusted_level
     lower = float(np.quantile(means, alpha / 2.0))
@@ -557,11 +596,131 @@ def bootstrap_lift_summary(
         "confidence_level": confidence_level,
         "adjusted_confidence_level": float(adjusted_level),
         "n_comparisons_bonferroni": n_comparisons,
+        "uncertainty_method": uncertainty_method,
+        "n_independent_units": int(n_independent_units),
         "mean_lift": float(values.mean()),
         "interval_lower": lower,
         "interval_upper": upper,
         "probability_challenger_outperforms": float((means > 0).mean()),
     }
+
+
+def paired_prediction_lift_bootstrap(
+    actual: pd.Series,
+    champion_predicted: pd.Series,
+    challenger_predicted: pd.Series,
+    exposure: pd.Series,
+    *,
+    primary_metric: str,
+    iterations: int,
+    seed: int,
+    confidence_level: float,
+    tweedie_power: float = 1.5,
+    target_mode: str | None = None,
+) -> dict[str, Any]:
+    """Bootstrap a paired single-split metric lift without refitting models."""
+
+    if iterations < 1:
+        raise ValueError("iterations must be positive")
+    if not 0 < confidence_level < 1:
+        raise ValueError("confidence_level must be between 0 and 1")
+
+    actual_values = actual.astype(float).to_numpy()
+    champion_values = champion_predicted.astype(float).to_numpy()
+    challenger_values = challenger_predicted.astype(float).to_numpy()
+    exposure_values = exposure.astype(float).to_numpy()
+    n_rows = len(actual_values)
+    if n_rows < 2:
+        raise ValueError("paired prediction bootstrap requires at least two rows")
+    if not (
+        len(champion_values) == len(challenger_values) == len(exposure_values) == n_rows
+    ):
+        raise ValueError("paired prediction bootstrap inputs must have equal length")
+
+    rng = np.random.default_rng(seed)
+    lifts = np.empty(iterations, dtype=float)
+    relative_lifts = np.empty(iterations, dtype=float)
+    lower_better = lower_is_better(primary_metric)
+
+    for iteration in range(iterations):
+        positions = rng.integers(0, n_rows, size=n_rows)
+        sample_actual = actual_values[positions]
+        sample_exposure = exposure_values[positions]
+        champion_score = _score_single_metric(
+            sample_actual,
+            champion_values[positions],
+            sample_exposure,
+            primary_metric=primary_metric,
+            tweedie_power=tweedie_power,
+            target_mode=target_mode,
+        )
+        challenger_score = _score_single_metric(
+            sample_actual,
+            challenger_values[positions],
+            sample_exposure,
+            primary_metric=primary_metric,
+            tweedie_power=tweedie_power,
+            target_mode=target_mode,
+        )
+        lift = (
+            champion_score - challenger_score
+            if lower_better
+            else challenger_score - champion_score
+        )
+        lifts[iteration] = lift
+        relative_lifts[iteration] = lift / max(abs(champion_score), 1e-12)
+
+    alpha = 1.0 - confidence_level
+    return {
+        "uncertainty_method": "paired_row_bootstrap",
+        "bootstrap_iterations": int(iterations),
+        "confidence_level": float(confidence_level),
+        "seed": int(seed),
+        "lift_ci_lower": float(np.quantile(lifts, alpha / 2.0)),
+        "lift_ci_upper": float(np.quantile(lifts, 1.0 - alpha / 2.0)),
+        "relative_lift_ci_lower": float(np.quantile(relative_lifts, alpha / 2.0)),
+        "relative_lift_ci_upper": float(np.quantile(relative_lifts, 1.0 - alpha / 2.0)),
+        "bootstrap_mean_lift": float(lifts.mean()),
+        "bootstrap_win_rate": float((lifts > 0).mean()),
+    }
+
+
+def _score_single_metric(
+    actual: np.ndarray,
+    predicted: np.ndarray,
+    exposure: np.ndarray,
+    *,
+    primary_metric: str,
+    tweedie_power: float,
+    target_mode: str | None,
+) -> float:
+    if primary_metric == "gini_weighted":
+        return _gini_weighted(actual, predicted, exposure)
+    if primary_metric == "rank_gini_weighted":
+        return _rank_gini_weighted(actual, predicted, exposure)
+    panel = full_metric_panel(
+        pd.Series(actual),
+        pd.Series(predicted),
+        pd.Series(exposure),
+        tweedie_power=tweedie_power,
+        target_mode=target_mode or "burning_cost",
+    )
+    return float(panel[primary_metric])
+
+
+def _normalise_cluster_ids(
+    cluster_ids: pd.Series | pd.DataFrame,
+    expected_length: int,
+) -> pd.DataFrame:
+    if isinstance(cluster_ids, pd.Series):
+        frame = cluster_ids.reset_index(drop=True).to_frame(name="cluster")
+    else:
+        frame = cluster_ids.reset_index(drop=True).copy()
+    if len(frame) != expected_length:
+        raise ValueError("cluster_ids must have the same length as lifts")
+    if frame.shape[1] == 0:
+        raise ValueError("cluster_ids must contain at least one column")
+    return frame
 
 
 def cv_repeated_scores(
@@ -658,14 +817,21 @@ def promotion_decision(
     mean_lift = comparison_summary["mean_lift"]
     win_rate = comparison_summary["challenger_win_rate"]
     boot_lower = bootstrap_summary["interval_lower"]
-    n_resamples = comparison_summary.get("n_resamples", 30)
+    n_resamples = int(
+        bootstrap_summary.get("n_independent_units")
+        or comparison_summary.get("n_independent_units")
+        or comparison_summary.get("n_resamples", 30)
+    )
 
     # Relative lift fractions
     relative_lift = mean_lift / champion_scale
     boot_lower_relative = boot_lower / champion_scale
 
     # Minimum detectable effect estimate (rough 95% one-sided)
-    std_lift = comparison_summary.get("std_lift", 0.0)
+    std_lift = comparison_summary.get(
+        "independent_unit_std",
+        comparison_summary.get("std_lift", 0.0),
+    )
     mde_relative = (2 * std_lift / max(n_resamples ** 0.5, 1)) / champion_scale
 
     if relative_lift > (mde_relative or 1.0):
@@ -676,13 +842,15 @@ def promotion_decision(
         power_note = "effect_below_min_relative_lift"
 
     checks: dict[str, bool] = {
-        "mean_lift_positive": mean_lift >= rules.minimum_mean_lift,
+        "mean_lift_threshold_met": mean_lift >= rules.minimum_mean_lift,
         "relative_lift": relative_lift >= rules.min_relative_lift,
         "absolute_lift": mean_lift >= rules.min_absolute_lift,
         "challenger_win_rate": win_rate >= rules.minimum_win_rate,
         "bootstrap_lower_bound": boot_lower >= rules.bootstrap_lower_bound,
         "bootstrap_lower_bound_relative": boot_lower_relative >= rules.bootstrap_lower_bound_relative,
     }
+    # Compatibility alias for historical reports and stored comparisons.
+    checks["mean_lift_positive"] = checks["mean_lift_threshold_met"]
 
     # Sign-agreement: gate metric (rank_gini) and KPI (gini_weighted) must both
     # point in the same direction.  Prevents promoting a model that improves on

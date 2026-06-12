@@ -9,7 +9,13 @@ from pathlib import Path
 
 from autoresearch.config import ensure_project_dirs, load_config
 from autoresearch.bootstrap import bootstrap_track
-from autoresearch.comparison_runner import compare_against_current_champion, compare_experiments, record_decision, run_repeated_evaluation
+from autoresearch.comparison_runner import (
+    DECISION_REASON_CODES,
+    compare_against_current_champion,
+    compare_experiments,
+    record_decision,
+    run_repeated_evaluation,
+)
 from autoresearch.controller.champion import initialise_official_champion
 from autoresearch.controller.handoff import (
     export_context_bundle,
@@ -184,11 +190,13 @@ def _cmd_record_decision(config, args) -> int:
         args.comparison_id,
         decision=args.decision,
         rationale=args.rationale,
+        reason_code=args.reason_code,
         interpretation=args.interpretation,
         next_step=args.next_step,
     )
     print(f"Decision recorded: {result['decision']}")
     print(f"Rationale: {result['rationale']}")
+    print(f"Reason code: {result['reason_code']}")
     print(f"Decided at: {result['decided_at']}")
     if not result.get("guardrail_result", {}).get("passed", True):
         print(f"Guardrail failures: {result['guardrail_result']['failures']}")
@@ -932,6 +940,12 @@ def build_parser() -> argparse.ArgumentParser:
                                  help="LLM's final verdict.")
     decision_parser.add_argument("--rationale", required=True,
                                  help="Written justification for the decision.")
+    decision_parser.add_argument(
+        "--reason-code",
+        choices=sorted(DECISION_REASON_CODES),
+        default=None,
+        help="Structured outcome category for cross-run learning.",
+    )
     decision_parser.add_argument("--interpretation", required=True,
                                  help="What this result taught the research process.")
     decision_parser.add_argument("--next", dest="next_step", required=True,
