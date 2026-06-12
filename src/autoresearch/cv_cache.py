@@ -90,8 +90,8 @@ def get_or_build_fold_predictions(
                     for f in range(n_folds)]
 
     # Cache miss — build fold assignments and refit.
-    # The search dataset is keyed by "record_id" (post-anonymisation), matching
-    # the data pipeline — NOT config.id_column (the raw "IDpol").
+    # The search dataset carries "record_id" as the framework join key copied
+    # from the configured source identifier.
     n_folds = getattr(config, "cv_folds", 4)
     fold_assignments = generate_fold_assignments(
         frame,

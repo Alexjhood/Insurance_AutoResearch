@@ -12,22 +12,22 @@ def _make_dataset(n: int = 200, seed: int = 1) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     return pd.DataFrame({
         "record_id": np.arange(n),
-        "exposure_term_a": np.ones(n),
-        "claim_cost_capped_active": rng.exponential(100, n),
-        "claim_cost_observed_k": rng.exponential(100, n),
-        "claim_count_signal_q": rng.poisson(0.1, n),
-        "claim_event_count_l": rng.poisson(0.1, n),
+        "Exposure": np.ones(n),
+        "ClaimAmountCapped": rng.exponential(100, n),
+        "ClaimAmount": rng.exponential(100, n),
+        "ClaimNb": rng.poisson(0.1, n),
+        "ClaimAmountCount": rng.poisson(0.1, n),
         "feature_a": rng.normal(0, 1, n),
     })
 
 
 def _constant_model_factory(train, val):
     """Baseline: predict the training mean pure premium for all val rows."""
-    train_pp = (train["claim_cost_capped_active"] / train["exposure_term_a"]).mean()
+    train_pp = (train["ClaimAmountCapped"] / train["Exposure"]).mean()
     preds = pd.DataFrame({
-        "actual_claim_cost": val["claim_cost_capped_active"].to_numpy(),
-        "predicted_claim_cost": np.full(len(val), train_pp * val["exposure_term_a"].to_numpy()),
-        "exposure": val["exposure_term_a"].to_numpy(),
+        "actual_claim_cost": val["ClaimAmountCapped"].to_numpy(),
+        "predicted_claim_cost": np.full(len(val), train_pp * val["Exposure"].to_numpy()),
+        "exposure": val["Exposure"].to_numpy(),
     })
     return preds
 
@@ -74,15 +74,15 @@ def test_between_dominates_when_data_varies_across_folds() -> None:
     # Assign high/low claim amounts in alternating blocks to force between-fold differences
     records = pd.DataFrame({
         "record_id": np.arange(n),
-        "exposure_term_a": np.ones(n),
-        "claim_cost_capped_active": np.concatenate([
+        "Exposure": np.ones(n),
+        "ClaimAmountCapped": np.concatenate([
             np.full(60, 10.0), np.full(60, 1000.0),
             np.full(60, 20.0), np.full(60, 800.0),
             np.full(60, 5.0),
         ]),
-        "claim_cost_observed_k": np.ones(n) * 50,
-        "claim_count_signal_q": np.zeros(n),
-        "claim_event_count_l": np.zeros(n),
+        "ClaimAmount": np.ones(n) * 50,
+        "ClaimNb": np.zeros(n),
+        "ClaimAmountCount": np.zeros(n),
     })
     folds = generate_fold_assignments(records, id_column="record_id", n_folds=5, seed=3)
     _, summary = cv_repeated_scores(
@@ -99,9 +99,9 @@ def test_identical_predictions_give_zero_cv_variance() -> None:
     # Model that always predicts exactly the actual (zero error)
     def perfect_model(train, val):
         return pd.DataFrame({
-            "actual_claim_cost": val["claim_cost_capped_active"].to_numpy(),
-            "predicted_claim_cost": val["claim_cost_capped_active"].to_numpy(),
-            "exposure": val["exposure_term_a"].to_numpy(),
+            "actual_claim_cost": val["ClaimAmountCapped"].to_numpy(),
+            "predicted_claim_cost": val["ClaimAmountCapped"].to_numpy(),
+            "exposure": val["Exposure"].to_numpy(),
         })
 
     cv_frame, summary = cv_repeated_scores(

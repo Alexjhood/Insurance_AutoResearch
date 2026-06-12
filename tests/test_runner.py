@@ -85,12 +85,12 @@ def _write_fixtures(config: ProjectConfig) -> None:
     """Write minimal parquet + split_pack for runner tests."""
     frame = pd.DataFrame({
         "record_id": [1, 2, 3, 4, 5, 6],
-        "claim_count_signal_q": [0, 1, 0, 1, 0, 1],
-        "exposure_term_a": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-        "vehicle_power_band_b": [4, 5, 4, 5, 4, 5],
-        "region_cluster_j": ["a", "b", "a", "b", "a", "b"],
-        "claim_cost_observed_k": [0.0, 100.0, 0.0, 200.0, 0.0, 150.0],
-        "claim_event_count_l": [0, 1, 0, 1, 0, 1],
+        "ClaimNb": [0, 1, 0, 1, 0, 1],
+        "Exposure": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        "VehPower": [4, 5, 4, 5, 4, 5],
+        "Region": ["a", "b", "a", "b", "a", "b"],
+        "ClaimAmount": [0.0, 100.0, 0.0, 200.0, 0.0, 150.0],
+        "ClaimAmountCount": [0, 1, 0, 1, 0, 1],
     })
     # Write both legacy path and new search path
     frame.to_parquet(config.processed_dir / "agent_dataset.parquet", index=False)
@@ -142,8 +142,8 @@ def test_run_experiment_uses_run_local_model_script(tmp_path: Path) -> None:
         """
 import numpy as np
 
-EXPOSURE = "exposure_term_a"
-CLAIM_COST = "claim_cost_capped_active"
+EXPOSURE = "Exposure"
+CLAIM_COST = "ClaimAmountCapped"
 
 
 def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hp):

@@ -656,7 +656,7 @@ def _validate_and_normalise(
     _hydrate_derived_fields(config, parsed, champion, context)
     reference_errors: list[str] = []
     _hydrate_recipe_reference(config, parsed, champion, reference_errors)
-    space = allowed_search_space(config, context.get("agent_schema"))
+    space = allowed_search_space(config, context.get("dataset_schema"))
     errors = reference_errors + validate_proposal(parsed, space)
     _validate_previous_cycle_reflection(config, parsed, errors)
     if parsed.get("parent_experiment_id") != champion["champion_id"]:

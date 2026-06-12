@@ -34,7 +34,7 @@ class TargetSpec:
 SPECS = {
     BURNING_COST: TargetSpec(
         mode=BURNING_COST,
-        source_column="claim_cost_capped_active",
+        source_column="ClaimAmountCapped",
         predicted_column="predicted_claim_cost",
         rate_actual_column="actual_pure_premium",
         rate_predicted_column="predicted_pure_premium",
@@ -51,7 +51,7 @@ SPECS = {
     ),
     FREQUENCY: TargetSpec(
         mode=FREQUENCY,
-        source_column="claim_count_signal_q",
+        source_column="ClaimNb",
         predicted_column="predicted_claim_count",
         rate_actual_column="actual_frequency",
         rate_predicted_column="predicted_frequency",

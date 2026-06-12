@@ -147,4 +147,4 @@ structural_gini_threshold = 0.37
 # must not propose alternative caps.
 claim_cap_thresholds = [100000]
 allow_disable_claim_capping = false
-allow_log1p_features = ["density_index_i"]
+allow_log1p_features = ["Density"]

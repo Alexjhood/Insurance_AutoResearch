@@ -482,9 +482,9 @@ In `controller/context.py`:
    - `champion_history` (the official_champion record already carries the
      active branch + reason; full history is on disk if needed)
 
-2. **Replace `agent_schema` with a compact summary.** Add a private helper:
+2. **Replace `dataset_schema` with a compact summary.** Add a private helper:
    ```python
-   def _compact_agent_schema(schema):
+   def _compact_dataset_schema(schema):
        if not schema:
            return None
        return {
@@ -495,7 +495,7 @@ In `controller/context.py`:
            ],
        }
    ```
-   Use this in place of the full `agent_schema` object. The per-column
+   Use this in place of the full `dataset_schema` object. The per-column
    `dtype`, `unique_count`, `missing_count` fields are dropped — AGENT.md
    already documents them in prose.
 
@@ -592,7 +592,7 @@ In `controller/session.py`:
      {"project_goal", "official_champion", "recent_experiments",
       "recent_comparisons", "recent_proposals", "proposal_count",
       "latest_cycle_result", "latest_nonpromotion_summary",
-      "agent_schema", "allowed_search_space", "evaluation_rules"}
+      "dataset_schema", "allowed_search_space", "evaluation_rules"}
      ```
    - Asserts `len(json.dumps(context)) < 6000` for a fresh registry (the
      real number after the trim should be well under 6 KB).

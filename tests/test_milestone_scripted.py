@@ -83,11 +83,11 @@ def _make_row_frame(n: int, id_offset: int = 0, seed: int = 0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     return pd.DataFrame({
         "record_id": np.arange(id_offset, id_offset + n),
-        "exposure_term_a": np.ones(n),
-        "claim_cost_capped_active": rng.exponential(100, n).clip(1.0),
-        "claim_cost_observed_k": rng.exponential(100, n).clip(1.0),
-        "claim_count_signal_q": rng.integers(0, 2, n),
-        "claim_event_count_l": rng.integers(0, 2, n),
+        "Exposure": np.ones(n),
+        "ClaimAmountCapped": rng.exponential(100, n).clip(1.0),
+        "ClaimAmount": rng.exponential(100, n).clip(1.0),
+        "ClaimNb": rng.integers(0, 2, n),
+        "ClaimAmountCount": rng.integers(0, 2, n),
     })
 
 
@@ -134,9 +134,9 @@ def _write_fixtures(config: ProjectConfig, script_path: Path) -> tuple[Path, Pat
     sv_preds = pd.DataFrame({
         "record_id": sv_rows["record_id"].to_numpy(),
         "split": "search_validation",
-        "exposure": sv_rows["exposure_term_a"].to_numpy(),
-        "actual_claim_cost": sv_rows["claim_cost_capped_active"].to_numpy(),
-        "actual_claim_cost_uncapped": sv_rows["claim_cost_observed_k"].to_numpy(),
+        "exposure": sv_rows["Exposure"].to_numpy(),
+        "actual_claim_cost": sv_rows["ClaimAmountCapped"].to_numpy(),
+        "actual_claim_cost_uncapped": sv_rows["ClaimAmount"].to_numpy(),
         "predicted_claim_cost": np.full(len(sv_rows), 80.0),
     })
     sv_preds_path = config.artifacts_dir / "predictions.parquet"
@@ -151,7 +151,7 @@ def _write_stub_script(path: Path) -> None:
             import numpy as np
 
             def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **kw):
-                predicted = score["exposure_term_a"].to_numpy() * 80.0
+                predicted = score["Exposure"].to_numpy() * 80.0
                 return predicted, {"model": "stub_constant"}
         """),
         encoding="utf-8",

@@ -6,8 +6,8 @@
 # AGENT.md — Auto-Research Runtime Contract
 
 You are the research agent for an autonomous insurance target-modelling loop on
-the French Motor dataset (freMTPL2, ~678K policies). The active target is
-**burning cost** (`claim_cost_capped_active`) unless the run sets
+the configured dataset. The active target is
+**burning cost** (`ClaimAmountCapped`) unless the run sets
 `target_mode = "frequency"` (current default: `burning_cost`). Maximise
 **exposure-weighted Gini** (`gini_weighted`) on the search-validation split;
 every promotion is re-checked on a protected holdout. Each run starts with the
@@ -180,17 +180,17 @@ def fit_predict(train, score, *, feature_inclusions=None,
     ...  # fit on `train`
     return Prediction(values=pred_rates, unit="rate"), notes
 ```
-If you return a raw array instead: multiply rates by `score["exposure_term_a"]`;
+If you return a raw array instead: multiply rates by `score["Exposure"]`;
 gamma/log losses need `y > 0` (split freq×sev or use Tweedie); encode categoricals
 (`'B12'`): lightgbm `category` dtype, xgboost/sklearn ordinal/one-hot; early-stop
 on a train-internal split only; and calibration is mandatory —
 `apply_training_calibration(pred_score, pred_train, actual_train_cost)` from
 `autoresearch.models.calibration` (factor = Σactual/Σpred). Feature names come
 from the handoff. Column constants (`from autoresearch.models.dispatcher import`):
-- `EXPOSURE = "exposure_term_a"` — offset; weights + rate->total only, never a feature
-- `CLAIM_COST = "claim_cost_capped_active"` — training target (burning-cost mode)
-- `CLAIM_COUNT = "claim_count_signal_q"` — training target (frequency mode)
-- `CLAIM_EVENTS = "claim_event_count_l"` — alternative claim count
+- `EXPOSURE = "Exposure"` — offset; weights + rate->total only, never a feature
+- `CLAIM_COST = "ClaimAmountCapped"` — training target (burning-cost mode)
+- `CLAIM_COUNT = "ClaimNb"` — training target (frequency mode)
+- `CLAIM_EVENTS = "ClaimAmountCount"` — alternative claim count
 - `RECORD_ID = "record_id"` — policy identifier
 
 ## Compute budget

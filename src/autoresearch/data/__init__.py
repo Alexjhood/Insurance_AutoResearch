@@ -1,1 +1,1 @@
-"""Data ingestion, anonymisation, profiling, and split generation."""
+"""Data ingestion, profiling, and split generation."""

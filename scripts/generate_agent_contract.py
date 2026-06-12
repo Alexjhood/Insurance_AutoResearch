@@ -134,7 +134,7 @@ def render() -> str:
 # AGENT.md — Auto-Research Runtime Contract
 
 You are the research agent for an autonomous insurance target-modelling loop on
-the French Motor dataset (freMTPL2, ~678K policies). The active target is
+the configured dataset. The active target is
 **burning cost** (`{dispatcher.CLAIM_COST}`) unless the run sets
 `target_mode = "frequency"` (current default: `{target_mode}`). Maximise
 **exposure-weighted Gini** (`{gate_metric}`) on the search-validation split;

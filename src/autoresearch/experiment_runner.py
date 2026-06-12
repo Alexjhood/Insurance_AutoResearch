@@ -282,7 +282,15 @@ def run_experiment(
     # are excluded from the feature join.  Everything else in the original frame
     # is treated as a potential predictor and joined so that diagnostics and
     # interpretation exhibits can reference factor values.
-    _LEAKAGE = {RECORD_ID, EXPOSURE, CLAIM_COST, RAW_CLAIM_COST, CLAIM_COUNT, CLAIM_EVENTS}
+    _LEAKAGE = {
+        RECORD_ID,
+        config.id_column,
+        EXPOSURE,
+        CLAIM_COST,
+        RAW_CLAIM_COST,
+        CLAIM_COUNT,
+        CLAIM_EVENTS,
+    }
     _feature_cols = [c for c in frame.columns if c not in _LEAKAGE]
     if _feature_cols:
         _feat_df = frame[["record_id"] + _feature_cols].copy()

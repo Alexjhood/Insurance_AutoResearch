@@ -105,8 +105,8 @@ def test_check_integrity_detects_edit_to_comparison_runner(tmp_path: Path) -> No
 def test_exposure_in_predictor_list_is_rejected(tmp_path: Path) -> None:
     script = tmp_path / "model.py"
     script.write_text(
-        'NUMERIC = ["exposure_term_a", "driver_age_band_d"]\n'
-        'EXPOSURE = "exposure_term_a"\n'
+        'NUMERIC = ["Exposure", "DrivAge"]\n'
+        'EXPOSURE = "Exposure"\n'
         'def fit_predict(train, score, **kw):\n'
         '    weight = train[EXPOSURE]\n'
         '    return weight.to_numpy(), {}\n',
@@ -122,7 +122,7 @@ def test_exposure_in_predictor_list_is_rejected(tmp_path: Path) -> None:
 def test_exposure_weight_usage_is_allowed(tmp_path: Path) -> None:
     script = tmp_path / "model.py"
     script.write_text(
-        'EXPOSURE = "exposure_term_a"\n'
+        'EXPOSURE = "Exposure"\n'
         'def fit_predict(train, score, **kw):\n'
         '    train_exp = train[EXPOSURE].to_numpy()\n'
         '    return score[EXPOSURE].to_numpy() * train_exp.mean(), {}\n',

@@ -18,9 +18,9 @@ import pandas as pd
 from autoresearch.targets import BURNING_COST, FREQUENCY, normalise_target_mode
 
 
-EXPOSURE = "exposure_term_a"
-CLAIM_COST = "claim_cost_capped_active"
-CLAIM_COUNT = "claim_count_signal_q"
+EXPOSURE = "Exposure"
+CLAIM_COST = "ClaimAmountCapped"
+CLAIM_COUNT = "ClaimNb"
 
 
 def fit_predict(

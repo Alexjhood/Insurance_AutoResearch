@@ -12,7 +12,7 @@ Build a local auto-research platform for insurance target modelling on freMTPL2.
 
 ## Core capabilities
 - Ingest freMTPL2 from local files
-- Create anonymised agent-facing schema
+- Create dataset schema metadata using the source column names
 - Persist split packs for repeatable evaluation
 - Run deterministic baselines first
 - Compare experiments with uncertainty-aware evaluation

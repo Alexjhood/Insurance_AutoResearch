@@ -32,7 +32,7 @@ def _write_prepared_data_markers(config: ProjectConfig) -> None:
         config.processed_dir / f"{config.agent_dataset_name}.parquet",
         config.processed_dir / "agent_dataset_search.parquet",
         config.holdout_vault_dir / "agent_dataset_holdout.parquet",
-        config.metadata_dir / "agent_schema.json",
+        config.metadata_dir / "dataset_schema.json",
         config.metadata_dir / "dataset_profile.json",
         config.metadata_dir / "capping_diagnostics.json",
         config.splits_dir / "split_pack.csv",

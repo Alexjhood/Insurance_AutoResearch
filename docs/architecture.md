@@ -46,7 +46,8 @@ src/autoresearch/
 
 ```
 prepare-data
-  → load freMTPL2 → anonymise → compute capping diagnostics → create split pack (train/sv/holdout)
+  → load configured source data → retain source columns → compute capping diagnostics
+  → reuse or create split pack (train/sv/holdout)
   → write agent_dataset_search.parquet (no holdout rows; raw uncapped target)
   → write holdout_vault/agent_dataset_holdout.parquet (token-gated)
   → write split_pack_folds.parquet (5-fold CV assignments)

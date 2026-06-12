@@ -28,14 +28,14 @@ def _frame(n: int = 400, seed: int = 0) -> tuple[pd.DataFrame, pd.DataFrame]:
     rng = np.random.default_rng(seed)
     frame = pd.DataFrame({
         "record_id": np.arange(n),
-        "exposure_term_a": rng.uniform(0.5, 1.5, n),
-        "vehicle_power_band_b": rng.integers(1, 6, n),
-        "region_cluster_j": rng.choice(list("abcde"), n),
-        "claim_count_signal_q": rng.poisson(0.25, n),
+        "Exposure": rng.uniform(0.5, 1.5, n),
+        "VehPower": rng.integers(1, 6, n),
+        "Region": rng.choice(list("abcde"), n),
+        "ClaimNb": rng.poisson(0.25, n),
     })
-    frame["claim_event_count_l"] = frame["claim_count_signal_q"]
-    frame["claim_cost_observed_k"] = frame["claim_count_signal_q"] * rng.gamma(2.0, 400.0, n)
-    frame["claim_cost_capped_active"] = frame["claim_cost_observed_k"]
+    frame["ClaimAmountCount"] = frame["ClaimNb"]
+    frame["ClaimAmount"] = frame["ClaimNb"] * rng.gamma(2.0, 400.0, n)
+    frame["ClaimAmountCapped"] = frame["ClaimAmount"]
     n_train = int(n * 0.75)
     split = pd.DataFrame({
         "record_id": np.arange(n),
@@ -248,7 +248,7 @@ def test_recipe_library_distinguishes_feature_variants(tmp_path: Path) -> None:
         outcome="rejected",
         score=0.21,
         target_strategy="direct_pure_premium",
-        feature_exclusions=["risk_score_index_e"],
+        feature_exclusions=["BonusMalus"],
     )
     lib.record_recipe(
         config,
@@ -257,15 +257,15 @@ def test_recipe_library_distinguishes_feature_variants(tmp_path: Path) -> None:
         outcome="rejected",
         score=0.27,
         target_strategy="direct_pure_premium",
-        feature_inclusions=["risk_score_index_e"],
+        feature_inclusions=["BonusMalus"],
     )
 
     rows = lib.list_recipes(config)
     assert len(rows) == 3
     assert {row["experiment_id"] for row in rows} == {"all", "without", "only"}
     summaries = {row["experiment_id"]: row["summary"] for row in rows}
-    assert "features=except[risk_score_index_e]" in summaries["without"]
-    assert "features=only[risk_score_index_e]" in summaries["only"]
+    assert "features=except[BonusMalus]" in summaries["without"]
+    assert "features=only[BonusMalus]" in summaries["only"]
 
 
 def test_recipe_summary_distinguishes_parameter_variants(tmp_path: Path) -> None:
@@ -360,9 +360,9 @@ def test_recipe_cv_path() -> None:
 
 def _write_big_fixtures(config) -> None:
     frame, split = _frame(n=600)
-    # run_experiment caps from claim_cost_observed_k; keep both columns present.
-    frame[["record_id", "claim_count_signal_q", "exposure_term_a", "vehicle_power_band_b",
-           "region_cluster_j", "claim_cost_observed_k", "claim_event_count_l"]].to_parquet(
+    # run_experiment caps from ClaimAmount; keep both columns present.
+    frame[["record_id", "ClaimNb", "Exposure", "VehPower",
+           "Region", "ClaimAmount", "ClaimAmountCount"]].to_parquet(
         config.processed_dir / "agent_dataset_search.parquet", index=False)
     split.to_csv(config.splits_dir / "split_pack.csv", index=False)
 
@@ -421,8 +421,8 @@ def test_proposal_schema_accepts_recipe() -> None:
         "research_line_actions": ["create_line", "extend_line", "revisit_line", "close_line"],
         "claim_cap_thresholds": [100000],
         "allow_disable_claim_capping": False,
-        "feature_columns": ["vehicle_power_band_b", "region_cluster_j"],
-        "non_predictive_columns": ["exposure_term_a"],
+        "feature_columns": ["VehPower", "Region"],
+        "non_predictive_columns": ["Exposure"],
         "requires_model_script": True,
         "active_target_mode": "burning_cost",
         "allow_open_model_families": True,
@@ -460,7 +460,7 @@ def _base_recipe_proposal() -> tuple[dict, dict]:
         "branch_actions": ["extend_current", "new_branch"],
         "research_line_actions": ["create_line", "extend_line", "revisit_line", "close_line"],
         "claim_cap_thresholds": [100000], "allow_disable_claim_capping": False,
-        "feature_columns": ["vehicle_power_band_b"], "non_predictive_columns": ["exposure_term_a"],
+        "feature_columns": ["VehPower"], "non_predictive_columns": ["Exposure"],
         "requires_model_script": True, "active_target_mode": "burning_cost",
         "allow_open_model_families": True,
     }
@@ -551,7 +551,7 @@ def test_champion_template_generation(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         ct, "_load_experiment_model_cfg",
         lambda c, eid: {
-            "model": {"recipe": recipe, "feature_exclusions": ["region_cluster_j"]},
+            "model": {"recipe": recipe, "feature_exclusions": ["Region"]},
             "target_strategy": "direct_pure_premium",
             "model_script_path": None,
         },
@@ -563,7 +563,7 @@ def test_champion_template_generation(tmp_path: Path, monkeypatch) -> None:
     assert "PARAM_OVERRIDES" in text and "fit_predict" in text
     artifact = json.loads(written["champion_recipe"].read_text())
     assert artifact["target_strategy"] == "direct_pure_premium"
-    assert artifact["model"]["feature_exclusions"] == ["region_cluster_j"]
+    assert artifact["model"]["feature_exclusions"] == ["Region"]
 
 
 def test_champion_recipe_reference_resolves_nested_overrides(tmp_path: Path) -> None:
@@ -582,7 +582,7 @@ def test_champion_recipe_reference_resolves_nested_overrides(tmp_path: Path) -> 
                     "objective": "tweedie",
                     "params": {"num_leaves": 63, "learning_rate": 0.05},
                 },
-                "feature_exclusions": ["region_cluster_j"],
+                "feature_exclusions": ["Region"],
             },
         }),
         encoding="utf-8",

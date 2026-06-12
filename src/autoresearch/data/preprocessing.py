@@ -7,7 +7,7 @@ from typing import Any
 import pandas as pd
 
 
-DEFAULT_CAPPED_COLUMN = "claim_cost_capped_active"
+DEFAULT_CAPPED_COLUMN = "ClaimAmountCapped"
 
 
 def apply_claim_capping(

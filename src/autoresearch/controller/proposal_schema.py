@@ -75,21 +75,21 @@ REQUIRED_PROPOSAL_TEXT_FIELDS = SCIENTIFIC_PROPOSAL_FIELDS + DERIVED_PROPOSAL_FI
 
 TARGET_COLUMNS = {
     "record_id",
-    "claim_count_signal_q",
-    "claim_event_count_l",
-    "claim_cost_observed_k",
-    "claim_cost_capped_active",
+    "ClaimNb",
+    "ClaimAmountCount",
+    "ClaimAmount",
+    "ClaimAmountCapped",
 }
 
-def allowed_search_space(config, agent_schema: dict[str, Any] | None = None) -> dict[str, Any]:
+def allowed_search_space(config, dataset_schema: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build the explicit search space exposed to proposal generators."""
 
     ss = config.search_space
     feature_columns = []
-    if agent_schema:
+    if dataset_schema:
         feature_columns = [
             name
-            for name in predictive_columns(agent_schema.get("columns", []))
+            for name in predictive_columns(dataset_schema.get("columns", []))
             if name not in TARGET_COLUMNS
         ]
 
@@ -103,11 +103,13 @@ def allowed_search_space(config, agent_schema: dict[str, Any] | None = None) -> 
         "feature_columns": feature_columns,
         "non_predictive_columns": sorted(NON_PREDICTIVE_COLUMNS),
         "feature_policy": {
-            "exposure_term_a": (
+            "Exposure": (
                 "Use only for exposure weights, frequency/severity denominators, "
                 "and converting predicted rates to target totals. "
                 "Do not use as a predictive model feature because it is unavailable at quote time."
-            )
+            ),
+            "record_id": "Framework join key; never use as a predictive model feature.",
+            "IDpol": "Source identifier; never use as a predictive model feature.",
         },
         "branch_actions": ["extend_current", "new_branch"],
         "research_line_actions": sorted(RESEARCH_LINE_ACTIONS),

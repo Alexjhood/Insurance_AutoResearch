@@ -16,11 +16,11 @@ from autoresearch.targets import BURNING_COST, FREQUENCY, normalise_target_mode,
 
 # Column name constants (keep consistent across all model modules)
 RECORD_ID = "record_id"
-EXPOSURE = "exposure_term_a"
-CLAIM_COUNT = "claim_count_signal_q"
-CLAIM_EVENTS = "claim_event_count_l"
-CLAIM_COST = "claim_cost_capped_active"
-RAW_CLAIM_COST = "claim_cost_observed_k"
+EXPOSURE = "Exposure"
+CLAIM_COUNT = "ClaimNb"
+CLAIM_EVENTS = "ClaimAmountCount"
+CLAIM_COST = "ClaimAmountCapped"
+RAW_CLAIM_COST = "ClaimAmount"
 
 
 @dataclass(frozen=True)
@@ -70,6 +70,7 @@ def dispatch_model(
         builder = importlib.import_module(feature_builder_module)
         frame = builder.build_features(frame)
 
+    hp.setdefault("_id_columns", _matching_id_columns(frame))
     data = frame.merge(split_frame[["record_id", "split"]], on="record_id", how="inner")
     if len(data) < len(frame):
         raise ValueError(f"{len(frame) - len(data)} rows dropped during split merge — split pack may be stale")
@@ -162,6 +163,8 @@ def dispatch_model_on_explicit_frames(
         train_df = builder.build_features(train_df)
         val_df = builder.build_features(val_df)
 
+    hp.setdefault("_id_columns", _matching_id_columns(train_df))
+
     # Tag with synthetic split labels; score frame includes both so fit_predict
     # receives the same (train, score) structure as the standard runner.
     _train = train_df.copy()
@@ -214,6 +217,22 @@ def dispatch_model_on_explicit_frames(
     predictions["actual_frequency"] = predictions["actual_claim_count"] / exp
     predictions["predicted_frequency"] = predictions["predicted_claim_count"] / exp
     return ModelResult(predictions=predictions, model_notes=notes, interpret_fn=interpret_fn)
+
+
+def _matching_id_columns(frame: pd.DataFrame) -> list[str]:
+    """Return columns that duplicate the framework record identifier."""
+
+    if RECORD_ID not in frame.columns:
+        return [RECORD_ID]
+    record_ids = frame[RECORD_ID]
+    matches = [RECORD_ID]
+    for column in frame.columns:
+        if column == RECORD_ID:
+            continue
+        series = frame[column]
+        if series.is_unique and series.equals(record_ids):
+            matches.append(column)
+    return matches
 
 
 def _finalize_predicted(

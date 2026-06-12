@@ -23,7 +23,7 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
     """Build the bounded context that is safe to provide to the proposer."""
     from autoresearch.memory import resolve_memory_access
 
-    schema_path = config.metadata_dir / "agent_schema.json"
+    schema_path = config.metadata_dir / "dataset_schema.json"
     latest_nonpromotion_path = config.handoff_results_dir / "latest_nonpromotion_summary.json"
     latest_cycle_path = config.handoff_results_dir / "latest_cycle_result.json"
     raw_schema = read_json(schema_path) if schema_path.exists() else None
@@ -45,7 +45,7 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
             f"Improve {config.target_mode} prediction while protecting reproducibility and holdout integrity. "
             "Every run starts from the global-mean no-model baseline; progress through many small, "
             "well-motivated steps with a broad search before committing to any single direction. "
-            "Claim cap is fixed at 100,000. exposure_term_a is an exposure offset for weights, "
+            "Claim cap is fixed at 100,000. Exposure is an exposure offset for weights, "
             "response denominators, and converting predicted rates to target totals; it must not be "
             "used as a predictive feature because it is unavailable at quote time."
         ),
@@ -83,7 +83,7 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
         "active_queue": _active_queue_summary(all_proposals, config.running_stale_minutes),
         "latest_cycle_result": latest_cycle_result,
         "latest_nonpromotion_summary": read_json(latest_nonpromotion_path) if latest_nonpromotion_path.exists() else None,
-        "agent_schema": _compact_agent_schema(raw_schema),
+        "dataset_schema": _compact_dataset_schema(raw_schema),
         "allowed_search_space": allowed_search_space(config, raw_schema),
         "evaluation_rules": {
             "ordinary_train_split": config.ordinary_train_split,
@@ -138,7 +138,7 @@ def _build_memory_access_block(access: str) -> dict[str, Any]:
     }
 
 
-def _compact_agent_schema(schema: dict[str, Any] | None) -> dict[str, Any] | None:
+def _compact_dataset_schema(schema: dict[str, Any] | None) -> dict[str, Any] | None:
     if not schema:
         return None
     return {

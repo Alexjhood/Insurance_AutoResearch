@@ -40,7 +40,7 @@ run-scope guard can bind the session before you inspect artifacts.
 
 ### Library × loss capability matrix (target has exact zeros)
 
-The burning-cost target (`claim_cost_capped_active`) **contains exact zeros** — most policies have no claim. Losses requiring strictly positive `y` (gamma, log) will error or need a frequency/severity split.
+The burning-cost target (`ClaimAmountCapped`) **contains exact zeros** — most policies have no claim. Losses requiring strictly positive `y` (gamma, log) will error or need a frequency/severity split.
 
 | Estimator | Tweedie | Gamma / Poisson | Notes |
 |---|---|---|---|
@@ -64,7 +64,7 @@ Features with string values (e.g. `'B12'`) must be encoded before estimators tha
 
 - These traps apply to **hand-written scripts that return a raw array**; a
   recipe or a `Prediction` return has the framework handle both automatically.
-- Always multiply predicted rates by `exposure_term_a` to return totals.
+- Always multiply predicted rates by `Exposure` to return totals.
 - Always apply `apply_training_calibration` before returning.
 - Build feature lists with care — `list + int` concatenation raises `TypeError`.
 - `blend` components require predictions from prior experiments to exist on disk.
@@ -152,7 +152,7 @@ If an experiment times out, the framework marks it `failed` with a `compute_budg
 
 In `burning_cost` mode, model scripts return predicted claim-cost totals. In
 `frequency` mode, model scripts return expected claim-count totals. Scripts
-should model rates internally if useful, then multiply by `exposure_term_a`
+should model rates internally if useful, then multiply by `Exposure`
 before returning.
 
 ---
@@ -565,7 +565,7 @@ A script may instead return a `Prediction(values=rates, unit="rate")` (from
 `autoresearch.models.prediction`) and let the framework convert rate→total via
 exposure and calibrate for you — the same finalisation recipes use. If you return
 a raw `np.ndarray` you must return target totals (multiply pure-premium/frequency
-rates by `score["exposure_term_a"]`) and calibrate yourself (below).
+rates by `score["Exposure"]`) and calibrate yourself (below).
 
 **Option C: New feature engineering module**
 Create `src/autoresearch/features/<name>.py`. Must expose:
@@ -583,10 +583,10 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
 Reference it in the TOML: `feature_builder_module = "autoresearch.features.<name>"`.
 
 Column constants (import from `autoresearch.models.dispatcher`):
-- `EXPOSURE = "exposure_term_a"`
-- `CLAIM_COST = "claim_cost_capped_active"` (training target)
-- `CLAIM_COUNT = "claim_count_signal_q"`
-- `CLAIM_EVENTS = "claim_event_count_l"`
+- `EXPOSURE = "Exposure"`
+- `CLAIM_COST = "ClaimAmountCapped"` (training target)
+- `CLAIM_COUNT = "ClaimNb"`
+- `CLAIM_EVENTS = "ClaimAmountCount"`
 - `RECORD_ID = "record_id"`
 
 **Calibration — always apply (unless you return a `Prediction`)**
@@ -712,27 +712,26 @@ autoresearch --track <track> --run-id <run-id> record-cycle-reflection \
 
 ---
 
-## Dataset schema (anonymised)
+## Dataset schema
 
 | Column | Role | Notes |
 |--------|------|-------|
-| `record_id` | ID | Float; policy identifier |
-| `exposure_term_a` | Offset | Policy duration in years. Use only for exposure weights, response denominators, and multiplying predicted rates back to target totals; do **not** use as a predictive feature because it is unavailable at quote time. |
-| `vehicle_power_band_b` | Feature | Numeric 1–12 |
-| `vehicle_age_band_c` | Feature | Numeric (years) |
-| `driver_age_band_d` | Feature | Numeric (years) |
-| `risk_score_index_e` | Feature | Numeric risk score |
-| `vehicle_make_group_f` | Feature | Categorical (11 levels) |
-| `vehicle_energy_type_g` | Feature | Categorical (2 levels: fuel type) |
-| `territory_band_h` | Feature | Categorical (6 zones) |
-| `density_index_i` | Feature | Numeric (1607 unique; urban density proxy) |
-| `region_cluster_j` | Feature | Categorical (21 regions) |
-| `claim_count_signal_q` | Target | Count of claims |
-| `claim_event_count_l` | Target | Alternative claim count |
-| `claim_cost_observed_k` | Target | Raw claim cost (£) |
-| `claim_cost_capped_active` | Target | Capped claim cost (active training target in burning-cost mode) |
-
-Raw mapping is private; use anonymised names only in model code.
+| `record_id` | Framework ID | Stable join key copied from the configured source identifier |
+| `IDpol` | Source ID | Source policy identifier; never use as a predictive feature |
+| `Exposure` | Offset | Policy duration in years. Use only for exposure weights, response denominators, and multiplying predicted rates back to target totals; do **not** use as a predictive feature because it is unavailable at quote time. |
+| `VehPower` | Feature | Vehicle power |
+| `VehAge` | Feature | Vehicle age |
+| `DrivAge` | Feature | Driver age |
+| `BonusMalus` | Feature | Bonus-malus value |
+| `VehBrand` | Feature | Vehicle brand |
+| `VehGas` | Feature | Fuel type |
+| `Area` | Feature | Area |
+| `Density` | Feature | Population density |
+| `Region` | Feature | Region |
+| `ClaimNb` | Target | Count of claims |
+| `ClaimAmountCount` | Target | Number of observed claim-amount records |
+| `ClaimAmount` | Target | Raw claim cost |
+| `ClaimAmountCapped` | Target | Capped claim cost (active training target in burning-cost mode) |
 
 ---
 

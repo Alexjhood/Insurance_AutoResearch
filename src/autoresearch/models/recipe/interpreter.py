@@ -31,11 +31,11 @@ from autoresearch.models.recipe.schema import recipe_summary, validate_recipe
 from autoresearch.targets import BURNING_COST, FREQUENCY, normalise_target_mode
 
 
-EXPOSURE = "exposure_term_a"
-CLAIM_COST = "claim_cost_capped_active"
-CLAIM_COUNT = "claim_count_signal_q"
-CLAIM_EVENTS = "claim_event_count_l"
-RAW_CLAIM_COST = "claim_cost_observed_k"
+EXPOSURE = "Exposure"
+CLAIM_COST = "ClaimAmountCapped"
+CLAIM_COUNT = "ClaimNb"
+CLAIM_EVENTS = "ClaimAmountCount"
+RAW_CLAIM_COST = "ClaimAmount"
 RECORD_ID = "record_id"
 
 _LEAKAGE = frozenset({
@@ -48,8 +48,9 @@ def _select_features(
     frame: pd.DataFrame,
     feature_inclusions: list[str] | None,
     feature_exclusions: list[str] | None,
+    id_columns: list[str] | None = None,
 ) -> list[str]:
-    exclusions = set(feature_exclusions or []) | _LEAKAGE
+    exclusions = set(feature_exclusions or []) | set(id_columns or []) | _LEAKAGE
     if feature_inclusions:
         missing = [c for c in feature_inclusions if c not in frame.columns]
         if missing:
@@ -173,7 +174,12 @@ def fit_predict(
     if errors:
         raise RecipeError("Invalid recipe:\n- " + "\n- ".join(errors))
 
-    features = _select_features(train, feature_inclusions, feature_exclusions)
+    features = _select_features(
+        train,
+        feature_inclusions,
+        feature_exclusions,
+        hyperparameters.get("_id_columns"),
+    )
     structure = recipe.get("structure", "direct")
     train_exposure = train[EXPOSURE].astype(float).to_numpy()
     score_exposure = score[EXPOSURE].astype(float).to_numpy()

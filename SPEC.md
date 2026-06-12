@@ -67,7 +67,7 @@ Target length: 140–170 lines. Sections in this exact order:
 
 (Filename must contain `freq` and `sev` respectively — the loader at `src/autoresearch/data/loader.py:50` matches on those substrings.)
 
-**Frequency table — exact columns and dtypes** (from `SEMANTIC_NAME_MAP` in `src/autoresearch/data/anonymise.py:11`):
+**Frequency table — exact columns and dtypes**:
 | Column | Dtype | Notes |
 |---|---|---|
 | `IDpol` | int64 | unique, 1..N |
@@ -126,7 +126,7 @@ Target length: 140–170 lines. Sections in this exact order:
    - For testing / smoke runs: `python scripts/generate_synthetic_data.py` (5000 synthetic rows, no network).
    - For real research: `python scripts/fetch_fremtpl2.py` (downloads ~678K rows from OpenML).
 3. **Licensing note**: freMTPL2 is distributed under the CASdatasets / OpenML terms; cite Charpentier (2014) for academic use. Synthetic data has no license restriction.
-4. **Expected columns** — reference list pointing to `src/autoresearch/data/anonymise.py` for the authoritative mapping.
+4. **Expected columns** — reference the source columns listed above.
 
 ---
 

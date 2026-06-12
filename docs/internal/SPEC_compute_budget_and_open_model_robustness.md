@@ -243,7 +243,7 @@ user can append to it over time, e.g.:
 Seed it with these (all derived from observed failures):
 
 **Library × loss capability matrix (target has exact zeros):**
-- The burning-cost target (`claim_cost_capped_active`) **contains exact
+- The burning-cost target (`ClaimAmountCapped`) **contains exact
   zeros** (most policies have no claim). Losses requiring strictly positive `y`
   (gamma, log) will error or need a frequency/severity split.
 - **Tweedie objective is supported by:** `lightgbm` (`objective="tweedie"`,
@@ -263,7 +263,7 @@ Seed it with these (all derived from observed failures):
   xgboost/sklearn need explicit ordinal/one-hot encoding.
 
 **Other recurring traps:**
-- Always multiply predicted rates by `exposure_term_a` to return totals.
+- Always multiply predicted rates by `Exposure` to return totals.
 - Always apply `apply_training_calibration` before returning.
 - Build feature lists with care (`list + int` concatenation bug seen).
 

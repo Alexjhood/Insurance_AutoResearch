@@ -61,9 +61,9 @@ def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=Non
 ```
 
 Predictions must be target totals, not rates. In the default `burning_cost`
-mode, return predicted claim costs (multiply by `exposure_term_a` if you model
+mode, return predicted claim costs (multiply by `Exposure` if you model
 pure premium). In `frequency` mode, return expected claim counts (multiply by
-`exposure_term_a` if you model annual claim frequency). Apply
+`Exposure` if you model annual claim frequency). Apply
 `autoresearch.models.calibration.apply_training_calibration` before
 returning. See `src/autoresearch/models/global_mean.py` for the reference
 shape.

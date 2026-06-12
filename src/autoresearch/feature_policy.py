@@ -4,8 +4,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 
-EXPOSURE_COLUMN = "exposure_term_a"
-NON_PREDICTIVE_COLUMNS = frozenset({EXPOSURE_COLUMN})
+EXPOSURE_COLUMN = "Exposure"
+NON_PREDICTIVE_COLUMNS = frozenset({EXPOSURE_COLUMN, "record_id", "IDpol"})
 
 
 def is_predictive_feature(column: str, role: str | None = None) -> bool:
@@ -17,7 +17,7 @@ def is_predictive_feature(column: str, role: str | None = None) -> bool:
 
 
 def predictive_columns(columns: Iterable[dict]) -> list[str]:
-    """Extract agent-facing columns that are eligible as predictors."""
+    """Extract dataset columns that are eligible as predictors."""
 
     return [
         item["name"]

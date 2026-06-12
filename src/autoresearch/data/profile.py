@@ -8,7 +8,7 @@ import pandas as pd
 
 
 def build_profile(frame: pd.DataFrame, source_paths: dict[str, str | None]) -> dict[str, Any]:
-    """Build a compact JSON-serialisable profile for an anonymised dataset."""
+    """Build a compact JSON-serialisable profile for a prepared dataset."""
 
     columns: list[dict[str, Any]] = []
     for name, series in frame.items():

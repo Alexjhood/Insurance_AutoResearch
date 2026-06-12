@@ -19,7 +19,7 @@ _EXPECTED_TOP_KEYS = {
     "active_queue",
     "latest_cycle_result",
     "latest_nonpromotion_summary",
-    "agent_schema",
+    "dataset_schema",
     "allowed_search_space",
     "evaluation_rules",
 }

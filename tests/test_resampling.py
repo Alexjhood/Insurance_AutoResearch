@@ -110,11 +110,11 @@ def _make_cv_frame_and_folds(n: int = 100) -> tuple[pd.DataFrame, pd.DataFrame]:
     rng = np.random.default_rng(42)
     frame = pd.DataFrame({
         "record_id": list(range(n)),
-        "claim_cost_capped_active": rng.exponential(100, n),
-        "claim_cost_observed_k": rng.exponential(100, n),
-        "claim_count_signal_q": rng.poisson(0.1, n).astype(float),
-        "claim_event_count_l": rng.poisson(0.1, n).astype(float),
-        "exposure_term_a": rng.uniform(0.5, 1.5, n),
+        "ClaimAmountCapped": rng.exponential(100, n),
+        "ClaimAmount": rng.exponential(100, n),
+        "ClaimNb": rng.poisson(0.1, n).astype(float),
+        "ClaimAmountCount": rng.poisson(0.1, n).astype(float),
+        "Exposure": rng.uniform(0.5, 1.5, n),
         # A feature for the model to use
         "risk_feature": rng.normal(0, 1, n),
     })
@@ -136,32 +136,32 @@ def _make_factories_for_cv(good: bool) -> tuple:
 
     def _factory_base(train_df: pd.DataFrame, val_df: pd.DataFrame) -> pd.DataFrame:
         # Global mean prediction (terrible discriminator)
-        mean_pp = (train_df["claim_cost_capped_active"] / train_df["exposure_term_a"].clip(lower=1e-9)).mean()
+        mean_pp = (train_df["ClaimAmountCapped"] / train_df["Exposure"].clip(lower=1e-9)).mean()
         return pd.DataFrame({
             "record_id": val_df["record_id"].to_numpy(),
             "split": "val",
             "target_mode": "burning_cost",
-            "exposure": val_df["exposure_term_a"].to_numpy(),
-            "actual_target": val_df["claim_cost_capped_active"].to_numpy(),
-            "actual_claim_cost": val_df["claim_cost_capped_active"].to_numpy(),
-            "actual_claim_count": val_df["claim_count_signal_q"].to_numpy(),
-            "predicted_target": mean_pp * val_df["exposure_term_a"].to_numpy(),
-            "predicted_claim_cost": mean_pp * val_df["exposure_term_a"].to_numpy(),
+            "exposure": val_df["Exposure"].to_numpy(),
+            "actual_target": val_df["ClaimAmountCapped"].to_numpy(),
+            "actual_claim_cost": val_df["ClaimAmountCapped"].to_numpy(),
+            "actual_claim_count": val_df["ClaimNb"].to_numpy(),
+            "predicted_target": mean_pp * val_df["Exposure"].to_numpy(),
+            "predicted_claim_cost": mean_pp * val_df["Exposure"].to_numpy(),
             "predicted_claim_count": np.nan * np.ones(len(val_df)),
         })
 
     def _factory_good(train_df: pd.DataFrame, val_df: pd.DataFrame) -> pd.DataFrame:
         # Uses risk_feature as the prediction (has some signal if correlated)
-        preds = val_df["exposure_term_a"].to_numpy() * (0.5 + val_df["risk_feature"].to_numpy())
+        preds = val_df["Exposure"].to_numpy() * (0.5 + val_df["risk_feature"].to_numpy())
         preds = np.clip(preds, 0.01, None)
         return pd.DataFrame({
             "record_id": val_df["record_id"].to_numpy(),
             "split": "val",
             "target_mode": "burning_cost",
-            "exposure": val_df["exposure_term_a"].to_numpy(),
-            "actual_target": val_df["claim_cost_capped_active"].to_numpy(),
-            "actual_claim_cost": val_df["claim_cost_capped_active"].to_numpy(),
-            "actual_claim_count": val_df["claim_count_signal_q"].to_numpy(),
+            "exposure": val_df["Exposure"].to_numpy(),
+            "actual_target": val_df["ClaimAmountCapped"].to_numpy(),
+            "actual_claim_cost": val_df["ClaimAmountCapped"].to_numpy(),
+            "actual_claim_count": val_df["ClaimNb"].to_numpy(),
             "predicted_target": preds,
             "predicted_claim_cost": preds,
             "predicted_claim_count": np.nan * np.ones(len(val_df)),
@@ -204,7 +204,7 @@ def test_paired_cv_comparison_good_challenger_wins() -> None:
     frame, fold_frame = _make_cv_frame_and_folds(200)
     # Make the feature actually predictive
     rng = np.random.default_rng(99)
-    frame["claim_cost_capped_active"] = (
+    frame["ClaimAmountCapped"] = (
         50.0 + 30.0 * frame["risk_feature"] + rng.normal(0, 20, len(frame))
     ).clip(0)
 

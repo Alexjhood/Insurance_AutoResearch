@@ -22,7 +22,7 @@ Additional panel metrics are recorded for diagnostic purposes but not used for p
 
 Calibration diagnostics (`diagnostics.json`) are written alongside every experiment:
 - Predicted-to-actual ratio by predicted decile and by exposure band
-- Loss ratio by segment (risk_score_index_e, vehicle_age_band_c, driver_age_band_d, territory_band_h)
+- Loss ratio by segment (BonusMalus, VehAge, DrivAge, Area)
 - Population Stability Index (PSI) between train and search_validation distributions
 
 ### Promotion Evaluation (champion/challenger comparison)

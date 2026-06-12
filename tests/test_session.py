@@ -15,8 +15,8 @@ def _ready_config(tmp_path: Path):
     _record_direct(config)
     initialise_official_champion(config)
     config.metadata_dir.mkdir(parents=True)
-    (config.metadata_dir / "agent_schema.json").write_text(
-        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]}',
+    (config.metadata_dir / "dataset_schema.json").write_text(
+        '{"columns": [{"name": "Exposure", "role": "numeric_feature"}]}',
         encoding="utf-8",
     )
     return config

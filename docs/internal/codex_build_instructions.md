@@ -15,7 +15,7 @@ Create:
 ## Phase 1
 Implement:
 - raw dataset loader for freMTPL2
-- anonymisation pipeline
+- source-preserving data preparation pipeline
 - metadata/profile generation
 - stable split pack generation
 - saved outputs under data/metadata and data/splits

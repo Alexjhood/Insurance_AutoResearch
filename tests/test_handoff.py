@@ -209,12 +209,12 @@ def test_export_context_and_template(tmp_path: Path) -> None:
     _record_direct(config)
     initialise_official_champion(config)
     config.metadata_dir.mkdir(parents=True, exist_ok=True)
-    (config.metadata_dir / "agent_schema.json").write_text(
+    (config.metadata_dir / "dataset_schema.json").write_text(
         json.dumps(
             {
                 "columns": [
-                    {"name": "exposure_term_a", "role": "exposure_offset"},
-                    {"name": "driver_age_band_d", "role": "numeric_feature"},
+                    {"name": "Exposure", "role": "exposure_offset"},
+                    {"name": "DrivAge", "role": "numeric_feature"},
                 ]
             }
         ),
@@ -241,8 +241,8 @@ def test_export_context_and_template(tmp_path: Path) -> None:
     assert "research_line_id" not in refreshed_template
     assert set(refreshed_template["experiment_config"]) >= {"model_family", "target_strategy", "model"}
     assert "parent_experiment_id" not in refreshed_template["experiment_config"]
-    assert context["allowed_search_space"]["feature_columns"] == ["driver_age_band_d"]
-    assert "exposure_term_a` is not a predictive feature" in handoff
+    assert context["allowed_search_space"]["feature_columns"] == ["DrivAge"]
+    assert "Exposure` is not a predictive feature" in handoff
 
     # The schema document marks parentage as controller-derived rather than required.
     schema = json.loads(template_outputs["proposal_schema"].read_text(encoding="utf-8"))
@@ -307,8 +307,8 @@ def _minimal_proposal() -> dict:
 
 def _ingest_single(config, proposal: dict) -> dict:
     config.metadata_dir.mkdir(parents=True, exist_ok=True)
-    (config.metadata_dir / "agent_schema.json").write_text(
-        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]}',
+    (config.metadata_dir / "dataset_schema.json").write_text(
+        '{"columns": [{"name": "Exposure", "role": "numeric_feature"}]}',
         encoding="utf-8",
     )
     config.handoff_proposal_inbox_dir.mkdir(parents=True, exist_ok=True)
@@ -400,17 +400,17 @@ def test_exposure_is_rejected_as_model_feature(tmp_path: Path) -> None:
     config = _config(tmp_path)
     search_space = allowed_search_space(
         config=config,
-        agent_schema={
+        dataset_schema={
             "columns": [
-                {"name": "exposure_term_a", "role": "exposure_offset"},
-                {"name": "driver_age_band_d", "role": "numeric_feature"},
+                {"name": "Exposure", "role": "exposure_offset"},
+                {"name": "DrivAge", "role": "numeric_feature"},
             ]
         },
     )
     proposal = _valid_proposal()
     proposal["experiment_config"]["model"] = {
         "script_path": "model.py",
-        "feature_inclusions": ["exposure_term_a", "driver_age_band_d"],
+        "feature_inclusions": ["Exposure", "DrivAge"],
     }
 
     errors = validate_proposal(proposal, search_space)
@@ -423,8 +423,8 @@ def test_ingest_proposals_moves_valid_and_invalid_files(tmp_path: Path) -> None:
     _record_direct(config)
     initialise_official_champion(config)
     config.metadata_dir.mkdir(parents=True, exist_ok=True)
-    (config.metadata_dir / "agent_schema.json").write_text(
-        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]}',
+    (config.metadata_dir / "dataset_schema.json").write_text(
+        '{"columns": [{"name": "Exposure", "role": "numeric_feature"}]}',
         encoding="utf-8",
     )
     config.handoff_proposal_inbox_dir.mkdir(parents=True, exist_ok=True)
@@ -452,8 +452,8 @@ def test_batch_ingest_defers_second_valid_until_context_refresh(tmp_path: Path) 
     _record_direct(config)
     initialise_official_champion(config)
     config.metadata_dir.mkdir(parents=True, exist_ok=True)
-    (config.metadata_dir / "agent_schema.json").write_text(
-        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]}',
+    (config.metadata_dir / "dataset_schema.json").write_text(
+        '{"columns": [{"name": "Exposure", "role": "numeric_feature"}]}',
         encoding="utf-8",
     )
     first = _valid_proposal()
@@ -560,8 +560,8 @@ def test_create_line_at_cap_requires_and_applies_parking(tmp_path: Path) -> None
     _record_direct(config)
     initialise_official_champion(config)
     config.metadata_dir.mkdir(parents=True, exist_ok=True)
-    (config.metadata_dir / "agent_schema.json").write_text(
-        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]}',
+    (config.metadata_dir / "dataset_schema.json").write_text(
+        '{"columns": [{"name": "Exposure", "role": "numeric_feature"}]}',
         encoding="utf-8",
     )
     for idx in range(5):
@@ -634,8 +634,8 @@ def test_tree_action_requires_parent_for_non_root(tmp_path: Path) -> None:
     _record_direct(config)
     initialise_official_champion(config)
     config.metadata_dir.mkdir(parents=True, exist_ok=True)
-    (config.metadata_dir / "agent_schema.json").write_text(
-        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]}',
+    (config.metadata_dir / "dataset_schema.json").write_text(
+        '{"columns": [{"name": "Exposure", "role": "numeric_feature"}]}',
         encoding="utf-8",
     )
     proposal = _valid_proposal()
@@ -655,8 +655,8 @@ def test_stale_parent_is_auto_rejected_before_execution(tmp_path: Path) -> None:
     _record_direct(config)
     initialise_official_champion(config)
     config.metadata_dir.mkdir(parents=True, exist_ok=True)
-    (config.metadata_dir / "agent_schema.json").write_text(
-        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]}',
+    (config.metadata_dir / "dataset_schema.json").write_text(
+        '{"columns": [{"name": "Exposure", "role": "numeric_feature"}]}',
         encoding="utf-8",
     )
     config.handoff_proposal_inbox_dir.mkdir(parents=True, exist_ok=True)
@@ -708,8 +708,8 @@ claim_cap_threshold = 100000
     champion_id = json.loads(champion_outputs["config_snapshot"].read_text(encoding="utf-8"))["experiment_id"]
     initialise_official_champion(config, champion_id)
     config.metadata_dir.mkdir(parents=True, exist_ok=True)
-    (config.metadata_dir / "agent_schema.json").write_text(
-        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"}]}',
+    (config.metadata_dir / "dataset_schema.json").write_text(
+        '{"columns": [{"name": "Exposure", "role": "numeric_feature"}]}',
         encoding="utf-8",
     )
     config.handoff_proposal_inbox_dir.mkdir(parents=True, exist_ok=True)
@@ -781,9 +781,9 @@ claim_cap_threshold = 100000
     )["experiment_id"]
     initialise_official_champion(config, champion_id)
     config.metadata_dir.mkdir(parents=True, exist_ok=True)
-    (config.metadata_dir / "agent_schema.json").write_text(
-        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"},'
-        ' {"name": "vehicle_power_band_b", "role": "numeric_feature"}]}',
+    (config.metadata_dir / "dataset_schema.json").write_text(
+        '{"columns": [{"name": "Exposure", "role": "numeric_feature"},'
+        ' {"name": "VehPower", "role": "numeric_feature"}]}',
         encoding="utf-8",
     )
 
@@ -795,12 +795,12 @@ claim_cap_threshold = 100000
         """
 import numpy as np
 
-EXPOSURE = "exposure_term_a"
+EXPOSURE = "Exposure"
 
 
 def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hp):
-    base = float(train["claim_cost_capped_active"].sum() / train[EXPOSURE].sum())
-    rate = base * score["vehicle_power_band_b"].astype(float).to_numpy() / 4.0
+    base = float(train["ClaimAmountCapped"].sum() / train[EXPOSURE].sum())
+    rate = base * score["VehPower"].astype(float).to_numpy() / 4.0
     return rate * score[EXPOSURE].astype(float).to_numpy(), {"intent": "power-banded"}
 """.strip(),
         encoding="utf-8",
@@ -911,9 +911,9 @@ claim_cap_threshold = 100000
     )["experiment_id"]
     initialise_official_champion(config, champion_id)
     config.metadata_dir.mkdir(parents=True, exist_ok=True)
-    (config.metadata_dir / "agent_schema.json").write_text(
-        '{"columns": [{"name": "exposure_term_a", "role": "numeric_feature"},'
-        ' {"name": "vehicle_power_band_b", "role": "numeric_feature"}]}',
+    (config.metadata_dir / "dataset_schema.json").write_text(
+        '{"columns": [{"name": "Exposure", "role": "numeric_feature"},'
+        ' {"name": "VehPower", "role": "numeric_feature"}]}',
         encoding="utf-8",
     )
 
@@ -922,12 +922,12 @@ claim_cap_threshold = 100000
         """
 import numpy as np
 
-EXPOSURE = "exposure_term_a"
+EXPOSURE = "Exposure"
 
 
 def fit_predict(train, score, *, feature_inclusions=None, feature_exclusions=None, **hp):
-    base = float(train["claim_cost_capped_active"].sum() / train[EXPOSURE].sum())
-    inverse_power = 6.0 - score["vehicle_power_band_b"].astype(float).to_numpy()
+    base = float(train["ClaimAmountCapped"].sum() / train[EXPOSURE].sum())
+    inverse_power = 6.0 - score["VehPower"].astype(float).to_numpy()
     return base * inverse_power * score[EXPOSURE].astype(float).to_numpy(), {"intent": "inverse-power"}
 """.strip(),
         encoding="utf-8",

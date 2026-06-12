@@ -16,8 +16,8 @@ def _make_full_dataset(n: int = 100, seed: int = 0) -> pd.DataFrame:
     return pd.DataFrame({
         "record_id": np.arange(n),
         "split": (["train"] * 60 + ["search_validation"] * 20 + ["milestone_holdout"] * 20),
-        "claim_cost_capped_active": rng.exponential(100, n),
-        "exposure_term_a": np.ones(n),
+        "ClaimAmountCapped": rng.exponential(100, n),
+        "Exposure": np.ones(n),
     })
 
 

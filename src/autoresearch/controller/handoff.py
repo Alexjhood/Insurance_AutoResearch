@@ -545,7 +545,7 @@ def render_handoff_markdown(
         "",
         f"- **Target mode**: `{target_mode}`",
         f"- **Features available**: {feature_list}",
-        "- **Exposure policy**: `exposure_term_a` is not a predictive feature. The framework uses it for sample weights, response denominators, and rate→total conversion — you do not.",
+        "- **Exposure policy**: `Exposure` is not a predictive feature. The framework uses it for sample weights, response denominators, and rate→total conversion — you do not.",
         f"- **Target strategies**: {', '.join(f'`{s}`' for s in target_strategies)} (must agree with the recipe `structure`: `direct_pure_premium`/`frequency`→`direct`, `frequency_severity`→`frequency_severity`)",
         "- **Claim cap**: `100000` (fixed — never change `claim_cap_threshold`)",
         "- **Units & calibration are framework-owned**: a recipe (or a script returning `Prediction`) needs no exposure conversion or `apply_training_calibration` call. Only a script returning a raw `np.ndarray` must return totals and calibrate itself.",
@@ -674,7 +674,7 @@ def proposal_schema_document(config: ProjectConfig, context: dict[str, Any]) -> 
             "recipe_ref accepts an optional nested recipe_overrides object and is resolved before validation.",
             "A recipe's structure must agree with target_strategy (direct↔direct_pure_premium/frequency; "
             "frequency_severity↔frequency_severity).",
-            "Do not use exposure_term_a as a predictive feature; it is reserved for weights and response calculations.",
+            "Do not use Exposure as a predictive feature; it is reserved for weights and response calculations.",
             "research_parent_node_id is optional and may only point to a node from this active run's research_tree.",
             "tree_action=new_root may use research_parent_node_id=null; all other tree actions must point to a valid active-run node.",
             "selected_tree_action_id should match a recommended action from research_tree.tree_policy, unless tree_policy_override_rationale explains the deviation.",

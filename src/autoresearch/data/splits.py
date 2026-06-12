@@ -178,8 +178,8 @@ def _proportional_counts(n_rows: int, ratios: dict[str, float]) -> dict[str, int
 def _split_strata(frame: pd.DataFrame) -> pd.Series | None:
     """Return deterministic target/exposure strata when the needed columns exist."""
 
-    claim_column = _first_existing(frame, ("ClaimAmount", "claim_cost_observed_k", "claim_cost_capped_active"))
-    exposure_column = _first_existing(frame, ("Exposure", "exposure_term_a"))
+    claim_column = _first_existing(frame, ("ClaimAmount", "ClaimAmountCapped"))
+    exposure_column = _first_existing(frame, ("Exposure",))
     if claim_column is None or exposure_column is None:
         return None
 
