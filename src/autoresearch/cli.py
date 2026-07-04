@@ -110,6 +110,8 @@ def _cmd_bootstrap_track(config, args) -> int:
             prepare_shared_data=not args.skip_data,
             force_prepare_data=args.force_data,
             run_baselines=not args.skip_baselines,
+            default_max_cycles=args.cycles,
+            enable_foundation_models=args.enable_foundation_models,
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -910,6 +912,26 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--model-name", default=None, metavar="NAME", help="LLM model name (e.g. claude-sonnet-4-6). Required.")
     bootstrap.add_argument("--model-version", default=None, metavar="VERSION", help="LLM model version string (optional).")
     bootstrap.add_argument("--harness", default=None, metavar="HARNESS", help="Agent harness name (e.g. claude-code, codex, opencode).")
+    bootstrap.add_argument(
+        "--cycles",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Pin the run's cycle budget: sessions opened without --max-cycles default "
+            "to this value, so the framework stops the run instead of trusting the "
+            "agent to count."
+        ),
+    )
+    bootstrap.add_argument(
+        "--enable-foundation-models",
+        action="store_true",
+        help=(
+            "Opt this run into foundation tabular estimators (e.g. TabPFN). They "
+            "appear in the recipe menu/contract only when this flag is set AND the "
+            "[foundation] extra is installed. Off by default."
+        ),
+    )
     subparsers.add_parser("init-registry", help="Create the SQLite experiment registry.")
     run_parser = subparsers.add_parser(
         "run-baseline",
@@ -1176,6 +1198,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     if getattr(args, "target_mode", None):
         config = replace(config, target_mode=args.target_mode)
+    # Enable foundation estimators for runs that opted in (reads the run
+    # manifest; no-op otherwise). Done before any command touches the recipe
+    # registry so menu/validation/dispatch all see the same estimator set.
+    from autoresearch.bootstrap import apply_foundation_models_gate
+
+    apply_foundation_models_gate(config)
     handler = COMMANDS.get(args.command)
     if handler is None:
         parser.error(f"Unknown command: {args.command}")

@@ -1,0 +1,166 @@
+[paths]
+raw_data_dir = "data/raw"
+processed_dir = "data/processed"
+holdout_vault_dir = "data/holdout_vault"
+metadata_dir = "data/metadata"
+splits_dir = "data/splits"
+artifacts_dir = "artifacts"
+registry_path = "artifacts/experiment_registry.sqlite"
+
+[data]
+random_seed = 20260524
+id_column = "IDpol"
+agent_dataset_name = "agent_dataset"
+
+[preprocessing]
+# Fixed cap of 100,000 applied identically to training, search-validation,
+# and milestone-holdout rows.  The agent may not vary this — every experiment
+# is evaluated against the same capped target.
+claim_capping_enabled = true
+claim_cap_threshold = 100000
+
+[splits]
+train = 0.64
+search_validation = 0.16
+milestone_holdout = 0.20
+
+[evaluation]
+ordinary_train_split = "train"
+ordinary_eval_splits = ["search_validation"]
+# Default workflow target. Set to "frequency" only when the requested run
+# should model claim counts/frequency instead of burning cost.
+target_mode = "burning_cost"
+primary_metric = "gini_weighted"
+tweedie_power = 1.5
+use_cv = true
+cv_folds = 4
+cv_n_repeats = 1
+cv_seed = 20260524
+# Gate mode controls how champion/challenger comparisons are adjudicated.
+# "cv_bootstrap"     — default; unique fold partition per run, bootstrap ×20
+#                      within each fold, gates on gini_weighted lift across all
+#                      (fold × bootstrap) samples. ~8× cheaper than repeated_cv.
+# "repeated_cv"      — legacy; refits both models on 4×cv_n_repeats folds,
+#                      gates on rank_gini_weighted. Use when refit cost is acceptable.
+# "single_partition" — legacy; evaluates on the fixed search_validation split
+#                      with within-split bootstrap resampling.
+# FRUGAL override for cost-conscious ad-hoc API runs: single_partition fits the
+# challenger once (no ~5× CV refits), so a TabPFN-API sweep costs ~5× fewer
+# credits. Results are screening-grade (fixed search_validation split + bootstrap),
+# NOT promotion-grade — do not use this config for champion-quality decisions.
+gate_mode = "single_partition"
+gate_primary_metric = "gini_weighted"
+
+[resampling]
+repeated_resamples = 30
+bootstrap_iterations = 1000
+resample_fraction = 1.0
+random_seed = 20260524
+bootstrap_per_fold = 20
+# Band is one fold-unit around the 0.60 promotion threshold: fold-level win
+# rates are quantised to quarters on the base path (4 independent folds), so
+# 0.50 and 0.75 are the marginal outcomes that warrant extra partitions.
+escalation_win_rate_low = 0.50
+escalation_win_rate_high = 0.75
+escalation_partitions = 2
+# Rotate the base fold partition after this many recorded full comparisons.
+partition_rotation_interval = 5
+
+[promotion]
+minimum_mean_lift = 0.0
+min_relative_lift = 0.0005
+min_absolute_lift = 0.0
+minimum_win_rate = 0.60
+bootstrap_lower_bound = 0.0
+bootstrap_lower_bound_relative = 0.0
+confidence_level = 0.90
+max_predicted_to_actual_drift = 0.10
+require_diagnostics = true
+bonferroni_lookback = 10
+
+[handoff]
+base_dir = "artifacts/auto_research"
+context_dir = "artifacts/auto_research/context"
+proposal_inbox_dir = "artifacts/auto_research/proposals/inbox"
+proposal_processed_dir = "artifacts/auto_research/proposals/processed"
+results_dir = "artifacts/auto_research/results"
+handoffs_dir = "artifacts/auto_research/handoffs"
+
+[deduplication]
+policy = "reject"
+lookback = 25
+
+[search_space]
+model_families = ["global_mean", "recipe"]
+target_strategies = ["direct_pure_premium", "frequency_severity"]
+allow_legacy_baselines = false
+# LLM may add new model families by creating src/autoresearch/models/<family>.py
+# and specifying any string for model_family in the experiment TOML.
+allow_open_model_families = true
+# LLM may add feature builders by creating src/autoresearch/features/<module>.py
+# and specifying feature_builder_module = "autoresearch.features.<module>" in [model].
+allow_feature_builder_modules = true
+# Autonomous proposals must provide a model implementation: either a declarative
+# `model.recipe` (interpreted by trusted framework code — preferred for known
+# methods) OR a run-local modelling script (the escape hatch — for novel methods
+# the recipe vocabulary cannot express). Built-in model families may be used as
+# research ideas, but their implementation must be a recipe or written into the
+# experiment artifact instead of imported from src/models.
+requires_model_script = true
+
+[recipes]
+# Declarative model recipes (#6). A recipe is a small validated description of a
+# common model that trusted framework code interprets, replacing ~100 lines of
+# hand-written scaffolding for the common case.
+#
+# reuse_scope controls which prior recipes a run may consult for suggestions:
+#   "run"    — Option 1 (default): only recipes tried earlier in THIS run.
+#   "memory" — Option 2: recipes from ALL runs/threads, via the cross-run memory
+#              store. Only takes effect when memory access is engaged
+#              (AUTORESEARCH_MEMORY_ACCESS = own|all); otherwise falls back to
+#              "run" so an independent benchmark stays uncontaminated.
+reuse_scope = "run"
+
+[compute]
+base_budget_minutes = 10
+budget_increment_minutes = 5
+experiments_per_increment = 5
+# THINKING runs: disable the framework wall-clock alarm so a long thinking fit is
+# not killed mid-fit. The tabpfn-client caps thinking_timeout_s at 2400s (40 min),
+# which becomes the effective bound. Screening-grade, cost-conscious ad-hoc use
+# only (see frugal.toml for the single_partition gate rationale).
+enforce = false
+preflight_enabled = true
+preflight_sample_rows = 5000
+
+[repair]
+noise_floor_eps = 0.002
+auto_abandon_enabled = true
+
+[screening]
+# Cheap full search-validation screen before expensive CV bootstrap.
+# Challengers are rejected only when the upper paired-bootstrap confidence
+# bound is below the clear-loser hurdle.
+enabled = true
+min_absolute_lift = -0.001
+min_relative_lift = -0.002
+bootstrap_iterations = 200
+confidence_level = 0.90
+min_bootstrap_rows = 30
+
+[memory]
+# The cross-run memory aggregator lives OUTSIDE the repo working tree by default
+# (~/.autoresearch/<project>/memory) so per-run agents do not stumble onto other
+# runs' results via the filesystem. Override the location with the
+# AUTORESEARCH_MEMORY_DIR environment variable (operator-only).
+# Gini threshold that defines "escaped the rate-Tweedie plateau".
+# Time-to-structural-insight leaderboard counts the first cycle that crosses this.
+structural_gini_threshold = 0.37
+
+[search_space.preprocessing]
+# Claim cap is fixed at 100,000 by product decision and applied uniformly to
+# training and testing data.  The only allowed value is the default — agents
+# must not propose alternative caps.
+claim_cap_thresholds = [100000]
+allow_disable_claim_capping = false
+allow_log1p_features = ["Density"]

@@ -715,6 +715,119 @@ autoresearch --track <track> --run-id <run-id> record-cycle-reflection \
 
 ---
 
+## Foundation tabular models (TabPFN) — opt-in
+
+Foundation tabular models predict by **in-context learning** (a single forward
+pass over the training rows) instead of gradient training. They are an optional,
+per-run capability — off unless the operator turns them on.
+
+**Backend choice (important on Apple Silicon).** TabPFN is GPU-bound. Two backends:
+- **`api` (recommended on a Mac)** — offloads inference to Prior Labs' GPU via
+  `tabpfn_client`. A full comparison runs in ~1-2 min. Needs `TABPFN_TOKEN` and
+  spends metered credits (see below). Set `AUTORESEARCH_TABPFN_BACKEND=api` for
+  the run, or `params.backend="api"` per recipe.
+- **`local`** — runs in-process. Benchmarked on the M3 Air: MPS crashes / is
+  pathologically slow, and CPU predict is ~10-40s per 1000 rows, so a full
+  108k-row comparison is ~1.5h — impractical. Local is only sensible for a CUDA
+  box or small-data experiments.
+
+**API credit budget.** Credits scale ~linearly with rows scored (~3-4 credits per
+scored row, all-in). The framework scores the whole frame (train, for
+calibration, **plus** search-validation) each fit, and a comparison refits ~5×
+(up to ~13× on escalation). A full-scale comparison is therefore very roughly
+**2-10M credits**; the default daily quota is 50M, so budget for **a handful of
+full comparisons per day**. Watch usage at
+<https://ux.priorlabs.ai/account/usage>. To economise, keep `max_context_rows`
+modest (the per-scored-row cost dominates, not the context) and prefer fewer,
+decisive experiments.
+
+**Enabling them (operator).**
+
+1. Install the extra. The **default is API-only and torch-free** — a thin HTTP
+   client, no local ML stack, so it cannot hit the macOS OpenMP/libomp crash and
+   is the recommended install on any Mac:
+   ```bash
+   pip install -e '.[foundation]'                 # api backend only (no torch)
+   python scripts/setup_foundation_models.py      # checks the client + Prior Labs token
+   ```
+   The only gate for the API is a **Prior Labs API key**: register at
+   <https://ux.priorlabs.ai>, accept the licence, copy the key from
+   <https://ux.priorlabs.ai/account>, and `export TABPFN_TOKEN=<key>` (put it in
+   `~/.zshenv` so non-interactive research shells inherit it).
+
+   **Local backend (optional, GPU boxes only).** `pip install -e
+   '.[foundation-local]'` adds `torch` + the local `tabpfn` for in-machine
+   inference. On Apple Silicon it is both slow and OpenMP-fragile (torch's libomp
+   clashes with LightGBM's — the framework preloads LightGBM to order the imports,
+   but the API path avoids the issue entirely by not installing torch). The local
+   backend also needs the **HuggingFace** weight gate (accept terms at
+   <https://huggingface.co/Prior-Labs/tabpfn_3> + `hf auth login`), and on
+   python.org macOS Python an SSL `CERTIFICATE_VERIFY_FAILED` in the licence check
+   is fixed once with `/Applications/Python <ver>/Install Certificates.command`.
+2. Start the run with the opt-in flag (and, on a Mac, select the API backend):
+   ```bash
+   export AUTORESEARCH_TABPFN_BACKEND=api   # recommended on Apple Silicon
+   autoresearch --track <t> --new-run bootstrap-track \
+     --model-provider <p> --model-name <m> --cycles <N> --enable-foundation-models
+   ```
+   The flag is written into `run_manifest.json`; every later command for the run
+   re-reads it. The `tabpfn` estimator then appears in the recipe menu, the
+   handoff, and validation. Without the flag (or without the extra installed) it
+   is invisible and recipes naming it are rejected. Dev override:
+   `AUTORESEARCH_FOUNDATION_MODELS=1`.
+
+**Using it (agent).** It is a normal recipe estimator:
+```json
+{"structure": "direct", "estimator": "tabpfn", "objective": "squared_error",
+ "encoding": "ordinal", "params": {"backend": "api", "max_context_rows": 20000}}
+```
+Key differences from the gradient estimators:
+- **Objective is `squared_error` only** (TabPFN has a single regression head).
+- **No early stopping.**
+- **Context is subsampled** to `max_context_rows` (default 40000, drawn with
+  probability ∝ exposure). Exposure enters through the subsample, not a sample
+  weight; framework calibration fixes the aggregate level as usual. Override the
+  strategy with `subsample_strategy: "uniform"`.
+- **Backend:** `params.backend` (`api`/`local`) or `AUTORESEARCH_TABPFN_BACKEND`.
+  On the API a fit+score is ~15-20s; locally on a Mac it is minutes-to-hours.
+- Keep `max_context_rows` modest (default 20000 on the API, 40000 local) and
+  leave budget headroom — a comparison refits ~5× and up to ~13× on escalation.
+- Strong fit for the **severity** stage of a `frequency_severity` recipe: claim
+  rows (~25k) sit under the cap and are used unsubsampled.
+- Curated params: `backend`, `max_context_rows`, `subsample_strategy`,
+  `random_state`, `n_estimators`, `device`, `predict_batch_size`, plus the
+  thinking-mode params below. Else → a script.
+
+**Thinking mode (api backend only).** Extra fit-time compute for higher precision
+(the "TabPFN-3-Plus" behaviour). Params:
+- `thinking_effort`: `"medium"` or `"high"` (setting it enables thinking).
+- `thinking_mode`: `true` = effort `"medium"` if no effort given.
+- `thinking_timeout_s`: fit budget in seconds, client-capped at 2400 (40 min).
+  This is the knob to sweep for "more thinking".
+- `thinking_metric`: what it optimises toward. **Use `"spearmanr"`** — a rank
+  metric, the closest available to exposure-weighted Gini (the promotion gate).
+  `"mse"`/`"rmse"`/`"mae"`/`"r2"`/`"smape"` are also valid but optimise a level
+  metric, not ranking, so they may not move Gini.
+
+Thinking draws from a **separate Prior Labs daily budget** and is much slower per
+fit. Because a fit can run up to 40 min, run thinking experiments under
+`--config configs/frugal_thinking.toml` (single_partition gate + `[compute]
+enforce = false`, so the framework's wall-clock alarm does not kill a long fit),
+and give the agent harness a generous command timeout. Example recipe:
+`{"structure":"direct","estimator":"tabpfn","objective":"squared_error","encoding":"ordinal","params":{"backend":"api","n_estimators":1,"max_context_rows":4000,"thinking_effort":"high","thinking_metric":"spearmanr","thinking_timeout_s":120}}`
+
+**Machine defaults.** The 40000-row default is tuned for the M2 Pro 32GB. On the
+M3 Air 16GB, set `max_context_rows` to ~15000 in the recipe. Re-run
+`scripts/benchmark_foundation.py` on a machine to confirm the fit+predict fits
+~1/5 of the compute budget before relying on a larger context.
+
+**Licence.** TabPFN weights are licensed for research / internal evaluation
+(incl. benchmarking on proprietary data) and are distributed via a gated
+HuggingFace repo (accept terms + `hf auth login`). Commercial/production use
+needs a separate Prior Labs enterprise licence — out of scope for research runs.
+
+---
+
 ## Dataset schema
 
 | Column | Role | Notes |

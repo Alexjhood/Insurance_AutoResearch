@@ -125,6 +125,15 @@ def render() -> str:
     )
     structure_list = ", ".join(f"`{s}`" for s in rmenu["structures"])
 
+    # Foundation estimators (TabPFN, ...) only appear here when the run enabled
+    # them AND the [foundation] extra is installed; when present, the agent needs
+    # the extra operating notes they carry (no early stopping, subsampled context,
+    # minutes-not-seconds per fit).
+    _foundation_present = "tabpfn" in rmenu["estimators"]
+    foundation_note = ""
+    if _foundation_present:
+        foundation_note = ""
+
     return f"""\
 <!-- GENERATED FILE — DO NOT EDIT BY HAND.
      Regenerate with: python scripts/generate_agent_contract.py
@@ -170,8 +179,10 @@ existing artifacts to infer intent.
 1. **Bootstrap (fresh run only).** First shell command — binds the run scope:
    ```bash
    autoresearch --track <t> --new-run bootstrap-track \\
-     --model-provider <provider> --model-name <model-name>
+     --model-provider <provider> --model-name <model-name> --cycles <N>
    ```
+   `--cycles <N>` pins the requested experiment budget — the framework stops
+   the run at N cycles so you never have to count.
    Capture the returned timestamped `run_id`; pass `--run-id <id>` thereafter.
    For an explicit continuation, skip bootstrap and resolve latest once with
    `start-session`, then pin the resolved id.
@@ -272,7 +283,7 @@ invalid ones are rejected before running):
 Target → objective: **pure premium** (has zeros) → tweedie/squared_error;
 **frequency** → poisson/tweedie/squared_error; **severity** (claim rows, >0) →
 gamma/squared_error. Features default to all eligible predictors; restrict with
-`model.feature_inclusions/exclusions` using names from the handoff.
+`model.feature_inclusions/exclusions` using names from the handoff.{foundation_note}
 
 ### Option B — run-local script (escape hatch, for novel models)
 
@@ -292,7 +303,10 @@ gamma/log losses need `y > 0` (split freq×sev or use Tweedie); encode categoric
 on a train-internal split only; and calibration is mandatory —
 `apply_training_calibration(pred_score, pred_train, actual_train_cost)` from
 `autoresearch.models.calibration` (factor = Σactual/Σpred). Feature names come
-from the handoff. Column constants (`from autoresearch.models.dispatcher import`):
+from the handoff — **build features only from that named list** (never sweep
+"all remaining columns" into the model; the framework strips target and id
+columns from script frames, and `score` carries no targets at all). Column
+constants (`from autoresearch.models.dispatcher import`):
 {const_lines}
 
 ## Compute budget

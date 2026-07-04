@@ -53,6 +53,8 @@ Flags:
 | `--skip-data` | No | Skip `prepare-data` even if shared data is missing |
 | `--force-data` | No | Rebuild shared data artifacts before bootstrapping |
 | `--skip-baselines` | No | Do not run the global-mean starting baseline if the registry is empty |
+| `--cycles` | No | Pin the run's cycle budget: sessions opened without `--max-cycles` default to this, so the framework stops the run at N cycles instead of trusting the agent to count |
+| `--enable-foundation-models` | No | Opt the run into foundation tabular estimators (e.g. `tabpfn`). Written to `run_manifest.json`; the estimator appears in the recipe menu/contract only when this is set **and** the `[foundation]` extra is installed (`pip install -e '.[foundation]'`; then `python scripts/setup_foundation_models.py`). See the Operating Manual "Foundation tabular models" section. |
 
 Writes the operator-declared `model_identity` into `run_manifest.json`; registry,
 the global-mean starting experiment, official champion, proposal templates, and

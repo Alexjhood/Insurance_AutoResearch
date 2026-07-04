@@ -25,6 +25,8 @@ def bootstrap_track(
     prepare_shared_data: bool = True,
     force_prepare_data: bool = False,
     run_baselines: bool = True,
+    default_max_cycles: int | None = None,
+    enable_foundation_models: bool = False,
 ) -> dict[str, Any]:
     """Prepare everything an agent needs to run an isolated research track.
 
@@ -45,6 +47,15 @@ def bootstrap_track(
     # Persist the selected run before any fallible gate so retries and harness
     # scope binding cannot fall back to a previous run.
     ensure_project_dirs(config)
+
+    if default_max_cycles is not None:
+        if default_max_cycles <= 0:
+            raise ValueError("--cycles must be a positive integer")
+        _pin_default_max_cycles(config, default_max_cycles)
+
+    _set_manifest_flag(config, "foundation_models", bool(enable_foundation_models))
+    if enable_foundation_models:
+        apply_foundation_models_gate(config)
 
     steps: list[dict[str, Any]] = []
 
@@ -159,11 +170,66 @@ def bootstrap_track(
         "track": config.track_id,
         "run_id": config.run_id,
         "run_dir": str(config.artifacts_dir),
+        "default_max_cycles": default_max_cycles,
         "registry": str(config.registry_path),
         "context": str(context_outputs["latest_context_json"]),
         "handoff": str(context_outputs["latest_handoff_markdown"]),
         "steps": steps,
     }
+
+
+def _manifest_path(config: ProjectConfig) -> Path:
+    return config.artifacts_dir / "run_manifest.json"
+
+
+def read_run_manifest(config: ProjectConfig) -> dict[str, Any]:
+    """Return the run manifest dict (empty if it does not exist yet)."""
+
+    import json
+
+    path = _manifest_path(config)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _set_manifest_flag(config: ProjectConfig, key: str, value: Any) -> None:
+    import json
+
+    manifest = read_run_manifest(config)
+    manifest[key] = value
+    _manifest_path(config).write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def _pin_default_max_cycles(config: ProjectConfig, cycles: int) -> None:
+    """Record the run's cycle budget so sessions enforce it framework-side."""
+
+    _set_manifest_flag(config, "default_max_cycles", int(cycles))
+
+
+def apply_foundation_models_gate(config: ProjectConfig) -> list[str]:
+    """Enable foundation estimators for a run that opted in.
+
+    Reads the run manifest's ``foundation_models`` flag; when set, exports
+    ``AUTORESEARCH_FOUNDATION_MODELS`` (so any in-process recipe import — now or
+    later — self-registers) and registers the estimators into the live registry
+    immediately (import-order independent). A no-op when the run did not opt in.
+    Returns the estimator names that became available.
+    """
+
+    if not read_run_manifest(config).get("foundation_models"):
+        return []
+    import os
+
+    os.environ["AUTORESEARCH_FOUNDATION_MODELS"] = "1"
+    from autoresearch.models.recipe import enable_foundation_models
+
+    return enable_foundation_models()
 
 
 def _required_prepared_data_paths(config: ProjectConfig) -> tuple[Path, ...]:

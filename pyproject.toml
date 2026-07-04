@@ -10,17 +10,36 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "duckdb>=1.0",
+  "lightgbm>=4.0",
   "matplotlib>=3.8",
   "pandas>=2.2",
   "pyarrow>=15.0",
   "scikit-learn>=1.4",
   "streamlit>=1.35",
   "tomli-w>=1.0",
+  "xgboost>=2.0",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+]
+# Foundation tabular models — API backend (default). A thin HTTP client that runs
+# TabPFN on Prior Labs' GPU; no torch, so it never loads a second OpenMP runtime
+# and cannot hit the macOS libomp clash with LightGBM (see
+# docs/internal/foundation_models_integration_plan.md). This is the recommended
+# install on any Mac. Set up with `python scripts/setup_foundation_models.py`.
+foundation = [
+  "tabpfn-client>=0.3",
+]
+# Local backend — in-machine inference on this host's CPU/GPU. Heavy (~3-4GB with
+# torch) and, on Apple Silicon, both slow and OpenMP-fragile: torch must be
+# imported before LightGBM or the interpretation surrogate segfaults (the
+# framework preloads LightGBM to enforce this). Only worth it on a CUDA box.
+foundation-local = [
+  "tabpfn>=2.5",
+  "torch>=2.6",
+  "tabpfn-client>=0.3",
 ]
 
 [project.scripts]

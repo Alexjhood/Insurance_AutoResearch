@@ -50,8 +50,10 @@ existing artifacts to infer intent.
 1. **Bootstrap (fresh run only).** First shell command — binds the run scope:
    ```bash
    autoresearch --track <t> --new-run bootstrap-track \
-     --model-provider <provider> --model-name <model-name>
+     --model-provider <provider> --model-name <model-name> --cycles <N>
    ```
+   `--cycles <N>` pins the requested experiment budget — the framework stops
+   the run at N cycles so you never have to count.
    Capture the returned timestamped `run_id`; pass `--run-id <id>` thereafter.
    For an explicit continuation, skip bootstrap and resolve latest once with
    `start-session`, then pin the resolved id.
@@ -161,6 +163,7 @@ invalid ones are rejected before running):
 - **elasticnet** — obj ['squared_error']; enc ['one_hot']
 - **hist_gbm** — obj ['gamma', 'poisson', 'squared_error']; enc ['one_hot', 'ordinal'] (early-stop)
 - **lightgbm** — obj ['gamma', 'poisson', 'squared_error', 'tweedie']; enc ['native_categorical', 'one_hot', 'ordinal'] (early-stop)
+- **tabpfn** — obj ['squared_error']; enc ['one_hot', 'ordinal']
 - **tweedie_glm** — obj ['gamma', 'poisson', 'tweedie']; enc ['one_hot']
 - **xgboost** — obj ['gamma', 'poisson', 'squared_error', 'tweedie']; enc ['one_hot', 'ordinal'] (early-stop)
 
@@ -187,7 +190,10 @@ gamma/log losses need `y > 0` (split freq×sev or use Tweedie); encode categoric
 on a train-internal split only; and calibration is mandatory —
 `apply_training_calibration(pred_score, pred_train, actual_train_cost)` from
 `autoresearch.models.calibration` (factor = Σactual/Σpred). Feature names come
-from the handoff. Column constants (`from autoresearch.models.dispatcher import`):
+from the handoff — **build features only from that named list** (never sweep
+"all remaining columns" into the model; the framework strips target and id
+columns from script frames, and `score` carries no targets at all). Column
+constants (`from autoresearch.models.dispatcher import`):
 - `EXPOSURE = "Exposure"` — offset; weights + rate->total only, never a feature
 - `CLAIM_COST = "ClaimAmountCapped"` — training target (burning-cost mode)
 - `CLAIM_COUNT = "ClaimNb"` — training target (frequency mode)

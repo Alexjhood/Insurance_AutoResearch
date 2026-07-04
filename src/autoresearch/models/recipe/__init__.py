@@ -16,8 +16,11 @@ Public API:
 
 from __future__ import annotations
 
+import os
+
 from autoresearch.models.recipe.encoders import register_builtin_encodings
 from autoresearch.models.recipe.estimators import register_builtin_estimators
+from autoresearch.models.recipe.foundation import register_foundation_estimators
 from autoresearch.models.recipe.registry import (
     RecipeError,
     list_encodings,
@@ -44,11 +47,34 @@ def _register_builtin_structures() -> None:
     register_structure("frequency_severity", "Frequency × severity two-stage model (burning cost only).")
 
 
+def _foundation_env_enabled() -> bool:
+    return os.environ.get("AUTORESEARCH_FOUNDATION_MODELS", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def enable_foundation_models() -> list[str]:
+    """Opt a run into foundation estimators (TabPFN, ...).
+
+    Registers each foundation estimator whose optional package is installed into
+    the live registry, so ``menu()``, ``validate_recipe`` and the interpreter all
+    pick them up immediately. Idempotent and import-order independent: the CLI
+    calls this once it resolves that a run enabled foundation models, regardless
+    of whether the recipe package was already imported. Returns the newly
+    available estimator names (empty if the extra is not installed).
+    """
+    return register_foundation_estimators()
+
+
 def _bootstrap() -> None:
     _register_builtin_objectives()
     register_builtin_encodings()
     register_builtin_estimators()
     _register_builtin_structures()
+    # Dev / untracked convenience: honour the env var at import time. The CLI also
+    # calls enable_foundation_models() explicitly for tracked runs (see gating).
+    if _foundation_env_enabled():
+        register_foundation_estimators()
 
 
 _bootstrap()
@@ -69,5 +95,6 @@ __all__ = [
     "register_estimator",
     "register_objective",
     "register_structure",
+    "enable_foundation_models",
     "RecipeError",
 ]
