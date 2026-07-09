@@ -65,14 +65,16 @@ def generate_fold_assignments(
     seed: int,
     *,
     partition_index: int = 0,
+    unit_column: str | None = None,
+    stratify_target: str | None = None,
+    stratify_weight: str | None = None,
+    stratify_bands: tuple[float, ...] | None = None,
 ) -> pd.DataFrame:
     """Assign deterministic stratified k-fold labels (1..n_folds) to each row.
 
-    Stratification mirrors the split-pack logic: rows are grouped into
-    claim-band × exposure-quintile strata (via ``_split_strata``) and folds
-    are assigned proportionally within each stratum so that every fold has a
-    representative share of large claims.  Falls back to unstratified
-    hash-mod assignment when the required columns are absent.
+    Stratification mirrors the split-pack logic. When ``unit_column`` names a
+    grouping column with repeated values, folds are assigned at the unit level
+    and broadcast so no unit straddles a fold boundary (group-aware CV).
     """
 
     if id_column not in frame.columns:
@@ -80,26 +82,57 @@ def generate_fold_assignments(
     if n_folds < 2:
         raise ValueError("n_folds must be at least 2")
 
-    fold_frame = pd.DataFrame({"record_id": frame[id_column]})
     effective_seed = seed + partition_index
+    grouping = (
+        bool(unit_column)
+        and unit_column in frame.columns
+        and unit_column != id_column
+        and bool(frame[unit_column].duplicated().any())
+    )
+
+    if grouping:
+        agg: dict[str, Any] = {}
+        if stratify_target and stratify_target in frame.columns:
+            agg[stratify_target] = (stratify_target, "sum")
+        if stratify_weight and stratify_weight in frame.columns:
+            agg[stratify_weight] = (stratify_weight, "sum")
+        grouped = frame.groupby(unit_column, sort=True)
+        units = grouped.agg(**agg).reset_index() if agg else pd.DataFrame({unit_column: list(grouped.groups)})
+        unit_fold = pd.DataFrame({"record_id": units[unit_column]})
+        unit_fold["fold_unit"] = unit_fold["record_id"].map(lambda v: stable_unit(v, effective_seed + 1))
+        strata = _compute_strata(units, stratify_target, stratify_weight, stratify_bands)
+        unit_fold["fold"] = _folds_within_strata(unit_fold, strata, n_folds)
+        unit_to_fold = dict(zip(units[unit_column], unit_fold["fold"]))
+        out = pd.DataFrame({"record_id": frame[id_column].to_numpy()})
+        out["fold"] = frame[unit_column].map(unit_to_fold).to_numpy()
+        return out.sort_values("record_id").reset_index(drop=True)
+
+    fold_frame = pd.DataFrame({"record_id": frame[id_column]})
     fold_frame["fold_unit"] = fold_frame["record_id"].map(lambda v: stable_unit(v, effective_seed + 1))
-
-    strata = _split_strata(frame)
-    if strata is not None:
-        fold_frame["stratum"] = strata.to_numpy()
-        assigned_folds = np.empty(len(fold_frame), dtype=int)
-        for _, group in fold_frame.groupby("stratum", sort=True):
-            ordered = group.sort_values(["fold_unit", "record_id"])
-            n_grp = len(ordered)
-            folds_grp = [i % n_folds + 1 for i in range(n_grp)]
-            assigned_folds[ordered.index] = folds_grp
-        fold_frame["fold"] = assigned_folds
-    else:
-        fold_frame = fold_frame.sort_values("fold_unit").reset_index(drop=True)
-        n = len(fold_frame)
-        fold_frame["fold"] = [i % n_folds + 1 for i in range(n)]
-
+    strata = _compute_strata(frame, stratify_target, stratify_weight, stratify_bands)
+    fold_frame["fold"] = _folds_within_strata(fold_frame, strata, n_folds)
     return fold_frame[["record_id", "fold"]].sort_values("record_id").reset_index(drop=True)
+
+
+def _folds_within_strata(fold_frame: pd.DataFrame, strata: pd.Series | None, n_folds: int) -> np.ndarray:
+    """Assign round-robin folds within each stratum (or globally when unstratified).
+
+    Returns an array aligned positionally to ``fold_frame`` rows (works for any
+    index, including the non-contiguous index of a search-partition frame).
+    """
+
+    work = fold_frame.reset_index(drop=True)
+    folds = np.empty(len(work), dtype=int)
+    if strata is not None:
+        work = work.copy()
+        work["stratum"] = np.asarray(strata)
+        for _, group in work.groupby("stratum", sort=True):
+            ordered = group.sort_values(["fold_unit", "record_id"])
+            folds[ordered.index.to_numpy()] = [i % n_folds + 1 for i in range(len(ordered))]
+    else:
+        ordered = work.sort_values("fold_unit")
+        folds[ordered.index.to_numpy()] = [i % n_folds + 1 for i in range(len(ordered))]
+    return folds
 
 
 def generate_split_pack(
@@ -107,8 +140,21 @@ def generate_split_pack(
     id_column: str,
     ratios: dict[str, float],
     seed: int,
+    *,
+    unit_column: str | None = None,
+    stratify_target: str | None = None,
+    stratify_weight: str | None = None,
+    stratify_bands: tuple[float, ...] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Generate and describe persistent split definitions."""
+    """Generate and describe persistent split definitions.
+
+    When ``unit_column`` names a grouping column with repeated values (e.g. an
+    AllState ``Household_ID``), splitting is *group-aware*: every row of a unit
+    follows that unit into the same split, so no unit straddles the boundary.
+    Stratification reads ``stratify_target``/``stratify_weight`` when given,
+    otherwise auto-detects the French claim/exposure columns for byte-identical
+    backward compatibility.
+    """
 
     validate_split_ratios(ratios)
     if id_column not in frame.columns:
@@ -116,9 +162,23 @@ def generate_split_pack(
     if frame[id_column].duplicated().any():
         raise ValueError(f"Split id column {id_column!r} must be unique")
 
+    grouping = (
+        bool(unit_column)
+        and unit_column in frame.columns
+        and unit_column != id_column
+        and bool(frame[unit_column].duplicated().any())
+    )
+
+    if grouping:
+        return _generate_grouped_split_pack(
+            frame, id_column, unit_column, ratios, seed,
+            stratify_target=stratify_target, stratify_weight=stratify_weight,
+            stratify_bands=stratify_bands,
+        )
+
     split_frame = pd.DataFrame({"record_id": frame[id_column]})
     split_frame["split_unit"] = split_frame["record_id"].map(lambda value: stable_unit(value, seed))
-    strata = _split_strata(frame)
+    strata = _compute_strata(frame, stratify_target, stratify_weight, stratify_bands)
     if strata is None:
         split_frame["split"] = split_frame["split_unit"].map(lambda value: assign_split(value, ratios))
         split_method = "stable_hash"
@@ -129,10 +189,62 @@ def generate_split_pack(
     split_frame = split_frame.sort_values("record_id").reset_index(drop=True)
 
     counts = split_frame["split"].value_counts().reindex(SPLIT_ORDER, fill_value=0)
+    manifest = _split_manifest(seed, id_column, split_method, strata, ratios, counts, unit_column=None)
+    return split_frame, manifest
+
+
+def _generate_grouped_split_pack(
+    frame: pd.DataFrame,
+    id_column: str,
+    unit_column: str,
+    ratios: dict[str, float],
+    seed: int,
+    *,
+    stratify_target: str | None,
+    stratify_weight: str | None,
+    stratify_bands: tuple[float, ...] | None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Assign splits at the unit level and broadcast to every row of the unit."""
+
+    # One row per unit, with the unit's aggregated target/weight for strata.
+    agg: dict[str, Any] = {}
+    if stratify_target and stratify_target in frame.columns:
+        agg[stratify_target] = (stratify_target, "sum")
+    if stratify_weight and stratify_weight in frame.columns:
+        agg[stratify_weight] = (stratify_weight, "sum")
+    grouped = frame.groupby(unit_column, sort=True)
+    units = grouped.agg(**agg).reset_index() if agg else pd.DataFrame({unit_column: list(grouped.groups)})
+
+    unit_assign = pd.DataFrame({"unit": units[unit_column]})
+    unit_assign["split_unit"] = unit_assign["unit"].map(lambda value: stable_unit(value, seed))
+    strata = _compute_strata(units, stratify_target, stratify_weight, stratify_bands)
+    if strata is None:
+        unit_assign["split"] = unit_assign["split_unit"].map(lambda value: assign_split(value, ratios))
+        split_method = "grouped_stable_hash"
+    else:
+        unit_assign["split_stratum"] = strata.to_numpy()
+        unit_assign = unit_assign.rename(columns={"unit": "record_id"})
+        unit_assign["split"] = _assign_stratified_splits(unit_assign, ratios)
+        unit_assign = unit_assign.rename(columns={"record_id": "unit"})
+        split_method = "grouped_target_stratified_hash"
+
+    unit_to_split = dict(zip(unit_assign["unit"], unit_assign["split"]))
+    split_frame = pd.DataFrame({"record_id": frame[id_column].to_numpy()})
+    split_frame["split"] = frame[unit_column].map(unit_to_split).to_numpy()
+    split_frame = split_frame.sort_values("record_id").reset_index(drop=True)
+
+    counts = split_frame["split"].value_counts().reindex(SPLIT_ORDER, fill_value=0)
+    manifest = _split_manifest(seed, id_column, split_method, strata, ratios, counts, unit_column=unit_column)
+    manifest["unit_count"] = int(len(unit_assign))
+    return split_frame, manifest
+
+
+def _split_manifest(seed, id_column, split_method, strata, ratios, counts, *, unit_column):
     manifest = {
         "split_pack_version": 2,
         "seed": seed,
         "id_column": id_column,
+        "split_unit_column": unit_column or "record_id",
         "split_method": split_method,
         "stratification": _stratification_manifest(strata),
         "ratios": {name: ratios[name] for name in SPLIT_ORDER},
@@ -145,7 +257,7 @@ def generate_split_pack(
             "search_validation for search-time scoring."
         ),
     }
-    return split_frame, manifest
+    return manifest
 
 
 def _assign_stratified_splits(split_frame: pd.DataFrame, ratios: dict[str, float]) -> pd.Series:
@@ -173,6 +285,54 @@ def _proportional_counts(n_rows: int, ratios: dict[str, float]) -> dict[str, int
     for split in order[:remaining]:
         counts[split] += 1
     return counts
+
+
+def _compute_strata(
+    frame: pd.DataFrame,
+    stratify_target: str | None,
+    stratify_weight: str | None,
+    stratify_bands: tuple[float, ...] | None,
+) -> pd.Series | None:
+    """Choose the stratification for a frame.
+
+    The French claim/exposure auto-detection is preferred whenever those columns
+    are present (reproducing the historical split byte-for-byte); otherwise a
+    generic zero-band + target-quantile stratification keyed on the configured
+    ``stratify_target`` (crossed with a weight quantile band when available).
+    """
+
+    legacy = _split_strata(frame)
+    if legacy is not None and stratify_target in (None, "ClaimAmount", "ClaimAmountCapped"):
+        return legacy
+    if stratify_target and stratify_target in frame.columns:
+        return _generic_strata(frame, stratify_target, stratify_weight, stratify_bands)
+    return legacy
+
+
+def _generic_strata(
+    frame: pd.DataFrame,
+    target_col: str,
+    weight_col: str | None,
+    bands: tuple[float, ...] | None,
+) -> pd.Series:
+    """Zero-band + quantile target strata, optionally crossed with a weight band."""
+
+    target = frame[target_col].astype(float).clip(lower=0)
+    if bands:
+        edges = [-float("inf"), *[float(b) for b in bands], float("inf")]
+        target_band = pd.cut(target, bins=edges, labels=False, include_lowest=True)
+        target_band = target_band.fillna(-1).astype(int).map(lambda v: f"t_{v}")
+    else:
+        target_band = pd.Series("zero", index=frame.index, dtype="object")
+        positive = target > 0
+        if positive.any():
+            pos_bands = _quantile_band(target[positive], 8, "tpos")
+            target_band.loc[positive] = pos_bands
+    if weight_col and weight_col in frame.columns and frame[weight_col].nunique(dropna=True) > 1:
+        weight_band = _quantile_band(frame[weight_col].astype(float).clip(lower=0), 5, "w")
+    else:
+        weight_band = pd.Series("w_all", index=frame.index, dtype="object")
+    return target_band.astype(str) + "|" + weight_band.astype(str)
 
 
 def _split_strata(frame: pd.DataFrame) -> pd.Series | None:
