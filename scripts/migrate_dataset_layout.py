@@ -59,6 +59,34 @@ def _move_tree(src: Path, dst: Path, *, dry_run: bool) -> list[str]:
     return actions
 
 
+def _migrate_memory(*, dry_run: bool) -> list[str]:
+    """Move an unscoped cross-run memory store into the french_motor/ subfolder.
+
+    The store lives outside the working tree; existing insights predate
+    multi-dataset support and belong to French. The recipe ledger
+    (``recipes.jsonl``) stays at the root (it is not dataset-scoped)."""
+
+    actions: list[str] = []
+    try:
+        from autoresearch.memory.store import memory_root
+    except Exception:
+        return actions
+    root = memory_root()  # unscoped
+    dest = root / "french_motor"
+    for name in ("memory.sqlite", "playbook"):
+        src = root / name
+        if not src.exists():
+            continue
+        target = dest / name
+        if target.exists():
+            continue
+        actions.append(f"move {src} -> {target}")
+        if not dry_run:
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(target))
+    return actions
+
+
 def migrate(dry_run: bool = False) -> dict:
     actions: list[str] = []
     DEST.mkdir(parents=True, exist_ok=True)
@@ -96,6 +124,9 @@ def migrate(dry_run: bool = False) -> dict:
             f"ABORT: split pack hash changed during migration "
             f"({pre_hash} -> {post_hash}). No regeneration should have occurred."
         )
+
+    # 3b. Move existing (unscoped) cross-run memory into the french_motor scope.
+    actions += _migrate_memory(dry_run=dry_run)
 
     # 4. Backfill dataset pin into existing run manifests.
     tracks = PROJECT_ROOT / "artifacts" / "tracks"

@@ -488,7 +488,7 @@ def render_handoff_markdown(
     _memory_access = resolve_memory_access(config)
     _playbook_link_lines: list[str] = []
     if _memory_access in ("own", "all"):
-        _playbook_base = default_playbook_dir()
+        _playbook_base = default_playbook_dir(config.dataset_name)
         _suffix = ""
         if _memory_access == "own":
             manifest_path = config.artifacts_dir / "run_manifest.json"

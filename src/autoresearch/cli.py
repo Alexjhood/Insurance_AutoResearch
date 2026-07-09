@@ -556,7 +556,7 @@ def _cmd_memory(config, args) -> int:
     from autoresearch.memory.harvester import harvest_all, harvest_run
     from autoresearch.memory.store import default_memory_store_path, init_memory_store, memory_store_counts
 
-    memory_path = default_memory_store_path()
+    memory_path = default_memory_store_path(config.dataset_name)
     sub = getattr(args, "memory_subcommand", None)
 
     if sub == "harvest":

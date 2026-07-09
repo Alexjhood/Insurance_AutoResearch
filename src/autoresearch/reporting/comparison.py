@@ -204,6 +204,10 @@ def write_comparison_html_report(
         diag_data=diag_data,
         interp_data=interp_data,
     )
+    # Cosmetic: swap the currency symbol for the active dataset's (£ default).
+    currency = getattr(getattr(config.dataset, "reporting", None), "currency", "£")
+    if currency != "£":
+        html = html.replace("£", currency)
     output_path.write_text(html, encoding="utf-8")
     return output_path
 

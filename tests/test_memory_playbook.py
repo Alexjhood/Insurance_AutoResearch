@@ -164,6 +164,7 @@ def _make_cfg_with_access(tmp_path: Path, access: str) -> MagicMock:
     cfg.registry_path = tmp_path / "registry.sqlite"
     cfg.track_id = "t"
     cfg.run_id = "r"
+    cfg.dataset_name = "french_motor"
     cfg.target_mode = "burning_cost"
     cfg.primary_metric = "gini_weighted"
     cfg.ordinary_train_split = "train"
@@ -199,9 +200,10 @@ def test_handoff_markdown_no_playbook_link_when_access_none(tmp_path: Path) -> N
 def test_handoff_markdown_links_playbook_when_access_all(tmp_path: Path) -> None:
     from autoresearch.controller.handoff import render_handoff_markdown
 
-    # Create a real playbook file at the resolved (out-of-tree) memory location.
+    # Create a real playbook file at the resolved (out-of-tree) memory location,
+    # dataset-scoped under the active dataset.
     mem_dir = tmp_path / "mem"
-    playbook_dir = mem_dir / "playbook"
+    playbook_dir = mem_dir / "french_motor" / "playbook"
     playbook_dir.mkdir(parents=True)
     (playbook_dir / "latest.md").write_text("# Playbook content", encoding="utf-8")
 

@@ -133,7 +133,7 @@ def assert_no_holdout_columns(path: Path) -> None:
                 raise AssertionError(f"Holdout-derived columns found in {table}: {leaks}")
 
 
-def memory_root() -> Path:
+def memory_root(dataset: str | None = None) -> Path:
     """Resolve the cross-run memory directory.
 
     By default this lives OUTSIDE the repository working tree, so per-run agents
@@ -145,18 +145,23 @@ def memory_root() -> Path:
     """
     env = os.environ.get("AUTORESEARCH_MEMORY_DIR", "").strip()
     if env:
-        return Path(env).expanduser()
-    from autoresearch.config import PROJECT_ROOT
+        base = Path(env).expanduser()
+    else:
+        from autoresearch.config import PROJECT_ROOT
 
-    project_name = PROJECT_ROOT.name or "default"
-    return Path.home() / ".autoresearch" / project_name / "memory"
+        project_name = PROJECT_ROOT.name or "default"
+        base = Path.home() / ".autoresearch" / project_name / "memory"
+    # Dataset-scope the store: insights ("num_leaves 63 beats 31") and the
+    # structural-insight threshold are dataset-specific, so a run only sees its
+    # own dataset's memory.
+    return base / dataset if dataset else base
 
 
-def default_memory_store_path() -> Path:
+def default_memory_store_path(dataset: str | None = None) -> Path:
     """Default path to the cross-run aggregator database (outside the working tree)."""
-    return memory_root() / "memory.sqlite"
+    return memory_root(dataset) / "memory.sqlite"
 
 
-def default_playbook_dir() -> Path:
+def default_playbook_dir(dataset: str | None = None) -> Path:
     """Default directory for the regenerated playbook (outside the working tree)."""
-    return memory_root() / "playbook"
+    return memory_root(dataset) / "playbook"

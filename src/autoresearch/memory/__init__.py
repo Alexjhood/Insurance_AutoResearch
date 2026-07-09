@@ -73,7 +73,7 @@ def _record_checkpoint_failure(config: "ProjectConfig", exc: Exception) -> None:
         results_dir.mkdir(parents=True, exist_ok=True)
         payload = {
             "error": f"{type(exc).__name__}: {exc}",
-            "memory_path": str(default_memory_store_path()),
+            "memory_path": str(default_memory_store_path(getattr(config, "dataset_name", None))),
             "track_id": getattr(config, "track_id", ""),
             "run_id": getattr(config, "run_id", ""),
             "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -94,7 +94,7 @@ def _record_checkpoint_failure(config: "ProjectConfig", exc: Exception) -> None:
 def _run_checkpoint(config: "ProjectConfig") -> None:
     from autoresearch.memory import harvester
 
-    memory_path = default_memory_store_path()
+    memory_path = default_memory_store_path(getattr(config, "dataset_name", None))
     manifest_path = config.artifacts_dir / "run_manifest.json"
     if not manifest_path.exists():
         return
