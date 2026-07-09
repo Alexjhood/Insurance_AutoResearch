@@ -9,6 +9,11 @@ registry_path = "artifacts/experiment_registry.sqlite"
 
 [data]
 random_seed = 20260524
+# Dataset selected when neither --dataset nor a run manifest pins one. Every
+# dataset-specific setting (columns, cap, targets, paths) lives in
+# configs/datasets/<name>.toml. id_column is kept only as a legacy fallback for
+# any direct reader; the active value comes from the dataset spec.
+default_dataset = "french_motor"
 id_column = "IDpol"
 agent_dataset_name = "agent_dataset"
 

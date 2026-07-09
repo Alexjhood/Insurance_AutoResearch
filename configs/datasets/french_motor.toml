@@ -1,0 +1,61 @@
+# French Motor TPL (freMTPL2) — the historical default dataset.
+# Values are lifted verbatim from the pre-multi-dataset default.toml so French
+# behaviour (columns, cap, split pack, metric keys) is byte-for-byte unchanged.
+[dataset]
+name = "french_motor"
+display_name = "French Motor TPL (freMTPL2)"
+default_target_mode = "burning_cost"
+
+[source]
+loader = "adapter"
+adapter_module = "autoresearch.data.adapters.french_motor"
+raw_dir = "data/datasets/french_motor/raw"
+id_column = "IDpol"
+
+[columns]
+weight = "Exposure"                 # true policy-year offset/weight
+count = "ClaimNb"                   # enables frequency and frequency_severity recipes
+event_count = "ClaimAmountCount"    # joined severity-file claim count
+non_predictive = ["Exposure", "IDpol", "record_id"]
+
+[preprocessing.cap]
+column = "ClaimAmount"
+output_column = "ClaimAmountCapped"
+threshold = 100000
+fixed = true
+
+[splits]
+unit_column = "record_id"
+stratify_target = "ClaimAmount"
+stratify_weight = "Exposure"
+
+[[targets]]
+mode = "burning_cost"
+source_column = "ClaimAmountCapped"
+weight = "Exposure"
+population = "all"
+rate_label = "pure premium"
+entity_label = "claim_cost"
+default = true
+
+[[targets]]
+mode = "frequency"
+source_column = "ClaimNb"
+weight = "Exposure"
+population = "all"
+rate_label = "claim frequency"
+entity_label = "claim_count"
+
+[[targets]]
+mode = "severity"
+source_column = "ClaimAmountCapped"
+weight = "ClaimAmountCount"
+population = { positive_column = "ClaimAmountCount" }
+rate_label = "severity"
+entity_label = "claim_cost"
+
+[memory]
+structural_gini_threshold = 0.37
+
+[reporting]
+currency = "£"

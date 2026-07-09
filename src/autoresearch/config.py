@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import copy
 import json
 from pathlib import Path
 import re
 import tomllib
 
+from autoresearch.datasets import DatasetSpec, dataset_data_dir, load_dataset_spec
 from autoresearch.targets import BURNING_COST, normalise_target_mode
 
 
@@ -16,6 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "default.toml"
 AGENT_TRACK_IDS = {"codex", "claude", "opencode"}
 RUN_ID_TIMESTAMP_RE = re.compile(r"^\d{8}T\d{6}Z$")
+DEFAULT_DATASET = "french_motor"
 
 
 @dataclass(frozen=True)
@@ -115,6 +118,13 @@ class ProjectConfig:
     recipe_reuse_scope: str = "run"
     # Whether this command should move artifacts/tracks/<track>/latest_run.json.
     update_latest_run: bool = True
+    # Active dataset spec. Defaults to French so ProjectConfig objects built
+    # directly in tests (with French columns) keep working unchanged.
+    dataset: DatasetSpec = field(default_factory=lambda: load_dataset_spec(DEFAULT_DATASET))
+
+    @property
+    def dataset_name(self) -> str:
+        return self.dataset.name
 
 
 def _resolve(root: Path, value: str) -> Path:
@@ -122,11 +132,37 @@ def _resolve(root: Path, value: str) -> Path:
     return path if path.is_absolute() else root / path
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Return a deep-merged copy of *base* with *override* applied on top."""
+
+    result = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
+def _read_manifest_dataset(manifest_path: Path) -> str | None:
+    """Return the dataset pinned in a run manifest, if any."""
+
+    if not manifest_path.exists():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = payload.get("dataset")
+    return str(value) if value else None
+
+
 def load_config(
     config_path: str | Path | None = None,
     track_id: str | None = None,
     run_id: str | None = None,
     new_run: bool = False,
+    dataset: str | None = None,
 ) -> "ProjectConfig":
     """Load TOML config and resolve all project paths.
 
@@ -190,7 +226,9 @@ def load_config(
         handoff_proposal_processed_dir = run_base / "proposal_processed"
         handoff_results_dir = run_base / "results"
         handoff_handoffs_dir = run_base / "handoffs"
+        manifest_dataset = _read_manifest_dataset(run_base / "run_manifest.json")
     else:
+        manifest_dataset = None
         artifacts_dir = base_artifacts
         registry_path = _resolve(PROJECT_ROOT, paths["registry_path"])
         research_log_path = PROJECT_ROOT / "docs" / "RESEARCH_LOG.md"
@@ -201,13 +239,57 @@ def load_config(
         handoff_results_dir = _resolve(PROJECT_ROOT, handoff["results_dir"])
         handoff_handoffs_dir = _resolve(PROJECT_ROOT, handoff["handoffs_dir"])
 
+    # --- Resolve the active dataset: explicit flag > run manifest > default ---
+    default_dataset = str(data.get("default_dataset", DEFAULT_DATASET))
+    if dataset and manifest_dataset and dataset != manifest_dataset:
+        raise ValueError(
+            f"--dataset {dataset!r} contradicts run {resolved_run!r} which is pinned "
+            f"to dataset {manifest_dataset!r}. Omit --dataset to use the pinned dataset."
+        )
+    dataset_name = dataset or manifest_dataset or default_dataset
+    dataset_spec = load_dataset_spec(dataset_name)
+
+    # Deep-merge the dataset's [overrides.<section>] tables over framework defaults.
+    for section, override in dataset_spec.overrides.items():
+        if section == "compute":
+            compute_cfg = _deep_merge(compute_cfg, override)
+        elif section == "evaluation":
+            evaluation = _deep_merge(evaluation, override)
+        elif section == "screening":
+            screening_cfg = _deep_merge(screening_cfg, override)
+        elif section == "promotion":
+            promotion = _deep_merge(promotion, override)
+        elif section == "resampling":
+            resampling = _deep_merge(resampling, override)
+        elif section == "memory":
+            memory_cfg = _deep_merge(memory_cfg, override)
+
+    # Per-dataset data paths under data/datasets/<name>/…
+    data_dir = dataset_data_dir(dataset_name)
+    dataset_processed_dir = data_dir / "processed"
+    dataset_metadata_dir = data_dir / "metadata"
+    dataset_splits_dir = data_dir / "splits"
+    dataset_holdout_vault_dir = data_dir / "holdout_vault"
+
+    # Capping and cross-run threshold come from the dataset spec.
+    cap = dataset_spec.cap
+    claim_capping_enabled = cap is not None
+    claim_cap_threshold = float(cap.threshold) if cap is not None else float(
+        preprocessing.get("claim_cap_threshold", 100000)
+    )
+    structural_threshold = (
+        dataset_spec.structural_gini_threshold
+        if dataset_spec.structural_gini_threshold is not None
+        else float(memory_cfg.get("structural_gini_threshold", 0.37))
+    )
+
     return ProjectConfig(
         root=PROJECT_ROOT,
-        raw_data_dir=_resolve(PROJECT_ROOT, paths["raw_data_dir"]),
-        processed_dir=_resolve(PROJECT_ROOT, paths["processed_dir"]),
-        holdout_vault_dir=_resolve(PROJECT_ROOT, paths.get("holdout_vault_dir", "data/holdout_vault")),
-        metadata_dir=_resolve(PROJECT_ROOT, paths["metadata_dir"]),
-        splits_dir=_resolve(PROJECT_ROOT, paths["splits_dir"]),
+        raw_data_dir=dataset_spec.raw_dir,
+        processed_dir=dataset_processed_dir,
+        holdout_vault_dir=dataset_holdout_vault_dir,
+        metadata_dir=dataset_metadata_dir,
+        splits_dir=dataset_splits_dir,
         artifacts_dir=artifacts_dir,
         registry_path=registry_path,
         research_log_path=research_log_path,
@@ -215,10 +297,10 @@ def load_config(
         run_id=resolved_run,
         track_base_dir=track_base,
         random_seed=int(data["random_seed"]),
-        id_column=str(data["id_column"]),
+        id_column=dataset_spec.id_column,
         agent_dataset_name=str(data["agent_dataset_name"]),
-        claim_capping_enabled=bool(preprocessing["claim_capping_enabled"]),
-        claim_cap_threshold=float(preprocessing["claim_cap_threshold"]),
+        claim_capping_enabled=claim_capping_enabled,
+        claim_cap_threshold=claim_cap_threshold,
         split_ratios={key: float(value) for key, value in splits.items()},
         ordinary_train_split=str(evaluation["ordinary_train_split"]),
         ordinary_eval_splits=tuple(str(value) for value in evaluation["ordinary_eval_splits"]),
@@ -275,9 +357,10 @@ def load_config(
         screening_confidence_level=float(screening_cfg.get("confidence_level", 0.90)),
         screening_min_bootstrap_rows=int(screening_cfg.get("min_bootstrap_rows", 30)),
         running_stale_minutes=int(raw.get("handoff", {}).get("running_stale_minutes", 30)),
-        structural_gini_threshold=float(memory_cfg.get("structural_gini_threshold", 0.37)),
+        structural_gini_threshold=structural_threshold,
         recipe_reuse_scope=str(recipes_cfg.get("reuse_scope", "run")).strip().lower(),
         update_latest_run=update_latest_run,
+        dataset=dataset_spec,
     )
 
 
@@ -326,6 +409,7 @@ def ensure_project_dirs(config: ProjectConfig) -> None:
                 "track_id": config.track_id,
                 "run_id": config.run_id,
                 "run_dir": str(config.artifacts_dir),
+                "dataset": config.dataset_name,
                 "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "memory_access": _memory_access,
             }

@@ -1,0 +1,57 @@
+# AllState Claim Prediction Challenge — the default ~2M-row household sample.
+# Shares its raw dir with allstate_full; the two differ only downstream via
+# [source.sample].
+[dataset]
+name = "allstate"
+display_name = "AllState Claim Prediction (2M household sample)"
+default_target_mode = "pure_premium"
+
+[source]
+loader = "single_table"
+raw_dir = "data/datasets/allstate/raw"
+train_file_pattern = "train_set*"     # unlabelled test_set.csv is ignored
+id_column = "Row_ID"
+na_values = ["?"]
+
+[source.sample]
+rows = 2000000
+unit_column = "Household_ID"          # sample whole households — no leakage
+stratify_column = "Claim_Amount"      # preserve the ~0.8% claim tail
+seed = 20260709
+
+[columns]
+# no weight → unit weight synthesised
+non_predictive = ["Row_ID", "Household_ID", "record_id"]
+derived = [{ name = "claim_occurred", expr = "Claim_Amount > 0" }]
+
+[splits]
+unit_column = "Household_ID"
+stratify_target = "Claim_Amount"
+
+[[targets]]
+mode = "pure_premium"
+source_column = "Claim_Amount"
+weight = "unit"
+population = "all"
+rate_label = "pure premium"
+entity_label = "claim_cost"
+default = true
+
+[[targets]]
+mode = "severity"
+source_column = "Claim_Amount"
+weight = "unit"
+population = { positive_column = "claim_occurred" }
+rate_label = "severity"
+entity_label = "claim_cost"
+
+[[targets]]
+mode = "claim_incidence"
+source_column = "claim_occurred"
+weight = "unit"
+population = "all"
+rate_label = "claim incidence rate"
+entity_label = "claim_indicator"
+
+[reporting]
+currency = "$"

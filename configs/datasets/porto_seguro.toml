@@ -1,0 +1,31 @@
+# Porto Seguro Safe Driver Prediction — binary target as generic rate regression.
+[dataset]
+name = "porto_seguro"
+display_name = "Porto Seguro Safe Driver"
+default_target_mode = "claim_incidence"
+
+[source]
+loader = "single_table"
+raw_dir = "data/datasets/porto_seguro/raw"
+train_file_pattern = "train*"          # unlabelled test.csv is ignored
+id_column = "id"
+# -1 is the published missing marker; recode to NaN only in *_cat columns where
+# native-categorical handling benefits. Numeric -1 stays visible (its
+# missingness is informative and models can exploit it either way).
+na_marker = { value = -1, columns_matching = "_cat$" }
+
+[columns]
+non_predictive = ["id", "record_id"]
+
+[splits]
+unit_column = "record_id"
+stratify_target = "target"
+
+[[targets]]
+mode = "claim_incidence"
+source_column = "target"
+weight = "unit"
+population = "all"
+rate_label = "claim probability"
+entity_label = "claim_indicator"
+default = true

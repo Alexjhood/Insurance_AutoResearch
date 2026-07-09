@@ -84,6 +84,45 @@ def _cmd_prepare_data(config, args) -> int:
     return 0
 
 
+def _cmd_list_datasets(config, args) -> int:
+    from autoresearch.datasets import list_datasets, load_dataset_spec
+
+    names = list_datasets()
+    if not names:
+        print("No datasets registered under configs/datasets/.")
+        return 0
+    active = config.dataset_name
+    for name in names:
+        try:
+            spec = load_dataset_spec(name)
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"{name}\t<invalid: {exc}>")
+            continue
+        prepared = (spec.data_dir / "splits" / "split_pack.csv").exists()
+        marker = "*" if name == active else " "
+        rows = _dataset_prepared_rows(spec)
+        print(
+            f"{marker} {name}\t{spec.display_name}\t"
+            f"target={spec.default_target_mode}\tmodes={','.join(spec.target_modes)}\t"
+            f"weight={spec.weight_display_name}\t"
+            f"prepared={'yes' if prepared else 'no'}{rows}"
+        )
+    return 0
+
+
+def _dataset_prepared_rows(spec) -> str:
+    manifest = spec.data_dir / "splits" / "split_pack_manifest.json"
+    if not manifest.exists():
+        return ""
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        counts = payload.get("counts", {})
+        total = sum(int(v) for v in counts.values())
+        return f"\trows={total}"
+    except Exception:
+        return ""
+
+
 def _inject_identity(config, args):
     """Return config with model identity injected from args if provided."""
     provider = getattr(args, "model_provider", None)
@@ -817,6 +856,7 @@ def _cmd_list_tracks(config, args) -> int:
 
 COMMANDS = {
     "prepare-data": _cmd_prepare_data,
+    "list-datasets": _cmd_list_datasets,
     "bootstrap-track": _cmd_bootstrap_track,
     "init-registry": _cmd_init_registry,
     "run-baseline": _cmd_run_baseline,
@@ -898,9 +938,23 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override the configured evaluation target. Default is burning_cost unless the config says otherwise.",
     )
+    parser.add_argument(
+        "--dataset",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Registered dataset to operate on (see `list-datasets`). Defaults to "
+            "the dataset pinned in the run manifest, or french_motor. Passing a "
+            "value that contradicts an existing run's pinned dataset is an error."
+        ),
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("prepare-data", help="Build Phase 1 data artifacts.")
+    subparsers.add_parser(
+        "list-datasets",
+        help="List registered datasets (configs/datasets/*.toml) with target modes and prepared status.",
+    )
     bootstrap = subparsers.add_parser(
         "bootstrap-track",
         help="Prepare data, the global-mean starting baseline, champion, templates, and context for a named track.",
@@ -1195,6 +1249,7 @@ def main(argv: list[str] | None = None) -> int:
         track_id=getattr(args, "track", None),
         run_id=getattr(args, "run_id", None),
         new_run=getattr(args, "new_run", False),
+        dataset=getattr(args, "dataset", None),
     )
     if getattr(args, "target_mode", None):
         config = replace(config, target_mode=args.target_mode)

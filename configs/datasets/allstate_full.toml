@@ -1,0 +1,55 @@
+# AllState Claim Prediction Challenge — the full 13.2M-row variant.
+# Identical to allstate.toml minus [source.sample], with enlarged compute
+# budgets. Shares the same raw dir as allstate.
+[dataset]
+name = "allstate_full"
+display_name = "AllState Claim Prediction (full 13.2M rows)"
+default_target_mode = "pure_premium"
+
+[source]
+loader = "single_table"
+raw_dir = "data/datasets/allstate/raw"   # shared with the sampled allstate variant
+train_file_pattern = "train_set*"
+id_column = "Row_ID"
+na_values = ["?"]
+
+[columns]
+non_predictive = ["Row_ID", "Household_ID", "record_id"]
+derived = [{ name = "claim_occurred", expr = "Claim_Amount > 0" }]
+
+[splits]
+unit_column = "Household_ID"
+stratify_target = "Claim_Amount"
+
+[[targets]]
+mode = "pure_premium"
+source_column = "Claim_Amount"
+weight = "unit"
+population = "all"
+rate_label = "pure premium"
+entity_label = "claim_cost"
+default = true
+
+[[targets]]
+mode = "severity"
+source_column = "Claim_Amount"
+weight = "unit"
+population = { positive_column = "claim_occurred" }
+rate_label = "severity"
+entity_label = "claim_cost"
+
+[[targets]]
+mode = "claim_incidence"
+source_column = "claim_occurred"
+weight = "unit"
+population = "all"
+rate_label = "claim incidence rate"
+entity_label = "claim_indicator"
+
+[reporting]
+currency = "$"
+
+[overrides.compute]
+base_budget_minutes = 40
+budget_increment_minutes = 15
+preflight_sample_rows = 20000
