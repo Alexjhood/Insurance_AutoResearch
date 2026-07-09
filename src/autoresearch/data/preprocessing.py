@@ -25,6 +25,21 @@ def apply_claim_capping(
     """
 
     if claim_column not in frame.columns:
+        # Datasets without a cap (no exposure/claim-amount column) flow through
+        # the same call sites with capping disabled — treat a missing column as a
+        # clean no-op rather than an error. An *enabled* cap on a missing column
+        # is still a real misconfiguration and raises.
+        if not enabled:
+            return frame, {
+                "claim_capping_enabled": False,
+                "claim_cap_threshold": float(threshold),
+                "source_claim_column": claim_column,
+                "output_claim_column": output_column,
+                "row_count": int(len(frame)),
+                "capped_row_count": 0,
+                "capped_row_rate": 0.0,
+                "skipped_reason": f"claim column {claim_column!r} not present; capping disabled",
+            }
         raise ValueError(f"Claim column {claim_column!r} is not present")
     if threshold <= 0:
         raise ValueError("Claim cap threshold must be positive")

@@ -248,6 +248,17 @@ def load_config(
         )
     dataset_name = dataset or manifest_dataset or default_dataset
     dataset_spec = load_dataset_spec(dataset_name)
+    # Bind the active dataset so targets.target_spec()/normalise_target_mode()
+    # — called with no dataset argument by the protected evaluation stack —
+    # resolve this dataset's modes/columns. The model-layer column constants and
+    # the feature policy bind here too.
+    from autoresearch import feature_policy as _feature_policy
+    from autoresearch import targets as _targets
+    from autoresearch.models import columns as _model_columns
+
+    _targets.bind_dataset(dataset_spec)
+    _model_columns.bind(dataset_spec)
+    _feature_policy.bind(dataset_spec)
 
     # Deep-merge the dataset's [overrides.<section>] tables over framework defaults.
     for section, override in dataset_spec.overrides.items():
@@ -304,7 +315,7 @@ def load_config(
         split_ratios={key: float(value) for key, value in splits.items()},
         ordinary_train_split=str(evaluation["ordinary_train_split"]),
         ordinary_eval_splits=tuple(str(value) for value in evaluation["ordinary_eval_splits"]),
-        target_mode=normalise_target_mode(evaluation.get("target_mode", BURNING_COST)),
+        target_mode=normalise_target_mode(dataset_spec.default_target_mode, dataset_spec),
         primary_metric=str(evaluation.get("primary_metric", "tweedie_deviance_p15")),
         tweedie_power=float(evaluation.get("tweedie_power", 1.5)),
         use_cv=bool(evaluation.get("use_cv", False)),

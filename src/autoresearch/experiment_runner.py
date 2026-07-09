@@ -53,7 +53,7 @@ def _compute_budget_alarm(budget_sec: float | None):
 
 from autoresearch.config import ProjectConfig, ensure_project_dirs
 from autoresearch.data.holdout_vault import load_search_dataset
-from autoresearch.data.preprocessing import apply_claim_capping
+from autoresearch.data.preprocessing import DEFAULT_CAPPED_COLUMN, apply_claim_capping
 from autoresearch.evaluation.metrics import evaluate_predictions
 from autoresearch.experiment_registry.registry import init_registry, record_experiment
 from autoresearch.models.dispatcher import (
@@ -154,11 +154,14 @@ def run_experiment(
     preprocessing = exp.get("preprocessing", {})
     cap_enabled = bool(preprocessing.get("claim_capping_enabled", config.claim_capping_enabled))
     cap_threshold = float(preprocessing.get("claim_cap_threshold", config.claim_cap_threshold))
+    cap_column = config.dataset.cap.column if config.dataset.cap is not None else RAW_CLAIM_COST
+    cap_output = config.dataset.cap.output_column if config.dataset.cap is not None else DEFAULT_CAPPED_COLUMN
     frame, capping_diagnostics = apply_claim_capping(
         frame,
-        claim_column=RAW_CLAIM_COST,
+        claim_column=cap_column,
         threshold=cap_threshold,
         enabled=cap_enabled,
+        output_column=cap_output,
     )
 
     # Model dispatch
@@ -282,15 +285,8 @@ def run_experiment(
     # are excluded from the feature join.  Everything else in the original frame
     # is treated as a potential predictor and joined so that diagnostics and
     # interpretation exhibits can reference factor values.
-    _LEAKAGE = {
-        RECORD_ID,
-        config.id_column,
-        EXPOSURE,
-        CLAIM_COST,
-        RAW_CLAIM_COST,
-        CLAIM_COUNT,
-        CLAIM_EVENTS,
-    }
+    from autoresearch.models import columns as _model_columns
+    _LEAKAGE = {RECORD_ID, config.id_column, _model_columns.EXPOSURE} | set(_model_columns.leak_columns())
     _feature_cols = [c for c in frame.columns if c not in _LEAKAGE]
     if _feature_cols:
         _feat_df = frame[["record_id"] + _feature_cols].copy()

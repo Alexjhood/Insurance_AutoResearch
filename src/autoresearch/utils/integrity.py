@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from autoresearch.feature_policy import NON_PREDICTIVE_COLUMNS
+import autoresearch.feature_policy as _feature_policy
 
 
 # ── Holdout-access scan ───────────────────────────────────────────────────────
@@ -170,7 +170,7 @@ def scan_file_for_non_predictive_feature_use(path: Path) -> list[str]:
                 if keyword.arg:
                     target_names.append(keyword.arg)
                     if _is_feature_container_name(keyword.arg):
-                        for column in _string_literals(keyword.value).intersection(NON_PREDICTIVE_COLUMNS):
+                        for column in _string_literals(keyword.value).intersection(_feature_policy.NON_PREDICTIVE_COLUMNS):
                             violations.append(_non_predictive_message(path, column, keyword.arg))
                 continue
 
@@ -179,7 +179,7 @@ def scan_file_for_non_predictive_feature_use(path: Path) -> list[str]:
         feature_targets = [name for name in target_names if _is_feature_container_name(name)]
         if not feature_targets:
             continue
-        for column in _string_literals(value).intersection(NON_PREDICTIVE_COLUMNS):
+        for column in _string_literals(value).intersection(_feature_policy.NON_PREDICTIVE_COLUMNS):
             for name in feature_targets:
                 violations.append(_non_predictive_message(path, column, name))
     return sorted(set(violations))

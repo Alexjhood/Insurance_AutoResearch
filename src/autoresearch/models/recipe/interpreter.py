@@ -28,20 +28,28 @@ from autoresearch.models.recipe.registry import (
     get_estimator,
 )
 from autoresearch.models.recipe.schema import recipe_summary, validate_recipe
-from autoresearch.targets import BURNING_COST, FREQUENCY, SEVERITY, normalise_target_mode
+from autoresearch.models import columns as _columns
+from autoresearch.targets import BURNING_COST, SEVERITY, normalise_target_mode, target_spec
 
 
-EXPOSURE = "Exposure"
-CLAIM_COST = "ClaimAmountCapped"
-CLAIM_COUNT = "ClaimNb"
-CLAIM_EVENTS = "ClaimAmountCount"
-RAW_CLAIM_COST = "ClaimAmount"
 RECORD_ID = "record_id"
+# French-default constants kept for the frequency_severity path (legal only when
+# the dataset has count/event columns, i.e. French). ``columns.bind`` reassigns.
+EXPOSURE = _columns.EXPOSURE
+CLAIM_COST = _columns.CLAIM_COST
+CLAIM_COUNT = _columns.CLAIM_COUNT
+CLAIM_EVENTS = _columns.CLAIM_EVENTS
+RAW_CLAIM_COST = _columns.RAW_CLAIM_COST
 
-_LEAKAGE = frozenset({
-    RECORD_ID, EXPOSURE, CLAIM_COST, CLAIM_COUNT, CLAIM_EVENTS, RAW_CLAIM_COST,
-    "split", "target_mode",
-})
+
+def _leakage_columns() -> frozenset[str]:
+    """Columns a recipe must never use as predictors: the active dataset's
+    target/leak set plus record id, weight, and framework system columns."""
+
+    return frozenset(
+        {RECORD_ID, "split", "target_mode", _columns.EXPOSURE, "exposure"}
+        | set(_columns.leak_columns())
+    )
 
 
 def _select_features(
@@ -50,7 +58,7 @@ def _select_features(
     feature_exclusions: list[str] | None,
     id_columns: list[str] | None = None,
 ) -> list[str]:
-    exclusions = set(feature_exclusions or []) | set(id_columns or []) | _LEAKAGE
+    exclusions = set(feature_exclusions or []) | set(id_columns or []) | _leakage_columns()
     if feature_inclusions:
         missing = [c for c in feature_inclusions if c not in frame.columns]
         if missing:
@@ -177,6 +185,7 @@ def fit_predict(
     if not isinstance(recipe, dict):
         raise RecipeError("recipe model family requires a 'recipe' object in the model config")
     target_mode = normalise_target_mode(hyperparameters.get("target_mode", BURNING_COST))
+    spec = target_spec(target_mode)
 
     errors = validate_recipe(recipe, target_mode=target_mode)
     if errors:
@@ -189,8 +198,8 @@ def fit_predict(
         hyperparameters.get("_id_columns"),
     )
     structure = recipe.get("structure", "direct")
-    train_exposure = train[EXPOSURE].astype(float).to_numpy()
-    score_exposure = score[EXPOSURE].astype(float).to_numpy()
+    # Weight/offset for the active target (exposure, claim count, or unit weight).
+    train_weight = train[spec.weight_column].astype(float).to_numpy()
 
     notes: dict[str, Any] = {
         "model_family": "recipe",
@@ -204,19 +213,16 @@ def fit_predict(
     if structure == "frequency_severity":
         pred_rate, stage_notes = _fit_frequency_severity(recipe, train, score, features)
         notes["stages"] = stage_notes
-    elif target_mode == SEVERITY:
-        # Direct severity: cost per claim on claim rows (the dispatcher has
-        # already filtered to ClaimNb > 0), claim-count-weighted. The framework
-        # multiplies the returned rate by claim count to recover the cost total.
-        pred_rate, stage_notes = _fit_direct_severity(recipe, train, score, features)
+    elif spec.population_column is not None:
+        # Direct severity-style mode: rate per weight on the filtered population
+        # (the dispatcher has already restricted train/score). The framework
+        # multiplies the returned rate by the weight to recover the total.
+        pred_rate, stage_notes = _fit_direct_severity(recipe, train, score, features, spec)
         notes.update({f"stage_{k}": v for k, v in stage_notes.items()})
     else:
-        if target_mode == FREQUENCY:
-            y_rate = train[CLAIM_COUNT].astype(float).to_numpy() / np.clip(train_exposure, 1e-12, None)
-        else:
-            y_rate = train[CLAIM_COST].astype(float).to_numpy() / np.clip(train_exposure, 1e-12, None)
+        y_rate = train[spec.source_column].astype(float).to_numpy() / np.clip(train_weight, 1e-12, None)
         pred_rate, stage_notes = _run_stage(
-            recipe, train, score, features, y_rate, train_exposure
+            recipe, train, score, features, y_rate, train_weight
         )
         notes.update({f"stage_{k}": v for k, v in stage_notes.items()})
 
@@ -229,25 +235,26 @@ def _fit_direct_severity(
     train: pd.DataFrame,
     score: pd.DataFrame,
     features: list[str],
+    spec: Any,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Single-stage severity: cost per paid claim event, event-count-weighted.
+    """Single-stage severity: target total per weight unit, weight-weighted.
 
-    ``train`` is already restricted to positive paid-claim rows by the
-    dispatcher. Mirrors the severity stage of the freq×sev decomposition but
-    returns the cost-per-claim rate directly (no frequency multiplier).
+    ``train`` is already restricted to the positive population by the dispatcher.
+    Returns the per-weight rate directly (no frequency multiplier); columns come
+    from the active target spec (French cost-per-claim; generic cost per unit).
     """
 
-    count = train[CLAIM_EVENTS].astype(float).to_numpy()
-    cost = train[CLAIM_COST].astype(float).to_numpy()
-    per_claim = cost / np.clip(count, 1e-12, None)
+    weight = train[spec.weight_column].astype(float).to_numpy()
+    cost = train[spec.source_column].astype(float).to_numpy()
+    per_unit = cost / np.clip(weight, 1e-12, None)
     if recipe.get("objective") == "gamma":
-        positive = per_claim > 0
+        positive = per_unit > 0
         if not positive.any():
             raise RecipeError("Severity gamma model has no strictly positive cost rows")
         train = train[positive]
-        per_claim = per_claim[positive]
-        count = count[positive]
-    return _run_stage(recipe, train, score, features, per_claim, count)
+        per_unit = per_unit[positive]
+        weight = weight[positive]
+    return _run_stage(recipe, train, score, features, per_unit, weight)
 
 
 def _fit_frequency_severity(

@@ -44,6 +44,7 @@ source_column = "ClaimNb"
 weight = "Exposure"
 population = "all"
 rate_label = "claim frequency"
+rate_slug = "frequency"           # rate columns/keys use "frequency", not "claim_frequency"
 entity_label = "claim_count"
 
 [[targets]]
