@@ -11,7 +11,7 @@ import pandas as pd
 
 SEED = 20260526
 N_FREQ = 5000
-OUTPUT_DIR = Path("data/raw")
+OUTPUT_DIR = Path("data/datasets/french_motor/raw")
 FREQ_FILE = OUTPUT_DIR / "freMTPL2freq_synthetic.parquet"
 SEV_FILE = OUTPUT_DIR / "freMTPL2sev_synthetic.parquet"
 

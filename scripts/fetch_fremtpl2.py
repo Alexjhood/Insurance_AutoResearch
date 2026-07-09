@@ -5,7 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
-OUTPUT_DIR = Path("data/raw")
+OUTPUT_DIR = Path("data/datasets/french_motor/raw")
 FREQ_FILE = OUTPUT_DIR / "freMTPL2freq.parquet"
 SEV_FILE = OUTPUT_DIR / "freMTPL2sev.parquet"
 
@@ -37,7 +37,7 @@ def fetch(force: bool = False) -> None:
         print(
             f"Failed to fetch freMTPL2freq: {exc}\n"
             f"If openml.org is unreachable, download manually from {FREQ_URL} "
-            "and place the file in data/raw/.",
+            "and place the file in data/datasets/french_motor/raw/.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -54,7 +54,7 @@ def fetch(force: bool = False) -> None:
         print(
             f"Failed to fetch freMTPL2sev: {exc}\n"
             f"If openml.org is unreachable, download manually from {SEV_URL} "
-            "and place the file in data/raw/.",
+            "and place the file in data/datasets/french_motor/raw/.",
             file=sys.stderr,
         )
         sys.exit(1)

@@ -169,7 +169,12 @@ def allowed_search_space(config, dataset_schema: dict[str, Any] | None = None) -
     else:
         space["claim_cap_thresholds"] = [None]
         space["allow_disable_claim_capping"] = True
-    space["allow_log1p_features"] = list(prep.get("allow_log1p_features", []))
+    # The framework-config hint list is French-shaped (e.g. Density); only
+    # advertise names that are actual feature columns of the active dataset.
+    log1p = list(prep.get("allow_log1p_features", []))
+    if dataset_schema:
+        log1p = [c for c in log1p if c in feature_columns]
+    space["allow_log1p_features"] = log1p
 
     return space
 

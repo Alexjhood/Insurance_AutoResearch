@@ -230,3 +230,32 @@ Handoff "## Active dataset": porto_seguro / target=claim_incidence (source `targ
 - **Reporting axis prose** ("Pure Premium (£)" → rate-label-driven text): only
   the currency *symbol* is swapped; the axis title text still says "Pure
   Premium". Cosmetic (§3.10), low value for non-French runs.
+
+---
+
+## Review addendum (Fable, 2026-07-09)
+
+Full review of the branch against the design doc, with independent verification:
+suite re-run green (433 passed); French TargetSpec literals confirmed against the
+pre-change `targets.py`; French split-pack hash confirmed; group leakage re-checked
+on the real AllState artifacts (0 of 653,347 households straddle splits, 0 of
+522,676 straddle folds; claim rate 0.728–0.732% across splits); Porto stratification
+confirmed (target rate 3.645% in all three splits); dispatch + protected metric
+panel exercised directly on porto (`claim_incidence`: global_mean gini 0.0,
+lightgbm 0.25) and allstate (`pure_premium` + `severity` population filter).
+The protected-file strategy (call-time `RAW_CLAIM_COST` import in
+`comparison_runner` + the tolerant cap no-op) was verified at all three call sites.
+
+Three defects found and fixed in the review commit:
+
+1. `scripts/fetch_fremtpl2.py` / `scripts/generate_synthetic_data.py` still wrote
+   to the pre-migration `data/raw/` — files landed there would be invisible to the
+   loader. Now write to `data/datasets/french_motor/raw/`; the old
+   `data/raw/README.md` is a pointer to the new layout.
+2. Test-order fragility: `load_config(dataset=…)` mutates process-global binds
+   (`targets`/`models.columns`/`feature_policy`) and tests never restored them.
+   New `tests/conftest.py` autouse fixture snapshots/restores the bound state
+   around every test.
+3. `allow_log1p_features = ["Density"]` (French-specific, from `default.toml`)
+   was advertised in every dataset's search space. `allowed_search_space` now
+   filters the list to the active dataset's actual feature columns.
