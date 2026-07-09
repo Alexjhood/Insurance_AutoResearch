@@ -1,7 +1,7 @@
 # Requirements
 
 ## Goal
-Build a local auto-research platform for insurance target modelling on freMTPL2. Burning cost is the default target, and claim frequency can be selected explicitly for frequency-only runs.
+Build a local auto-research platform for tabular target modelling on registered datasets (freMTPL2 by default; AllState and Porto Seguro built in). Each dataset declares its target modes; the dataset default applies unless a mode is selected explicitly.
 
 ## Priorities
 1. Reproducibility
@@ -11,7 +11,7 @@ Build a local auto-research platform for insurance target modelling on freMTPL2.
 5. Continuous experimentation
 
 ## Core capabilities
-- Ingest freMTPL2 from local files
+- Ingest registered datasets from local files (config-driven; freMTPL2, AllState, Porto Seguro built in)
 - Create dataset schema metadata using the source column names
 - Persist split packs for repeatable evaluation
 - Run deterministic baselines first

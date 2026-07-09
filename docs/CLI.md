@@ -1,11 +1,17 @@
 # CLI Reference
 
-All commands are invoked as `autoresearch [--track NAME] [--run-id ID] <command>`.
+All commands are invoked as `autoresearch [--track NAME] [--run-id ID] [--dataset NAME] <command>`.
 Global flags `--track` and `--run-id` scope all artifact paths and the registry to
 `artifacts/tracks/<NAME>/runs/<ID>/`. Use `--new-run` instead of `--run-id` when
-starting a fresh timestamped run in a track. Burning cost is the default target;
-pass `--target-mode frequency` only for runs that should model expected claim
-counts/frequency instead.
+starting a fresh timestamped run in a track.
+
+`--dataset NAME` selects the registered dataset (`configs/datasets/*.toml`; see
+`list-datasets`). It defaults to the dataset pinned in the run's manifest, or
+`french_motor` for new work; passing a value that contradicts an existing run's
+pinned dataset is an error. `--target-mode MODE` overrides the evaluation
+target; it must be one of the active dataset's modes (e.g. `french_motor`:
+`burning_cost` (default) / `frequency` / `severity`) and must be passed on every
+command of a non-default-mode run.
 
 ---
 
@@ -13,13 +19,28 @@ counts/frequency instead.
 
 ### `prepare-data`
 
-Build the Phase 1 data artifacts from raw freMTPL2 files in `data/raw/`.
+Build the data artifacts for the active dataset from its raw files in
+`data/datasets/<name>/raw/`.
 
 ```bash
-autoresearch prepare-data
+autoresearch prepare-data                          # french_motor (default)
+autoresearch --dataset porto_seguro prepare-data
 ```
 
-Writes: `data/processed/agent_dataset_search.parquet`, `data/holdout_vault/agent_dataset_holdout.parquet`, metadata files under `data/metadata/`, and the deterministic split pack under `data/splits/`.
+Writes under `data/datasets/<name>/`: `processed/agent_dataset_search.parquet`,
+`holdout_vault/agent_dataset_holdout.parquet`, metadata (schema, profile,
+capping diagnostics and — for sampled datasets — `sample_manifest.json`), and
+the deterministic split pack under `splits/`.
+
+### `list-datasets`
+
+List registered datasets with display name, default target mode, available
+modes, weight column, prepared status, and row count. The active dataset is
+starred.
+
+```bash
+autoresearch list-datasets
+```
 
 ---
 
@@ -50,6 +71,7 @@ Flags:
 | `--model-name` | Yes | Model identifier (e.g. `claude-sonnet-4-6`, `gpt-4o`) |
 | `--model-version` | No | Version string stored for reference |
 | `--harness` | No | Agent harness name (e.g. `claude-code`, `codex`, `opencode`) |
+| `--dataset` | No | Registered dataset for the run (default `french_motor`); pinned in `run_manifest.json` so later commands on the run resolve it automatically |
 | `--skip-data` | No | Skip `prepare-data` even if shared data is missing |
 | `--force-data` | No | Rebuild shared data artifacts before bootstrapping |
 | `--skip-baselines` | No | Do not run the global-mean starting baseline if the registry is empty |

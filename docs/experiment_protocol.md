@@ -6,9 +6,9 @@
 
 Fast single-pass evaluation on `search_validation`. Input data comes exclusively from `agent_dataset_search.parquet` — holdout rows are never visible.
 
-**Target mode**: `burning_cost` by default. Use `--target-mode frequency` or
-`evaluation.target_mode = "frequency"` only when a run should model expected
-claim counts/frequency instead of claim cost.
+**Target mode**: the active dataset's default (French: `burning_cost`) unless
+overridden with `--target-mode <mode>`; valid modes are declared per dataset in
+`configs/datasets/<name>.toml` (see `autoresearch list-datasets`).
 
 **Primary metric**: configured in `[evaluation]`; the default is
 `gini_weighted`. Burning-cost runs also record Tweedie deviance at power 1.5 on
@@ -56,7 +56,7 @@ export AUTORESEARCH_MILESTONE_TOKEN=<secret>
 autoresearch evaluate-on-holdout EXPERIMENT_ID
 ```
 
-The token prevents accidental reads. The holdout file lives in `data/holdout_vault/` which is never written by the experiment runner.
+The token prevents accidental reads. The holdout file lives in `data/datasets/<name>/holdout_vault/` which is never written by the experiment runner.
 
 ## Model Families
 

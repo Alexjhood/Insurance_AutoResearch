@@ -1,6 +1,6 @@
 # Insurance AutoResearch
 
-Autonomous insurance target-modelling research loop on freMTPL2, driven by an LLM agent (Claude Code or Codex). Burning cost is the default target; claim frequency can be selected explicitly with `--target-mode frequency` or `evaluation.target_mode = "frequency"`.
+Autonomous tabular target-modelling research loop driven by an LLM agent (Claude Code or Codex). Runs against any registered dataset, selected per run with `--dataset` (built-ins: `french_motor` — the default, `allstate`, `allstate_full`, `porto_seguro`). Each dataset declares its own target modes (e.g. French burning cost / frequency / severity; Porto claim incidence); pick one with `--target-mode` or use the dataset's default. See `autoresearch list-datasets` and the Datasets chapter of [`docs/OPERATING_MANUAL.md`](docs/OPERATING_MANUAL.md).
 
 [![CI](https://github.com/Alexjhood/Insurance_AutoResearch/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexjhood/Insurance_AutoResearch/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -8,9 +8,9 @@ Autonomous insurance target-modelling research loop on freMTPL2, driven by an LL
 
 ```mermaid
 flowchart TD
-    A["data/raw/"] --> B["prepare-data"]
-    B --> C["data/processed/agent_dataset_search.parquet"]
-    B --> D["data/holdout_vault/agent_dataset_holdout.parquet"]
+    A["data/datasets/&lt;name&gt;/raw/"] --> B["prepare-data --dataset &lt;name&gt;"]
+    B --> C["data/datasets/&lt;name&gt;/processed/agent_dataset_search.parquet"]
+    B --> D["data/datasets/&lt;name&gt;/holdout_vault/agent_dataset_holdout.parquet"]
     C --> E["experiment_runner"]
     E --> F["artifacts/tracks/track/runs/run-id/registry.sqlite"]
     E --> G["promotion_gate"]
@@ -24,7 +24,8 @@ flowchart TD
 
 - A reproducible local Python environment for iterative insurance target-model improvement
 - An autonomous research loop where an LLM agent proposes, runs, and evaluates experiments
-- A rigorous actuarial evaluation harness with exposure-weighted Gini as the promotion metric
+- A rigorous actuarial evaluation harness with weight-weighted Gini as the promotion metric
+- Multi-dataset: any tabular regression dataset can be registered via a `configs/datasets/<name>.toml` file
 
 **What this is not:**
 
@@ -150,10 +151,30 @@ artifacts/tracks/<track>/runs/<run-id>/
 
 Runs are kept independent. A research session is confined to its own run folder by a harness-level **run-scope guard** wired into all three agent harnesses (Claude Code, Codex, OpenCode): run artifacts are blocked before bootstrap, and once the session bootstraps it is bound to that run and cannot read any other run's files. Launch a deliberate cross-run analysis session with `AUTORESEARCH_SCOPE=analyst`. See [`docs/architecture.md`](docs/architecture.md) -> *Run-Scope Guard*.
 
-## Working with Real freMTPL2 Data
+## Datasets
 
-Run `python scripts/fetch_fremtpl2.py` to download ~678K rows from OpenML.
-Then run `autoresearch prepare-data` to build the processed datasets.
+Every dataset lives under `data/datasets/<name>/{raw,processed,metadata,splits,holdout_vault}/`
+and is described by `configs/datasets/<name>.toml` (columns, weight/exposure,
+target modes, capping, split grouping, optional sampling). Select one per run:
+
+```bash
+autoresearch list-datasets                                  # registered datasets + prepared status
+autoresearch --dataset porto_seguro prepare-data            # build a dataset's artifacts
+autoresearch --track claude --new-run bootstrap-track \
+  --dataset porto_seguro --cycles 10 ...                    # pin a run to a dataset
+```
+
+The dataset is pinned in the run manifest — later commands on that run don't
+need `--dataset`. Built-ins: `french_motor` (default; exposure + freq/sev),
+`allstate` (~2M-row household-stratified sample), `allstate_full` (13.2M rows,
+enlarged compute budgets), `porto_seguro` (binary claim incidence). Adding a
+dataset = drop a TOML (plus a loader adapter only if the raw shape needs one);
+see the Datasets chapter of `docs/OPERATING_MANUAL.md`.
+
+### Real freMTPL2 data
+
+Run `python scripts/fetch_fremtpl2.py` to download ~678K rows from OpenML into
+`data/datasets/french_motor/raw/`, then `autoresearch prepare-data`.
 Licensing: freMTPL2 is subject to CASdatasets / OpenML terms; see [`data/raw/README.md`](data/raw/README.md).
 
 ## Where to Go Next

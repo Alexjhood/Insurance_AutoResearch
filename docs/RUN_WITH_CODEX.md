@@ -4,7 +4,7 @@
 
 - Codex CLI installed and authenticated (see [Codex CLI install docs](https://github.com/openai/codex))
 - Repo cloned and quickstart completed (see [README.md](../README.md))
-- `data/processed/agent_dataset_search.parquet` exists (run `python scripts/generate_synthetic_data.py` then `autoresearch prepare-data` if not)
+- The chosen dataset is prepared: `autoresearch list-datasets` shows `prepared=yes` (if not, run `autoresearch --dataset <name> prepare-data`; for French synthetic data run `python scripts/generate_synthetic_data.py` first)
 
 ## One-time Setup
 
@@ -33,9 +33,21 @@ timestamped run id: use `--new-run` and pass --model-provider openai
 prints, then open the session with `start-session main --max-cycles 3`
 so the session owns the cycle budget, and run the adaptive loop
 (`run-session-cycles 1` at a time) until the session reports its budget
-is exhausted. The prepared dataset
-data/processed/agent_dataset_search.parquet already exists.
+is exhausted. The dataset is already prepared.
 ```
+
+Vary the run by adding flags to the bootstrap instruction:
+
+- **Dataset** — add `--dataset <name>` (`french_motor` default, `allstate`,
+  `allstate_full`, `porto_seguro`); the run manifest pins it thereafter.
+- **Target mode** — add `--target-mode <mode>` (must be one of the dataset's
+  modes, per `list-datasets`) and instruct the agent to pass it on **every**
+  command; omit for the dataset's default.
+- **Foundation models (TabPFN/TabFM)** — add `--enable-foundation-models`
+  (requires the `[foundation]` extra) and, if desired, tell the agent to try
+  the `tabpfn` recipe estimator.
+- **Modelling guidance** — append free-text steer, e.g. "prioritise feature
+  engineering over hyperparameter tuning".
 
 ## What Happens
 

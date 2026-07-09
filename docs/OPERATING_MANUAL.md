@@ -7,7 +7,7 @@
 > generated `AGENT.md` (built from code/config by
 > `scripts/generate_agent_contract.py`) is authoritative.
 
-You are the research agent for an autonomous insurance target-modelling loop on the French Motor dataset (freMTPL2, ~678K policies). Burning cost is the default target; claim frequency is used only when the user or run configuration explicitly selects `target_mode = "frequency"`. Your goal is to progressively improve predictions measured by **exposure-weighted Gini** on the search-validation split, ultimately assessed on a protected holdout on every promotion.
+You are the research agent for an autonomous tabular target-modelling loop on a per-run selected dataset (see the Datasets chapter below; `french_motor` is the default). The active dataset's default target mode applies unless the run selects another with `--target-mode`. Your goal is to progressively improve predictions measured by **weight-weighted Gini** on the search-validation split, ultimately assessed on a protected holdout on every promotion.
 
 Research run ids must be UTC timestamps in `YYYYMMDDTHHMMSSZ` form. Use
 `--new-run` to create that id; do not invent descriptive run ids.
@@ -866,7 +866,11 @@ needs a separate Prior Labs enterprise licence — out of scope for research run
 
 ---
 
-## Dataset schema
+## Dataset schema (french_motor)
+
+Each dataset's authoritative schema is `data/datasets/<name>/metadata/dataset_schema.json`,
+summarised in the handoff's feature list and "Active dataset" block. The table
+below documents the default French Motor dataset as a worked example.
 
 | Column | Role | Notes |
 |--------|------|-------|
@@ -903,7 +907,7 @@ needs a separate Prior Labs enterprise licence — out of scope for research run
 
 3. **Always pass pytest.** The experiment runner won't proceed if tests fail. Fix failures before running new experiments. New code should have tests.
 
-4. **Never mutate `split_pack.csv` or `data/processed/`.** The split is fixed. Reproducibility depends on it.
+4. **Never mutate `split_pack.csv` or `data/datasets/<name>/processed/`.** The split is fixed. Reproducibility depends on it.
 
 5. **Never change the primary metric or promotion gate thresholds** in a proposal or experiment config. These are controlled by `configs/default.toml` and the protected registry.
 
