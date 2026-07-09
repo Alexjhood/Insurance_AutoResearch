@@ -73,7 +73,7 @@ def validate_experiment_outputs(
     non_negative = bool((predicted >= 0).all())
     _check(checks, "predictions_non_negative", non_negative, "Predictions contain negative values")
     exposure_positive = bool((exposure > 0).all())
-    _check(checks, "exposure_positive", exposure_positive, "Exposure must be positive for all scored rows")
+    _check(checks, "exposure_positive", exposure_positive, "Weight must be positive for all scored rows")
 
     if not finite or not exposure_positive:
         return _report(False, checks, "Prediction values are not numerically valid", None)

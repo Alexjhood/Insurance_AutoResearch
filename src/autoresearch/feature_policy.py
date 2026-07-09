@@ -23,11 +23,13 @@ def non_predictive_columns(dataset_spec: Any) -> frozenset[str]:
     column, and the weight/offset column (never a feature).
     """
 
+    from autoresearch.targets import UNIT_WEIGHT_COLUMN
+
     cols: set[str] = set(getattr(dataset_spec, "non_predictive", ()) or ())
     cols.add("record_id")
     cols.add(dataset_spec.id_column)
-    if dataset_spec.weight_column:
-        cols.add(dataset_spec.weight_column)
+    # The weight/offset column (a real one, or the synthesised unit weight).
+    cols.add(dataset_spec.weight_column or UNIT_WEIGHT_COLUMN)
     return frozenset(cols)
 
 

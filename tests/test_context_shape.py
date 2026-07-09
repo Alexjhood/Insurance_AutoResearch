@@ -9,6 +9,7 @@ from autoresearch.experiment_runner import run_experiment
 
 _EXPECTED_TOP_KEYS = {
     "project_goal",
+    "active_dataset",
     "official_champion",
     "recent_experiments",
     "recent_comparisons",

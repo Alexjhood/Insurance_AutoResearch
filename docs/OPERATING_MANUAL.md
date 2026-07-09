@@ -35,6 +35,44 @@ run-scope guard can bind the session before you inspect artifacts.
 
 ---
 
+## Datasets — the loop runs on any registered tabular dataset
+
+The framework is dataset-agnostic. Each dataset is one config file under
+`configs/datasets/<name>.toml` (a `DatasetSpec`), and its data lives under
+`data/datasets/<name>/{raw,processed,metadata,splits,holdout_vault}/`. A
+`DatasetSpec` declares the loader, id column, weight column (omit → a synthesised
+`unit_weight ≡ 1.0`), optional claim count, missing-value handling, the split
+unit (for group-aware splitting), any fixed cap, and the target modes with their
+`entity_label`/`rate_label` (from which every metric key/alias is generated).
+
+Registered datasets (see `autoresearch list-datasets`):
+
+| Dataset | Rows | Weight | Default target | Notes |
+|---|---|---|---|---|
+| `french_motor` | 678K | `Exposure` | `burning_cost` | freMTPL2; cap 100,000; freq×sev available |
+| `allstate` | 2M (sampled) | unit | `pure_premium` | household-grouped split; `?` missing; no cap |
+| `allstate_full` | 13.2M | unit | `pure_premium` | full variant, enlarged compute budget |
+| `porto_seguro` | 595K | unit | `claim_incidence` | binary target as a rate; `-1` missing in `*_cat` |
+
+**Selecting a dataset.** Pass `--dataset <name>` to `bootstrap-track` /
+`prepare-data` / `start-session`; it defaults to `french_motor`. `bootstrap-track`
+pins the dataset into `run_manifest.json`, and every later command in the run
+resolves it from there — you never repeat `--dataset`, and passing a
+contradicting one is a hard error (same as run-id pinning). Prepare a dataset's
+artifacts with `autoresearch prepare-data --dataset <name>` (bootstrap
+auto-prepares when missing).
+
+**Adding a dataset.** Drop a `configs/datasets/<name>.toml`; if the raw shape is
+not a single labelled table, add a small loader adapter under
+`data/adapters/<name>.py` exposing `load(spec) -> RawDataset`. No other framework
+code changes.
+
+The handoff's **"Active dataset"** block is authoritative for the run: it prints
+the active columns, target/weight policy, population, cap statement, and
+dataset-specific cautions. Read it before proposing.
+
+---
+
 ## Cheat sheet — gotchas & tips
 <!-- USER-MAINTAINED: add new tips here as they come up. Keep entries short and concrete. -->
 

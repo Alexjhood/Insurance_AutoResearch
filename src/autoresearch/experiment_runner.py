@@ -150,12 +150,14 @@ def run_experiment(
     frame = load_search_dataset(config.processed_dir, config.agent_dataset_name)
     split_frame = pd.read_csv(config.splits_dir / "split_pack.csv")
 
-    # Preprocessing
+    # Preprocessing. A dataset without a declared cap can never enable capping,
+    # regardless of what a (French-shaped) experiment config requests.
     preprocessing = exp.get("preprocessing", {})
-    cap_enabled = bool(preprocessing.get("claim_capping_enabled", config.claim_capping_enabled))
-    cap_threshold = float(preprocessing.get("claim_cap_threshold", config.claim_cap_threshold))
-    cap_column = config.dataset.cap.column if config.dataset.cap is not None else RAW_CLAIM_COST
-    cap_output = config.dataset.cap.output_column if config.dataset.cap is not None else DEFAULT_CAPPED_COLUMN
+    cap_spec = config.dataset.cap
+    cap_enabled = bool(preprocessing.get("claim_capping_enabled", config.claim_capping_enabled)) and cap_spec is not None
+    cap_threshold = float(preprocessing.get("claim_cap_threshold", config.claim_cap_threshold) or config.claim_cap_threshold)
+    cap_column = cap_spec.column if cap_spec is not None else RAW_CLAIM_COST
+    cap_output = cap_spec.output_column if cap_spec is not None else DEFAULT_CAPPED_COLUMN
     frame, capping_diagnostics = apply_claim_capping(
         frame,
         claim_column=cap_column,

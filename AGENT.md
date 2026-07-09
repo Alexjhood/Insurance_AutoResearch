@@ -5,14 +5,13 @@
 
 # AGENT.md — Auto-Research Runtime Contract
 
-You are the research agent for an autonomous insurance target-modelling loop on
-the configured dataset. The active target is
-**burning cost** (`ClaimAmountCapped`) unless the run sets
-`target_mode = "frequency"` (current default: `burning_cost`). Maximise
-**exposure-weighted Gini** (`gini_weighted`) on the search-validation split;
-every promotion is re-checked on a protected holdout. Each run starts with the
-`global_mean` baseline as champion — your first model only has to beat a flat
-exposure-weighted rate.
+You are the research agent for an autonomous tabular target-modelling loop on a
+**per-run selected dataset**. The active dataset, target mode, column roles,
+weight policy, and any fixed preprocessing (e.g. a claim cap) are printed in the
+handoff's **"Active dataset"** block; read it first — those facts are binding.
+Maximise **weight-weighted Gini** (`gini_weighted`) on the search-validation
+split; every promotion is re-checked on a protected holdout. Each run starts with
+the `global_mean` baseline as champion — beat a flat weighted rate first.
 
 Escalation only — most runs never need it: **docs/OPERATING_MANUAL.md** has the full manual
 (dataset schema, metric panel, gate modes, research-line mechanics, worked examples).
@@ -34,7 +33,8 @@ Escalation only — most runs never need it: **docs/OPERATING_MANUAL.md** has th
 - `src/autoresearch/experiment_registry/comparisons.py`
 - `src/autoresearch/experiment_registry/champions.py`
 3. **Never change** the primary metric, gate thresholds, the fixed split
-   (`split_pack.csv`, `data/processed/`), or the claim cap (fixed at 100,000).
+   (`split_pack.csv`, `data/datasets/<name>/`), or any dataset-fixed
+   preprocessing (e.g. the claim cap) — the handoff says what is fixed.
 4. **Always pass pytest** — the runner refuses to proceed on a failing suite.
 5. **Always stay in your own run.** Pass `--track <your-tool-name>`
    (`claude` / `codex` / `opencode`) and `--run-id <id>` to every command. After
@@ -154,7 +154,7 @@ Champion follow-up (do not repeat the full recipe):
 {"recipe_ref":"champion","recipe_overrides":{"params":{"num_leaves":31}}}
 ```
 The controller expands it before validation; feature selectors remain sibling fields.
-Frequency × severity nests two stages (burning-cost mode only):
+Frequency × severity nests two stages (only when the dataset has a claim-count column):
 `{"structure":"frequency_severity","stages":{"frequency":{"estimator":"lightgbm","objective":"poisson"},"severity":{"estimator":"lightgbm","objective":"gamma"}}}`
 
 Structures: `direct`, `frequency_severity`. Estimators (only these obj × enc combos are legal —
@@ -166,8 +166,9 @@ invalid ones are rejected before running):
 - **tweedie_glm** — obj ['gamma', 'poisson', 'tweedie']; enc ['one_hot']
 - **xgboost** — obj ['gamma', 'poisson', 'squared_error', 'tweedie']; enc ['one_hot', 'ordinal'] (early-stop)
 
-Target → objective: **pure premium** (has zeros) → tweedie/squared_error;
-**frequency** → poisson/tweedie/squared_error; **severity** (claim rows, >0) →
+Target *shape* → objective (the handoff names the active target's shape):
+**has zeros** (pure premium / incidence) → tweedie/poisson/squared_error;
+**counts** → poisson/tweedie/squared_error; **strictly positive** (severity) →
 gamma/squared_error. Features default to all eligible predictors; restrict with
 `model.feature_inclusions/exclusions` using names from the handoff.
 
@@ -183,8 +184,8 @@ def fit_predict(train, score, *, feature_inclusions=None,
     ...  # fit on `train`
     return Prediction(values=pred_rates, unit="rate"), notes
 ```
-If you return a raw array instead: multiply rates by `score["Exposure"]`;
-gamma/log losses need `y > 0` (split freq×sev or use Tweedie); encode categoricals
+If you return a raw array instead: multiply rates by the weight column (`score[EXPOSURE]`,
+the name the handoff prints); gamma/log losses need `y > 0` (split freq×sev or use Tweedie); encode categoricals
 (`'B12'`): lightgbm `category` dtype, xgboost/sklearn ordinal/one-hot; early-stop
 on a train-internal split only; and calibration is mandatory —
 `apply_training_calibration(pred_score, pred_train, actual_train_cost)` from
@@ -193,11 +194,10 @@ from the handoff — **build features only from that named list** (never sweep
 "all remaining columns" into the model; the framework strips target and id
 columns from script frames, and `score` carries no targets at all). Column
 constants (`from autoresearch.models.dispatcher import`):
-- `EXPOSURE = "Exposure"` — offset; weights + rate->total only, never a feature
-- `CLAIM_COST = "ClaimAmountCapped"` — training target (burning-cost mode)
-- `CLAIM_COUNT = "ClaimNb"` — training target (frequency mode)
-- `CLAIM_EVENTS = "ClaimAmountCount"` — alternative claim count
-- `RECORD_ID = "record_id"` — policy identifier
+- `EXPOSURE` — weight/offset column; weights + rate->total only, never a feature
+- `CLAIM_COST` — training-target total column (when present)
+- `CLAIM_COUNT` — claim-count target (freq/freq-sev; when present)
+- `RECORD_ID` — row identifier
 
 ## Compute budget
 

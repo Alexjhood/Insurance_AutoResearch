@@ -161,9 +161,13 @@ def _run_evaluation(
     sv_predictions = pd.read_parquet(sv_predictions_path)
     sv_only = sv_predictions[sv_predictions["split"] == "search_validation"]
 
-    # Apply capping to both frames
-    search_frame, _ = apply_claim_capping(search_frame, claim_column=RAW_CLAIM_COST, threshold=cap_threshold, enabled=cap_enabled)
-    holdout_frame, _ = apply_claim_capping(holdout_frame, claim_column=RAW_CLAIM_COST, threshold=cap_threshold, enabled=cap_enabled)
+    # Apply capping to both frames using the active dataset's cap column (a
+    # tolerant no-op for datasets without a cap).
+    _cap = config.dataset.cap
+    _cap_col = _cap.column if _cap is not None else RAW_CLAIM_COST
+    _cap_out = _cap.output_column if _cap is not None else "ClaimAmountCapped"
+    search_frame, _ = apply_claim_capping(search_frame, claim_column=_cap_col, threshold=cap_threshold, enabled=cap_enabled, output_column=_cap_out)
+    holdout_frame, _ = apply_claim_capping(holdout_frame, claim_column=_cap_col, threshold=cap_threshold, enabled=cap_enabled, output_column=_cap_out)
 
     # Build a combined split frame: all search rows train, holdout rows flagged
     split_pack = pd.read_csv(config.splits_dir / "split_pack.csv")

@@ -39,7 +39,6 @@ from autoresearch.controller.proposal_schema import (  # noqa: E402
     DERIVED_PROPOSAL_FIELDS,
     SCIENTIFIC_PROPOSAL_FIELDS,
 )
-from autoresearch.models import dispatcher  # noqa: E402
 from autoresearch.models.recipe import enable_foundation_models, menu as recipe_menu  # noqa: E402
 from autoresearch.utils.integrity import PROTECTED_RELATIVE_PATHS  # noqa: E402
 
@@ -69,13 +68,14 @@ WORKFLOW_COMMANDS: list[tuple[str, str]] = [
     ("export-context", "Refresh the handoff/context bundle on demand."),
 ]
 
-# Column constants the model script needs, sourced from the dispatcher module.
+# Column constants a model script may import. Their concrete values are bound to
+# the active dataset at config load and printed in the handoff; the contract
+# stays dataset-neutral and names only the constants.
 _COLUMN_CONSTANTS = [
-    ("EXPOSURE", dispatcher.EXPOSURE, "offset; weights + rate->total only, never a feature"),
-    ("CLAIM_COST", dispatcher.CLAIM_COST, "training target (burning-cost mode)"),
-    ("CLAIM_COUNT", dispatcher.CLAIM_COUNT, "training target (frequency mode)"),
-    ("CLAIM_EVENTS", dispatcher.CLAIM_EVENTS, "alternative claim count"),
-    ("RECORD_ID", dispatcher.RECORD_ID, "policy identifier"),
+    ("EXPOSURE", "weight/offset column; weights + rate->total only, never a feature"),
+    ("CLAIM_COST", "training-target total column (when present)"),
+    ("CLAIM_COUNT", "claim-count target (freq/freq-sev; when present)"),
+    ("RECORD_ID", "row identifier"),
 ]
 
 
@@ -97,22 +97,19 @@ def render() -> str:
     cfg = _load_config()
     compute = cfg["compute"]
     evaluation = cfg["evaluation"]
-    caps = cfg["search_space"]["preprocessing"]["claim_cap_thresholds"]
 
     base = compute["base_budget_minutes"]
     incr = compute["budget_increment_minutes"]
     per = compute["experiments_per_increment"]
     gate_mode = evaluation["gate_mode"]
     gate_metric = evaluation["gate_primary_metric"]
-    target_mode = evaluation["target_mode"]
-    cap = caps[0]
 
     cmd_lines = "\n".join(
         f"- `{name}` — {desc}" for name, desc in WORKFLOW_COMMANDS
     )
     protected_lines = "\n".join(f"- `{p}`" for p in PROTECTED_RELATIVE_PATHS)
     const_lines = "\n".join(
-        f"- `{name} = \"{value}\"` — {desc}" for name, value, desc in _COLUMN_CONSTANTS
+        f"- `{name}` — {desc}" for name, desc in _COLUMN_CONSTANTS
     )
     proposal_fields = ", ".join(f"`{f}`" for f in SCIENTIFIC_PROPOSAL_FIELDS)
     derived_fields = ", ".join(f"`{f}`" for f in DERIVED_PROPOSAL_FIELDS)
@@ -143,14 +140,13 @@ def render() -> str:
 
 # AGENT.md — Auto-Research Runtime Contract
 
-You are the research agent for an autonomous insurance target-modelling loop on
-the configured dataset. The active target is
-**burning cost** (`{dispatcher.CLAIM_COST}`) unless the run sets
-`target_mode = "frequency"` (current default: `{target_mode}`). Maximise
-**exposure-weighted Gini** (`{gate_metric}`) on the search-validation split;
-every promotion is re-checked on a protected holdout. Each run starts with the
-`global_mean` baseline as champion — your first model only has to beat a flat
-exposure-weighted rate.
+You are the research agent for an autonomous tabular target-modelling loop on a
+**per-run selected dataset**. The active dataset, target mode, column roles,
+weight policy, and any fixed preprocessing (e.g. a claim cap) are printed in the
+handoff's **"Active dataset"** block; read it first — those facts are binding.
+Maximise **weight-weighted Gini** (`{gate_metric}`) on the search-validation
+split; every promotion is re-checked on a protected holdout. Each run starts with
+the `global_mean` baseline as champion — beat a flat weighted rate first.
 
 Escalation only — most runs never need it: **{MANUAL_REL}** has the full manual
 (dataset schema, metric panel, gate modes, research-line mechanics, worked examples).
@@ -164,7 +160,8 @@ Escalation only — most runs never need it: **{MANUAL_REL}** has the full manua
    operator runs `autoresearch update-integrity-manifest`):
 {protected_lines}
 3. **Never change** the primary metric, gate thresholds, the fixed split
-   (`split_pack.csv`, `data/processed/`), or the claim cap (fixed at {cap:,}).
+   (`split_pack.csv`, `data/datasets/<name>/`), or any dataset-fixed
+   preprocessing (e.g. the claim cap) — the handoff says what is fixed.
 4. **Always pass pytest** — the runner refuses to proceed on a failing suite.
 5. **Always stay in your own run.** Pass `--track <your-tool-name>`
    (`claude` / `codex` / `opencode`) and `--run-id <id>` to every command. After
@@ -274,15 +271,16 @@ Champion follow-up (do not repeat the full recipe):
 {{"recipe_ref":"champion","recipe_overrides":{{"params":{{"num_leaves":31}}}}}}
 ```
 The controller expands it before validation; feature selectors remain sibling fields.
-Frequency × severity nests two stages (burning-cost mode only):
+Frequency × severity nests two stages (only when the dataset has a claim-count column):
 `{{"structure":"frequency_severity","stages":{{"frequency":{{"estimator":"lightgbm","objective":"poisson"}},"severity":{{"estimator":"lightgbm","objective":"gamma"}}}}}}`
 
 Structures: {structure_list}. Estimators (only these obj × enc combos are legal —
 invalid ones are rejected before running):
 {estimator_lines}
 
-Target → objective: **pure premium** (has zeros) → tweedie/squared_error;
-**frequency** → poisson/tweedie/squared_error; **severity** (claim rows, >0) →
+Target *shape* → objective (the handoff names the active target's shape):
+**has zeros** (pure premium / incidence) → tweedie/poisson/squared_error;
+**counts** → poisson/tweedie/squared_error; **strictly positive** (severity) →
 gamma/squared_error. Features default to all eligible predictors; restrict with
 `model.feature_inclusions/exclusions` using names from the handoff.{foundation_note}
 
@@ -298,8 +296,8 @@ def fit_predict(train, score, *, feature_inclusions=None,
     ...  # fit on `train`
     return Prediction(values=pred_rates, unit="rate"), notes
 ```
-If you return a raw array instead: multiply rates by `score["{dispatcher.EXPOSURE}"]`;
-gamma/log losses need `y > 0` (split freq×sev or use Tweedie); encode categoricals
+If you return a raw array instead: multiply rates by the weight column (`score[EXPOSURE]`,
+the name the handoff prints); gamma/log losses need `y > 0` (split freq×sev or use Tweedie); encode categoricals
 (`'B12'`): lightgbm `category` dtype, xgboost/sklearn ordinal/one-hot; early-stop
 on a train-internal split only; and calibration is mandatory —
 `apply_training_calibration(pred_score, pred_train, actual_train_cost)` from

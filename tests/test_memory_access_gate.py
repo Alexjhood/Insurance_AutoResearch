@@ -49,6 +49,8 @@ def test_resolve_memory_access_reads_manifest_fallback(tmp_path: Path) -> None:
     manifest = tmp_path / "run_manifest.json"
     manifest.write_text(json.dumps({"memory_access": "own"}), encoding="utf-8")
     cfg = MagicMock()
+    from autoresearch.datasets import load_dataset_spec
+    cfg.dataset = load_dataset_spec("french_motor")
     cfg.artifacts_dir = tmp_path
     with patch.dict(os.environ, {}, clear=True):
         os.environ.pop("AUTORESEARCH_MEMORY_ACCESS", None)
@@ -70,6 +72,8 @@ def test_build_llm_context_unchanged_with_no_access(tmp_path: Path) -> None:
 
     # Build a minimal config with necessary paths
     cfg = MagicMock()
+    from autoresearch.datasets import load_dataset_spec
+    cfg.dataset = load_dataset_spec("french_motor")
     cfg.metadata_dir = tmp_path
     cfg.handoff_results_dir = tmp_path
     cfg.registry_path = tmp_path / "registry.sqlite"
@@ -117,6 +121,8 @@ def test_build_llm_context_adds_memory_block_with_own_access(tmp_path: Path) -> 
     from autoresearch.controller.context import build_llm_context
 
     cfg = MagicMock()
+    from autoresearch.datasets import load_dataset_spec
+    cfg.dataset = load_dataset_spec("french_motor")
     cfg.metadata_dir = tmp_path
     cfg.handoff_results_dir = tmp_path
     cfg.registry_path = tmp_path / "registry.sqlite"

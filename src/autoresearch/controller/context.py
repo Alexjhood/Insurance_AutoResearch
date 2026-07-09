@@ -40,15 +40,11 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
     raw_cycle = read_json(latest_cycle_path) if latest_cycle_path.exists() else None
     latest_cycle_result = _flatten_cycle_result(raw_cycle) if raw_cycle else None
 
+    active_dataset = _build_active_dataset(config)
+
     ctx: dict[str, Any] = {
-        "project_goal": (
-            f"Improve {config.target_mode} prediction while protecting reproducibility and holdout integrity. "
-            "Every run starts from the global-mean no-model baseline; progress through many small, "
-            "well-motivated steps with a broad search before committing to any single direction. "
-            "Claim cap is fixed at 100,000. Exposure is an exposure offset for weights, "
-            "response denominators, and converting predicted rates to target totals; it must not be "
-            "used as a predictive feature because it is unavailable at quote time."
-        ),
+        "project_goal": _project_goal(config, active_dataset),
+        "active_dataset": active_dataset,
         "official_champion": champion,
         "recent_experiments": _compact_experiments(experiments),
         "recent_comparisons": _compact_comparisons(comparisons),
@@ -108,6 +104,91 @@ def build_llm_context(config: ProjectConfig) -> dict[str, Any]:
         ctx["memory_access"] = _build_memory_access_block(access)
 
     return ctx
+
+
+def _build_active_dataset(config: ProjectConfig) -> dict[str, Any]:
+    """Compact, binding description of the run's active dataset for the handoff."""
+
+    from autoresearch.targets import target_spec
+
+    spec = config.dataset
+    tspec = target_spec(config.target_mode)
+    unit_weight = spec.weight_column is None
+    weight_col = spec.weight_column or "unit_weight"
+    if unit_weight:
+        weight_policy = (
+            f"`{weight_col}` — every row weighs 1.0; it is synthesised, never a feature."
+        )
+    else:
+        weight_policy = (
+            f"`{weight_col}` — weight/offset for sample weights, response denominators, and "
+            "rate→total conversion; never a predictive feature (unavailable at quote time)."
+        )
+    cap_statement = (
+        f"`{spec.cap.column}` capped at {spec.cap.threshold:,.0f} → `{spec.cap.output_column}` (fixed)."
+        if spec.cap is not None
+        else "no capping."
+    )
+    cautions = _dataset_cautions(spec)
+    return {
+        "name": spec.name,
+        "display_name": spec.display_name,
+        "target_mode": config.target_mode,
+        "target_source_column": tspec.source_column,
+        "rate_label": tspec.rate_label,
+        "available_target_modes": list(spec.target_modes),
+        "weight_column": weight_col,
+        "weight_is_unit": unit_weight,
+        "weight_policy": weight_policy,
+        "population": (
+            f"rows where {tspec.population_column} > 0" if tspec.population_column else "all rows"
+        ),
+        "capping": cap_statement,
+        "frequency_severity_available": spec.count_column is not None,
+        "currency": spec.reporting.currency,
+        "cautions": cautions,
+    }
+
+
+def _dataset_cautions(spec) -> list[str]:
+    """Dataset-specific cautions generated from spec facts."""
+
+    cautions: list[str] = []
+    if spec.split_unit_column and spec.split_unit_column != "record_id":
+        cautions.append(
+            f"`{spec.split_unit_column}` is the split unit (grouping key) and is non-predictive."
+        )
+    if spec.na_marker is not None:
+        where = (
+            f"columns matching /{spec.na_marker.columns_matching}/"
+            if spec.na_marker.columns_matching else "all columns"
+        )
+        cautions.append(f"`{spec.na_marker.value}` encodes missing in {where}.")
+    if spec.na_values:
+        cautions.append(f"missing markers {list(spec.na_values)} are read as NaN.")
+    if spec.count_column is None:
+        cautions.append("no claim-count column → `frequency_severity` recipes are unavailable.")
+    return cautions
+
+
+def _project_goal(config: ProjectConfig, active_dataset: dict[str, Any]) -> str:
+    spec = config.dataset
+    cap_sentence = (
+        f" {spec.cap.column} is capped at {spec.cap.threshold:,.0f} (fixed)."
+        if spec.cap is not None else ""
+    )
+    weight_sentence = (
+        " Every row weighs 1.0 (synthesised unit weight); it must never be a feature."
+        if spec.weight_column is None
+        else f" {spec.weight_column} is a weight/offset for weights, response denominators, and "
+        "rate→total conversion; it must not be a predictive feature (unavailable at quote time)."
+    )
+    return (
+        f"Improve {config.target_mode} prediction on {spec.display_name} while protecting "
+        "reproducibility and holdout integrity. Every run starts from the global-mean no-model "
+        "baseline; progress through many small, well-motivated steps with a broad search before "
+        f"committing to any single direction.{cap_sentence}{weight_sentence}"
+    )
 
 
 def _build_memory_access_block(access: str) -> dict[str, Any]:

@@ -242,7 +242,10 @@ def test_export_context_and_template(tmp_path: Path) -> None:
     assert set(refreshed_template["experiment_config"]) >= {"model_family", "target_strategy", "model"}
     assert "parent_experiment_id" not in refreshed_template["experiment_config"]
     assert context["allowed_search_space"]["feature_columns"] == ["DrivAge"]
-    assert "Exposure` is not a predictive feature" in handoff
+    # The Active dataset block names the French weight column and its policy.
+    assert "## Active dataset" in handoff
+    assert "`Exposure`" in handoff
+    assert "never a predictive feature" in handoff
 
     # The schema document marks parentage as controller-derived rather than required.
     schema = json.loads(template_outputs["proposal_schema"].read_text(encoding="utf-8"))

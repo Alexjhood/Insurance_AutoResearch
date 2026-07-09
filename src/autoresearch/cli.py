@@ -934,9 +934,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--target-mode",
-        choices=("burning_cost", "frequency", "severity"),
         default=None,
-        help="Override the configured evaluation target. Default is burning_cost unless the config says otherwise.",
+        metavar="MODE",
+        help="Override the evaluation target mode. Must be one of the active dataset's "
+        "target modes (see `list-datasets`). Defaults to the dataset's default target mode.",
     )
     parser.add_argument(
         "--dataset",
@@ -1252,7 +1253,13 @@ def main(argv: list[str] | None = None) -> int:
         dataset=getattr(args, "dataset", None),
     )
     if getattr(args, "target_mode", None):
-        config = replace(config, target_mode=args.target_mode)
+        from autoresearch.targets import normalise_target_mode
+
+        try:
+            mode = normalise_target_mode(args.target_mode, config.dataset)
+        except ValueError as exc:
+            parser.error(str(exc))
+        config = replace(config, target_mode=mode)
     # Enable foundation estimators for runs that opted in (reads the run
     # manifest; no-op otherwise). Done before any command touches the recipe
     # registry so menu/validation/dispatch all see the same estimator set.

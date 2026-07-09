@@ -306,6 +306,45 @@ def inbox_status(config: ProjectConfig) -> dict[str, Any]:
     }
 
 
+def _weight_policy_line(context: dict[str, Any]) -> str:
+    active = context.get("active_dataset") or {}
+    return active.get("weight_policy") or (
+        "the weight column is for weights/response denominators/rate→total conversion, never a feature."
+    )
+
+
+def _capping_constraint_line(context: dict[str, Any]) -> str:
+    active = context.get("active_dataset") or {}
+    cap = active.get("capping")
+    if cap and cap != "no capping.":
+        return f"{cap} Never change `claim_cap_threshold`."
+    return "no capping for this dataset (`claim_capping_enabled=false`)."
+
+
+def _render_active_dataset(active: dict[str, Any] | None) -> list[str]:
+    """Render the binding "Active dataset" block from the context."""
+
+    if not active:
+        return []
+    lines = [
+        "## Active dataset",
+        "",
+        f"- **Dataset**: `{active['name']}` — {active['display_name']}",
+        f"- **Target mode**: `{active['target_mode']}` → source column `{active['target_source_column']}` "
+        f"(rate: {active['rate_label']}); available modes: {', '.join(f'`{m}`' for m in active['available_target_modes'])}",
+        f"- **Weight**: {active['weight_policy']}",
+        f"- **Population**: {active['population']}",
+        f"- **Capping**: {active['capping']}",
+        f"- **Frequency×severity recipes**: {'available' if active['frequency_severity_available'] else 'unavailable (no claim-count column)'}",
+    ]
+    for caution in active.get("cautions") or []:
+        lines.append(f"- **Caution**: {caution}")
+    lines.append("")
+    lines.append("These facts are binding: build features only from the named feature list; never use the weight/id/target columns as predictors.")
+    lines.append("")
+    return lines
+
+
 def render_handoff_markdown(
     config: ProjectConfig, context: dict[str, Any], *, delta: bool = False
 ) -> str:
@@ -550,11 +589,11 @@ def render_handoff_markdown(
         "",
         "## Key constraints",
         "",
-        f"- **Target mode**: `{target_mode}`",
+        f"- **Target mode**: `{target_mode}` (see the Active dataset block above for source/weight/cap)",
         f"- **Features available**: {feature_list}",
-        "- **Exposure policy**: `Exposure` is not a predictive feature. The framework uses it for sample weights, response denominators, and rate→total conversion — you do not.",
+        f"- **Weight policy**: {_weight_policy_line(context)}",
         f"- **Target strategies**: {', '.join(f'`{s}`' for s in target_strategies)} (must agree with the recipe `structure`: `direct_pure_premium`/`frequency`/`direct_severity`→`direct`, `frequency_severity`→`frequency_severity`)",
-        "- **Claim cap**: `100000` (fixed — never change `claim_cap_threshold`)",
+        f"- **Capping**: {_capping_constraint_line(context)}",
         "- **Units & calibration are framework-owned**: a recipe (or a script returning `Prediction`) needs no exposure conversion or `apply_training_calibration` call. Only a script returning a raw `np.ndarray` must return totals and calibrate itself.",
         "- **Never reference** `milestone_holdout`, `holdout_vault`, or `AUTORESEARCH_MILESTONE_TOKEN`",
         "",
@@ -596,6 +635,7 @@ def render_handoff_markdown(
         *pending_reflection_lines,
         *deferred_lines,
         "",
+        *_render_active_dataset(context.get("active_dataset")),
     ]
 
     drilldown_lines = [
@@ -681,7 +721,7 @@ def proposal_schema_document(config: ProjectConfig, context: dict[str, Any]) -> 
             "recipe_ref accepts an optional nested recipe_overrides object and is resolved before validation.",
             "A recipe's structure must agree with target_strategy (direct↔direct_pure_premium/frequency/direct_severity; "
             "frequency_severity↔frequency_severity).",
-            "Do not use Exposure as a predictive feature; it is reserved for weights and response calculations.",
+            "Do not use the weight/offset column as a predictive feature; it is reserved for weights and response calculations (see the Active dataset block).",
             "research_parent_node_id is optional and may only point to a node from this active run's research_tree.",
             "tree_action=new_root may use research_parent_node_id=null; all other tree actions must point to a valid active-run node.",
             "selected_tree_action_id should match a recommended action from research_tree.tree_policy, unless tree_policy_override_rationale explains the deviation.",

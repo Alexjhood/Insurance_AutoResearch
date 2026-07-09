@@ -746,10 +746,16 @@ def _hydrate_derived_fields(
             exp_config["parent_experiment_id"] = parsed["parent_experiment_id"]
         prep = exp_config.get("preprocessing")
         if not isinstance(prep, dict) or not prep:
-            exp_config["preprocessing"] = {
-                "claim_capping_enabled": True,
-                "claim_cap_threshold": _fixed_claim_cap(config),
-            }
+            if config.dataset.cap is not None:
+                exp_config["preprocessing"] = {
+                    "claim_capping_enabled": True,
+                    "claim_cap_threshold": config.dataset.cap.threshold,
+                }
+            else:
+                exp_config["preprocessing"] = {
+                    "claim_capping_enabled": False,
+                    "claim_cap_threshold": None,
+                }
 
 
 def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:

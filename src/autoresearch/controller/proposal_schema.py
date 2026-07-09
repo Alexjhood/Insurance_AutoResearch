@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any
 
-from autoresearch.feature_policy import NON_PREDICTIVE_COLUMNS, predictive_columns
+from autoresearch.feature_policy import non_predictive_columns, predictive_columns
 
 
 VALID_STATUSES = {
@@ -73,6 +73,8 @@ DERIVED_PROPOSAL_FIELDS = [
 # guarantees every record is complete regardless of which fields the agent sent.
 REQUIRED_PROPOSAL_TEXT_FIELDS = SCIENTIFIC_PROPOSAL_FIELDS + DERIVED_PROPOSAL_FIELDS
 
+# French fallback for importers without a dataset context; the active target
+# columns are computed per-dataset in ``target_columns_for``.
 TARGET_COLUMNS = {
     "record_id",
     "ClaimNb",
@@ -81,44 +83,77 @@ TARGET_COLUMNS = {
     "ClaimAmountCapped",
 }
 
+
+def target_columns_for(dataset_spec) -> set[str]:
+    """Target/outcome-bearing columns for a dataset (never predictive features)."""
+
+    cols: set[str] = {"record_id", dataset_spec.id_column}
+    for t in dataset_spec.target_configs:
+        cols.add(str(t["source_column"]))
+    if dataset_spec.cap is not None:
+        cols.add(dataset_spec.cap.column)
+        cols.add(dataset_spec.cap.output_column)
+    if dataset_spec.count_column:
+        cols.add(dataset_spec.count_column)
+    if dataset_spec.event_count_column:
+        cols.add(dataset_spec.event_count_column)
+    for derived in dataset_spec.derived_columns:
+        cols.add(derived.name)
+    return cols
+
+
 def allowed_search_space(config, dataset_schema: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build the explicit search space exposed to proposal generators."""
 
     ss = config.search_space
+    spec = config.dataset
+    target_cols = target_columns_for(spec)
     feature_columns = []
     if dataset_schema:
         feature_columns = [
             name
             for name in predictive_columns(dataset_schema.get("columns", []))
-            if name not in TARGET_COLUMNS
+            if name not in target_cols
         ]
 
     families = list(ss.get("model_families", ["global_mean"]))
 
-    _default_strategies = (
-        ["direct_severity"] if config.target_mode == "severity"
-        else ["direct_pure_premium", "frequency_severity"]
-    )
+    from autoresearch.targets import target_spec
+
+    is_population_mode = target_spec(config.target_mode).population_column is not None
+    if is_population_mode:
+        _default_strategies = ["direct_severity"]
+    elif spec.count_column is not None:
+        # frequency×severity needs a claim-count column (French only among the built-ins).
+        _default_strategies = ["direct_pure_premium", "frequency_severity"]
+    else:
+        _default_strategies = ["direct_pure_premium"]
     target_strategies = list(ss.get("target_strategies", _default_strategies))
-    if config.target_mode == "severity" and "direct_severity" not in target_strategies:
+    if is_population_mode and "direct_severity" not in target_strategies:
         target_strategies.append("direct_severity")
+    # frequency×severity is only legal when the dataset has a claim-count column.
+    if spec.count_column is None:
+        target_strategies = [t for t in target_strategies if t != "frequency_severity"]
+
+    non_predictive = non_predictive_columns(spec)
+    weight_col = spec.weight_column or "unit_weight"
+    feature_policy: dict[str, str] = {
+        weight_col: (
+            "Weight/offset column: use only for sample weights, response denominators, "
+            "and converting predicted rates to target totals. Never a predictive feature."
+        ),
+        "record_id": "Framework join key; never use as a predictive model feature.",
+        spec.id_column: "Source identifier; never use as a predictive model feature.",
+    }
 
     space: dict[str, Any] = {
         "model_families": families,
         "target_strategies": target_strategies,
-        "target_modes": ["burning_cost", "frequency", "severity"],
+        "target_modes": list(spec.target_modes),
         "active_target_mode": config.target_mode,
         "feature_columns": feature_columns,
-        "non_predictive_columns": sorted(NON_PREDICTIVE_COLUMNS),
-        "feature_policy": {
-            "Exposure": (
-                "Use only for exposure weights, frequency/severity denominators, "
-                "and converting predicted rates to target totals. "
-                "Do not use as a predictive model feature because it is unavailable at quote time."
-            ),
-            "record_id": "Framework join key; never use as a predictive model feature.",
-            "IDpol": "Source identifier; never use as a predictive model feature.",
-        },
+        "non_predictive_columns": sorted(non_predictive),
+        "feature_policy": feature_policy,
         "branch_actions": ["extend_current", "new_branch"],
         "research_line_actions": sorted(RESEARCH_LINE_ACTIONS),
         "allow_legacy_baselines": bool(ss.get("allow_legacy_baselines", False)),
@@ -126,10 +161,14 @@ def allowed_search_space(config, dataset_schema: dict[str, Any] | None = None) -
         "requires_model_script": bool(ss.get("requires_model_script", False)),
     }
 
-    # Preprocessing
+    # Preprocessing — reflect the dataset's cap (or its absence).
     prep = ss.get("preprocessing", {})
-    space["claim_cap_thresholds"] = list(prep.get("claim_cap_thresholds", [100000]))
-    space["allow_disable_claim_capping"] = bool(prep.get("allow_disable_claim_capping", False))
+    if spec.cap is not None:
+        space["claim_cap_thresholds"] = [spec.cap.threshold]
+        space["allow_disable_claim_capping"] = bool(prep.get("allow_disable_claim_capping", False))
+    else:
+        space["claim_cap_thresholds"] = [None]
+        space["allow_disable_claim_capping"] = True
     space["allow_log1p_features"] = list(prep.get("allow_log1p_features", []))
 
     return space
