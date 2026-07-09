@@ -102,6 +102,26 @@ def _fit_xgboost(ctx: FitContext) -> tuple[Any, dict[str, Any]]:
 _HGB_LOSS = {"poisson": "poisson", "gamma": "gamma", "squared_error": "squared_error"}
 
 
+def _densify(X: Any) -> Any:
+    from scipy import sparse
+
+    return X.toarray() if sparse.issparse(X) else X
+
+
+class _DensePredictor:
+    """HistGradientBoosting rejects sparse X; densify at fit and predict time
+    so the advertised hist_gbm × one_hot combination actually runs."""
+
+    def __init__(self, model: Any) -> None:
+        self._model = model
+
+    def predict(self, X: Any) -> np.ndarray:
+        return self._model.predict(_densify(X))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._model, name)
+
+
 def _fit_hist_gbm(ctx: FitContext) -> tuple[Any, dict[str, Any]]:
     from sklearn.ensemble import HistGradientBoostingRegressor
 
@@ -112,10 +132,10 @@ def _fit_hist_gbm(ctx: FitContext) -> tuple[Any, dict[str, Any]]:
         params.setdefault("n_iter_no_change", int(ctx.early_stopping))
     model = HistGradientBoostingRegressor(loss=_HGB_LOSS[ctx.objective], **params)
     # HistGBR manages its own internal validation split for early stopping.
-    model.fit(ctx.X_train, ctx.y_train, sample_weight=ctx.w_train)
+    model.fit(_densify(ctx.X_train), ctx.y_train, sample_weight=ctx.w_train)
     notes = {"estimator": "hist_gbm", "objective": ctx.objective,
              "n_iter": getattr(model, "n_iter_", None)}
-    return model, notes
+    return _DensePredictor(model), notes
 
 
 # ── sklearn TweedieRegressor (GLM) ───────────────────────────────────────────
@@ -196,6 +216,15 @@ def register_builtin_estimators() -> None:
             "colsample_bynode", "max_bin", "min_data_in_leaf", "tweedie_variance_power",
             "verbosity", "force_col_wise",
         }),
+        param_aliases=(
+            ("bagging_fraction", "subsample"),
+            ("feature_fraction", "colsample_bytree"),
+            ("lambda_l1", "reg_alpha"),
+            ("lambda_l2", "reg_lambda"),
+            ("num_iterations", "n_estimators"),
+            ("min_sum_hessian_in_leaf", "min_child_weight"),
+            ("shrinkage_rate", "learning_rate"),
+        ),
     ))
     register_estimator(EstimatorSpec(
         name="xgboost",
@@ -210,6 +239,14 @@ def register_builtin_estimators() -> None:
             "gamma", "colsample_bylevel", "colsample_bynode", "max_bin", "max_leaves",
             "grow_policy", "tree_method", "min_split_loss", "tweedie_variance_power",
         }),
+        param_aliases=(
+            ("eta", "learning_rate"),
+            ("alpha", "reg_alpha"),
+            ("lambda", "reg_lambda"),
+            ("nthread", "n_jobs"),
+            ("num_boost_round", "n_estimators"),
+            ("max_leaf_nodes", "max_leaves"),
+        ),
     ))
     register_estimator(EstimatorSpec(
         name="hist_gbm",
@@ -226,6 +263,12 @@ def register_builtin_estimators() -> None:
             "l2_regularization", "max_bins", "early_stopping", "n_iter_no_change",
             "validation_fraction", "max_features", "random_state",
         }),
+        param_aliases=(
+            ("n_estimators", "max_iter"),
+            ("max_bin", "max_bins"),
+            ("min_child_samples", "min_samples_leaf"),
+            ("reg_lambda", "l2_regularization"),
+        ),
     ))
     register_estimator(EstimatorSpec(
         name="tweedie_glm",

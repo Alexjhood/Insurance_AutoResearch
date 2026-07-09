@@ -220,7 +220,39 @@ def _pop_thinking(params: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _make_regressor(backend: str, params: dict[str, Any], seed: int, device: str | None):
+def _resolve_categorical_indices(names: Any, ctx: FitContext) -> list[int] | None:
+    """Map recipe-named categorical features to post-encoding column indices.
+
+    Uses the interpreter-provided ``encoded_column_indices`` layout, which is
+    only populated for encodings that keep one column per feature (ordinal) —
+    under one-hot the named columns no longer exist, so the param is rejected.
+    """
+    if not names:
+        return None
+    if not isinstance(names, (list, tuple)) or not all(isinstance(n, str) for n in names):
+        raise RecipeError("tabpfn categorical_features must be a list of feature names.")
+    layout = ctx.encoded_column_indices
+    if not layout:
+        raise RecipeError(
+            "tabpfn categorical_features requires encoding='ordinal' "
+            "(one-hot expansion removes the named columns)."
+        )
+    unknown = [n for n in names if n not in layout]
+    if unknown:
+        raise RecipeError(
+            f"tabpfn categorical_features {unknown} are not encoded feature columns; "
+            f"valid names: {sorted(layout)}."
+        )
+    return sorted(layout[n] for n in names)
+
+
+def _make_regressor(
+    backend: str,
+    params: dict[str, Any],
+    seed: int,
+    device: str | None,
+    categorical_indices: list[int] | None = None,
+):
     """Construct a local or API TabPFN regressor from the curated params."""
     if backend == "api":
         _authenticate_api()
@@ -231,6 +263,8 @@ def _make_regressor(backend: str, params: dict[str, Any], seed: int, device: str
         reg_kwargs: dict[str, Any] = {}
         if "n_estimators" in params:
             reg_kwargs["n_estimators"] = int(params.pop("n_estimators"))
+        if categorical_indices is not None:
+            reg_kwargs["categorical_features_indices"] = categorical_indices
         reg_kwargs.update(_pop_thinking(params))  # thinking mode (client-validated)
         return TabPFNRegressor(**reg_kwargs)
 
@@ -262,6 +296,8 @@ def _make_regressor(backend: str, params: dict[str, Any], seed: int, device: str
     }
     if "n_estimators" in params:
         reg_kwargs["n_estimators"] = int(params.pop("n_estimators"))
+    if categorical_indices is not None:
+        reg_kwargs["categorical_features_indices"] = categorical_indices
     reg_kwargs.update(params)  # any remaining curated passthrough
     return TabPFNRegressor(**reg_kwargs)
 
@@ -281,13 +317,15 @@ def _fit_tabpfn(ctx: FitContext) -> tuple[Any, dict[str, Any]]:
 
     # Capture thinking config for the notes before _make_regressor pops it.
     thinking = {k: params[k] for k in _THINKING_PARAMS if k in params}
+    categorical_names = params.pop("categorical_features", None) or None
 
     X = _densify(ctx.X_train)
+    categorical_indices = _resolve_categorical_indices(categorical_names, ctx)
     X_ctx, y_ctx, _w_ctx, n_context = subsample_context(
         X, ctx.y_train, ctx.w_train, max_context, strategy, seed
     )
 
-    model = _make_regressor(backend, params, seed, device)
+    model = _make_regressor(backend, params, seed, device, categorical_indices)
     model.fit(X_ctx, np.asarray(y_ctx, dtype=float))
 
     notes = {
@@ -300,6 +338,8 @@ def _fit_tabpfn(ctx: FitContext) -> tuple[Any, dict[str, Any]]:
         "subsample_strategy": strategy,
         "subsampled": bool(n_context < len(ctx.y_train)),
         "thinking": thinking or None,
+        "categorical_features": list(categorical_names) if categorical_names else None,
+        "categorical_features_indices": categorical_indices,
     }
     return _BatchedRegressor(model, batch_size=batch_size), notes
 
@@ -325,6 +365,9 @@ _TABPFN_SPEC = EstimatorSpec(
     allowed_params=frozenset({
         "backend", "max_context_rows", "subsample_strategy", "random_state",
         "n_estimators", "device", "predict_batch_size",
+        # Feature names to flag as categorical to TabPFN (ordinal encoding only;
+        # unlisted categoricals are left to TabPFN's server-side auto-inference).
+        "categorical_features",
         # Thinking mode (api backend only; see _pop_thinking).
         "thinking_mode", "thinking_effort", "thinking_timeout_s", "thinking_metric",
     }),

@@ -3,9 +3,10 @@ model_family = "global_mean"
 target_strategy = "direct_pure_premium"
 parent_experiment_id = ""
 
-# Every research run begins here: a flat exposure-weighted rate for the active
-# target mode. In the default burning-cost mode this is a flat burning cost;
-# in frequency mode this is a flat expected claim count per exposure.
+# Every research run begins here: a flat weighted rate for the active target
+# mode. In the default burning-cost mode this is a flat burning cost; in
+# frequency mode a flat expected claim count per exposure; in severity mode a
+# flat cost-per-claim on claim rows only (weighted by claim count).
 
 [preprocessing]
 claim_capping_enabled = true

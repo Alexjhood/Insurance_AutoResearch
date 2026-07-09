@@ -85,9 +85,15 @@ def write_usage_report(run_dir: Path) -> Path | None:
             key: int(row[key]) - int(previous[key])
             for key in _USAGE_FIELDS
         }
+        # Cached share of the prompt: cached / (cached + uncached). Dividing by
+        # input_tokens is wrong on surfaces where input excludes cache reads
+        # (OpenCode showed 11,250% "cache hit" rates that way).
+        prompt_tokens = (
+            incremental["cached_input_tokens"] + incremental["uncached_input_tokens"]
+        )
         cache_ratio = (
-            float(incremental["cached_input_tokens"]) / float(incremental["input_tokens"])
-            if incremental["input_tokens"]
+            float(incremental["cached_input_tokens"]) / float(prompt_tokens)
+            if prompt_tokens
             else None
         )
         lines.append(

@@ -7,7 +7,13 @@ from dataclasses import dataclass
 
 BURNING_COST = "burning_cost"
 FREQUENCY = "frequency"
-VALID_TARGET_MODES = {BURNING_COST, FREQUENCY}
+SEVERITY = "severity"
+VALID_TARGET_MODES = {BURNING_COST, FREQUENCY, SEVERITY}
+
+# Population selectors — which rows a mode trains and evaluates on.
+POPULATION_ALL = "all"
+POPULATION_CLAIM_ROWS = "claim_rows"  # rows with ClaimNb > 0
+POPULATION_POSITIVE_CLAIM_AMOUNT_ROWS = "positive_claim_amount_rows"  # rows with ClaimAmountCount > 0
 
 
 @dataclass(frozen=True)
@@ -29,6 +35,12 @@ class TargetSpec:
     mean_actual_rate_key: str
     mean_predicted_rate_key: str
     default_primary_metric: str
+    # Weight/offset column — the denominator that turns a target total into a
+    # rate and the sample weight for every metric. Exposure for population-wide
+    # modes; claim count for severity (rate = cost per claim).
+    weight_column: str = "Exposure"
+    # Row population the mode trains and scores on.
+    population: str = POPULATION_ALL
 
 
 SPECS = {
@@ -65,6 +77,28 @@ SPECS = {
         mean_actual_rate_key="mean_actual_frequency",
         mean_predicted_rate_key="mean_predicted_frequency",
         default_primary_metric="gini_weighted",
+    ),
+    SEVERITY: TargetSpec(
+        mode=SEVERITY,
+        # Total is capped claim cost; the rate is cost per paid claim event,
+        # weighted by the joined severity-file claim count and evaluated only
+        # where a positive paid claim amount exists.
+        source_column="ClaimAmountCapped",
+        predicted_column="predicted_claim_cost",
+        rate_actual_column="actual_severity",
+        rate_predicted_column="predicted_severity",
+        actual_alias="actual_claim_cost",
+        predicted_alias="predicted_claim_cost",
+        rate_label="severity",
+        total_actual_key="total_actual_claim_cost",
+        total_predicted_key="total_predicted_claim_cost",
+        mae_key="weighted_mae_claim_cost",
+        rmse_key="weighted_rmse_claim_cost",
+        mean_actual_rate_key="mean_actual_severity",
+        mean_predicted_rate_key="mean_predicted_severity",
+        default_primary_metric="gini_weighted",
+        weight_column="ClaimAmountCount",
+        population=POPULATION_POSITIVE_CLAIM_AMOUNT_ROWS,
     ),
 }
 

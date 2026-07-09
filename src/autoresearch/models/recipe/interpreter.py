@@ -28,7 +28,7 @@ from autoresearch.models.recipe.registry import (
     get_estimator,
 )
 from autoresearch.models.recipe.schema import recipe_summary, validate_recipe
-from autoresearch.targets import BURNING_COST, FREQUENCY, normalise_target_mode
+from autoresearch.targets import BURNING_COST, FREQUENCY, SEVERITY, normalise_target_mode
 
 
 EXPOSURE = "Exposure"
@@ -114,6 +114,7 @@ def _run_stage(
     validate_objective_labels(objective, y_rate, context=stage["estimator"])
 
     numeric, categorical = _split_types(train_df, features)
+    encoded_column_indices = None
     if enc_spec.native:
         X_train_full = _as_categorical(train_df[features], categorical)
         X_score = _as_categorical(score_df[features], categorical)
@@ -123,6 +124,12 @@ def _run_stage(
         X_train_full = transformer.fit_transform(train_df[features])
         X_score = transformer.transform(score_df[features])
         cat_features = None
+        if encoding == "ordinal":
+            # The ordinal ColumnTransformer emits the numeric block first, then
+            # the categorical block, one column per feature in this order.
+            encoded_column_indices = {
+                name: i for i, name in enumerate([*numeric, *categorical])
+            }
 
     y_full = np.asarray(y_rate, dtype=float)
     w_full = np.asarray(weight, dtype=float)
@@ -150,6 +157,7 @@ def _run_stage(
         X_train=X_tr, y_train=y_tr, w_train=w_tr,
         X_val=X_val, y_val=y_val, w_val=w_val,
         categorical_features=cat_features, early_stopping=early_stopping,
+        encoded_column_indices=encoded_column_indices,
     )
     predictor, notes = spec.fit(ctx)
     pred = np.clip(np.asarray(predictor.predict(X_score), dtype=float), 0.0, None)
@@ -196,6 +204,12 @@ def fit_predict(
     if structure == "frequency_severity":
         pred_rate, stage_notes = _fit_frequency_severity(recipe, train, score, features)
         notes["stages"] = stage_notes
+    elif target_mode == SEVERITY:
+        # Direct severity: cost per claim on claim rows (the dispatcher has
+        # already filtered to ClaimNb > 0), claim-count-weighted. The framework
+        # multiplies the returned rate by claim count to recover the cost total.
+        pred_rate, stage_notes = _fit_direct_severity(recipe, train, score, features)
+        notes.update({f"stage_{k}": v for k, v in stage_notes.items()})
     else:
         if target_mode == FREQUENCY:
             y_rate = train[CLAIM_COUNT].astype(float).to_numpy() / np.clip(train_exposure, 1e-12, None)
@@ -208,6 +222,32 @@ def fit_predict(
 
     prediction = Prediction(values=pred_rate, unit="rate", calibrate=True)
     return prediction, notes, None
+
+
+def _fit_direct_severity(
+    recipe: dict[str, Any],
+    train: pd.DataFrame,
+    score: pd.DataFrame,
+    features: list[str],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Single-stage severity: cost per paid claim event, event-count-weighted.
+
+    ``train`` is already restricted to positive paid-claim rows by the
+    dispatcher. Mirrors the severity stage of the freq×sev decomposition but
+    returns the cost-per-claim rate directly (no frequency multiplier).
+    """
+
+    count = train[CLAIM_EVENTS].astype(float).to_numpy()
+    cost = train[CLAIM_COST].astype(float).to_numpy()
+    per_claim = cost / np.clip(count, 1e-12, None)
+    if recipe.get("objective") == "gamma":
+        positive = per_claim > 0
+        if not positive.any():
+            raise RecipeError("Severity gamma model has no strictly positive cost rows")
+        train = train[positive]
+        per_claim = per_claim[positive]
+        count = count[positive]
+    return _run_stage(recipe, train, score, features, per_claim, count)
 
 
 def _fit_frequency_severity(
@@ -226,14 +266,15 @@ def _fit_frequency_severity(
         stages["frequency"], train, score, features, freq_rate_train, train_exposure
     )
 
-    # Severity stage: cost per claim on claim rows, claim-count-weighted.
+    # Severity stage: cost per paid claim event on positive paid-claim rows.
     sev_stage = stages["severity"]
-    claim_mask = train_count > 0
+    train_event_count = train[CLAIM_EVENTS].astype(float).to_numpy()
+    claim_mask = train_event_count > 0
     sev_train = train[claim_mask].copy()
     if sev_train.empty:
-        raise RecipeError("Severity stage has no training rows with claim_count > 0")
+        raise RecipeError("Severity stage has no training rows with ClaimAmountCount > 0")
     sev_cost = sev_train[CLAIM_COST].astype(float).to_numpy()
-    sev_count = sev_train[CLAIM_COUNT].astype(float).to_numpy()
+    sev_count = sev_train[CLAIM_EVENTS].astype(float).to_numpy()
     sev_per_claim = sev_cost / np.clip(sev_count, 1e-12, None)
     if sev_stage.get("objective") == "gamma":
         positive = sev_per_claim > 0

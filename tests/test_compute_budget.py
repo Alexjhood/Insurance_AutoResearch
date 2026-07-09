@@ -346,3 +346,75 @@ def test_schema_migration_adds_timing_columns(tmp_path: Path):
     with sqlite3.connect(registry_path) as con:
         row = con.execute("SELECT * FROM experiments WHERE experiment_id='old_exp'").fetchone()
     assert row is not None
+
+
+# ---------------------------------------------------------------------------
+# Preflight thinking-param stripping
+# ---------------------------------------------------------------------------
+
+def test_preflight_strips_thinking_params_from_recipe():
+    """Preflight must not spend a TabPFN thinking-budget session on the smoke sample."""
+    from autoresearch.experiment_runner import _preflight_dispatch_kwargs
+
+    original = {
+        "frame": "sentinel",
+        "hyperparameters": {
+            "thinking_mode": True,  # script-model surface
+            "recipe": {
+                "structure": "direct",
+                "estimator": "tabpfn",
+                "objective": "squared_error",
+                "params": {
+                    "backend": "api",
+                    "max_context_rows": 32000,
+                    "n_estimators": 1,
+                    "thinking_effort": "high",
+                    "thinking_timeout_s": 60,
+                    "thinking_metric": "spearmanr",
+                },
+            },
+        },
+    }
+    sanitized = _preflight_dispatch_kwargs(original)
+
+    params = sanitized["hyperparameters"]["recipe"]["params"]
+    assert not any(k.startswith("thinking") for k in params)
+    assert params["backend"] == "api"  # non-thinking params untouched
+    assert params["max_context_rows"] == 32000
+    assert "thinking_mode" not in sanitized["hyperparameters"]
+    assert sanitized["frame"] == "sentinel"
+
+    # The real fit must still see the thinking params: original is unmodified.
+    assert original["hyperparameters"]["recipe"]["params"]["thinking_effort"] == "high"
+    assert original["hyperparameters"]["thinking_mode"] is True
+
+
+def test_preflight_strips_thinking_params_from_stages():
+    from autoresearch.experiment_runner import _preflight_dispatch_kwargs
+
+    original = {
+        "hyperparameters": {
+            "recipe": {
+                "structure": "frequency_severity",
+                "stages": {
+                    "frequency": {
+                        "estimator": "tabpfn",
+                        "objective": "squared_error",
+                        "params": {"backend": "api", "thinking_effort": "high"},
+                    },
+                    "severity": {
+                        "estimator": "lightgbm",
+                        "objective": "gamma",
+                        "params": {"num_leaves": 31},
+                    },
+                },
+            },
+        },
+    }
+    sanitized = _preflight_dispatch_kwargs(original)
+    stages = sanitized["hyperparameters"]["recipe"]["stages"]
+    assert stages["frequency"]["params"] == {"backend": "api"}
+    assert stages["severity"]["params"] == {"num_leaves": 31}
+    assert original["hyperparameters"]["recipe"]["stages"]["frequency"]["params"][
+        "thinking_effort"
+    ] == "high"

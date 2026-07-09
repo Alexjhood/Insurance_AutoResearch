@@ -40,7 +40,7 @@ from autoresearch.controller.proposal_schema import (  # noqa: E402
     SCIENTIFIC_PROPOSAL_FIELDS,
 )
 from autoresearch.models import dispatcher  # noqa: E402
-from autoresearch.models.recipe import menu as recipe_menu  # noqa: E402
+from autoresearch.models.recipe import enable_foundation_models, menu as recipe_menu  # noqa: E402
 from autoresearch.utils.integrity import PROTECTED_RELATIVE_PATHS  # noqa: E402
 
 AGENT_MD = REPO_ROOT / "AGENT.md"
@@ -117,6 +117,7 @@ def render() -> str:
     proposal_fields = ", ".join(f"`{f}`" for f in SCIENTIFIC_PROPOSAL_FIELDS)
     derived_fields = ", ".join(f"`{f}`" for f in DERIVED_PROPOSAL_FIELDS)
 
+    enable_foundation_models()
     rmenu = recipe_menu()
     estimator_lines = "\n".join(
         f"- **{name}** — obj {sorted(info['objectives'])}; enc {sorted(info['encodings'])}"

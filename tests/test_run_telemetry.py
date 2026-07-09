@@ -919,3 +919,87 @@ def test_signal_extraction_ignores_documentation_reads():
         {"detail": "pytest", "name": "exec_command"},
         False,
     )
+
+
+def test_opencode_import_normalises_tokens_and_records_tool_calls(tmp_path):
+    # Run 20260612T105643Z showed 0/0 tool calls and >100% "cache hit" rates:
+    # OpenCode's tokens.input excludes cache reads, and tool parts were never
+    # imported from opencode.db.
+    from autoresearch.telemetry import store
+    from autoresearch.telemetry.importer import _import_opencode
+
+    con = store.connect(tmp_path)
+    sess = store.upsert_session(
+        con,
+        surface="opencode",
+        native_session_id="oc-1",
+        transcript_path=tmp_path / "opencode.db",
+        metadata={},
+    )
+    user_msg = {
+        "id": "m1",
+        "time_created": 1780000000000,
+        "data": json.dumps({"role": "user", "time": {"created": 1780000000000}}),
+    }
+    asst_msg = {
+        "id": "m2",
+        "time_created": 1780000001000,
+        "data": json.dumps({
+            "role": "assistant",
+            "time": {"created": 1780000001000},
+            "providerID": "deepseek",
+            "modelID": "deepseek-v4-flash-free",
+            "tokens": {
+                "input": 25665, "output": 1020, "reasoning": 861, "total": 172698,
+                "cache": {"read": 145152, "write": 100},
+            },
+        }),
+    }
+    ok_part = {
+        "id": "p1",
+        "message_id": "m2",
+        "data": json.dumps({
+            "type": "tool", "tool": "bash", "callID": "call_1",
+            "state": {
+                "status": "completed", "input": {"command": "ls"}, "output": "ok",
+                "time": {"start": 1780000000500, "end": 1780000000900},
+            },
+        }),
+    }
+    err_part = {
+        "id": "p2",
+        "message_id": "m2",
+        "data": json.dumps({
+            "type": "tool", "tool": "read", "callID": "call_2",
+            "state": {
+                "status": "error", "input": {"filePath": "/missing"},
+                "error": "File not found",
+                "time": {"start": 1780000000950, "end": 1780000000990},
+            },
+        }),
+    }
+
+    _import_opencode(
+        con, sess, "opencode/deepseek-v4-flash-free", None,
+        [user_msg, asst_msg], [ok_part, err_part],
+    )
+    con.commit()
+
+    call = con.execute(
+        "SELECT input_tokens, cached_input_tokens, uncached_input_tokens "
+        "FROM llm_model_calls"
+    ).fetchone()
+    # input == cached + uncached, so cache-hit rates stay <= 100%.
+    assert call[0] == 25665 + 145152 + 100
+    assert call[1] == 145152
+    assert call[2] == 25665 + 100
+    assert call[1] + call[2] == call[0]
+
+    tools = con.execute(
+        "SELECT name, status, success, duration_ms FROM llm_tool_calls ORDER BY name"
+    ).fetchall()
+    assert [(t[0], t[1], t[2]) for t in tools] == [
+        ("bash", "completed", 1), ("read", "error", 0),
+    ]
+    assert tools[0][3] == 400
+    con.close()

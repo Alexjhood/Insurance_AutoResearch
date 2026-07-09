@@ -163,7 +163,6 @@ invalid ones are rejected before running):
 - **elasticnet** — obj ['squared_error']; enc ['one_hot']
 - **hist_gbm** — obj ['gamma', 'poisson', 'squared_error']; enc ['one_hot', 'ordinal'] (early-stop)
 - **lightgbm** — obj ['gamma', 'poisson', 'squared_error', 'tweedie']; enc ['native_categorical', 'one_hot', 'ordinal'] (early-stop)
-- **tabpfn** — obj ['squared_error']; enc ['one_hot', 'ordinal']
 - **tweedie_glm** — obj ['gamma', 'poisson', 'tweedie']; enc ['one_hot']
 - **xgboost** — obj ['gamma', 'poisson', 'squared_error', 'tweedie']; enc ['one_hot', 'ordinal'] (early-stop)
 

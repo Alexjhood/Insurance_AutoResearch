@@ -87,3 +87,20 @@ def test_second_proposal_is_deferred_while_one_is_queued(tmp_path: Path) -> None
     assert second_summary["deferred_count"] == 1
     assert not any(item["status"] == "duplicate" for item in proposals)
     assert (config.handoff_proposal_inbox_dir / "second.json").exists()
+
+
+def test_session_inherits_pinned_cycle_budget_from_manifest(tmp_path: Path) -> None:
+    # bootstrap-track --cycles N pins the budget; sessions opened without
+    # --max-cycles inherit it (run 20260612T105643Z ran 16 cycles when asked
+    # for 15 because max_cycles was never bound).
+    config = _ready_config(tmp_path)
+    manifest_path = config.artifacts_dir / "run_manifest.json"
+    manifest = read_json(manifest_path) if manifest_path.exists() else {}
+    manifest["default_max_cycles"] = 15
+    write_json(manifest_path, manifest)
+
+    inherited = create_session(config, "budgeted")
+    explicit = create_session(config, "explicit", max_cycles=3)
+
+    assert inherited["max_cycles"] == 15
+    assert explicit["max_cycles"] == 3

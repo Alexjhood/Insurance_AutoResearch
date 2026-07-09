@@ -54,14 +54,32 @@ SESSION_STATES = {
 
 
 def create_session(config: ProjectConfig, name: str, max_cycles: int | None = None) -> dict[str, Any]:
-    """Create a named autonomous research session."""
+    """Create a named autonomous research session.
+
+    Without an explicit ``max_cycles`` the session inherits the run's pinned
+    cycle budget (``bootstrap-track --cycles``) from run_manifest.json, so the
+    framework — not the agent's own counting — ends the run on budget.
+    """
 
     ensure_project_dirs(config)
+    if max_cycles is None:
+        max_cycles = _default_max_cycles_from_manifest(config)
     session_id = _session_id(name)
     state = _base_state(session_id, name, max_cycles)
     _persist_state(config, state, event_type="created", message="Session created.")
     export_context_bundle(config)
     return state
+
+
+def _default_max_cycles_from_manifest(config: ProjectConfig) -> int | None:
+    manifest_path = config.artifacts_dir / "run_manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        value = read_json(manifest_path).get("default_max_cycles")
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    return int(value) if isinstance(value, int) and value > 0 else None
 
 
 def latest_session(config: ProjectConfig) -> dict[str, Any] | None:
@@ -270,6 +288,11 @@ def run_session_cycle(config: ProjectConfig, session_id: str | None = None) -> d
             message=(
                 f"Experiment evaluated — awaiting LLM decision for comparison "
                 f"{result.get('comparison_id')}. Call `record-decision`."
+                + (
+                    f" ARTIFACT ALERT: {result['artifact_alert']}"
+                    if result.get("artifact_alert")
+                    else ""
+                )
             ),
             details=result,
         )
@@ -554,6 +577,8 @@ def _write_latest_cycle_summary(config: ProjectConfig, state: dict[str, Any]) ->
         f"- comparison_id: `{result.get('comparison_id')}`",
         f"- decision: `{result.get('decision')}`",
     ]
+    if result.get("artifact_alert"):
+        lines.append(f"- **ARTIFACT ALERT**: {result['artifact_alert']}")
     (config.handoff_results_dir / "latest_cycle_result.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

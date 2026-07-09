@@ -39,7 +39,7 @@ from autoresearch.models.recipe.registry import (
     get_objective,
     list_structures,
 )
-from autoresearch.targets import BURNING_COST, FREQUENCY, normalise_target_mode
+from autoresearch.targets import BURNING_COST, FREQUENCY, SEVERITY, normalise_target_mode
 
 
 STAGE_KEYS = {"estimator", "objective", "encoding", "params", "early_stopping", "target"}
@@ -48,8 +48,31 @@ STAGE_KEYS = {"estimator", "objective", "encoding", "params", "early_stopping", 
 RESERVED_PARAM_NAMES = frozenset({"objective", "loss", "target_mode", "recipe"})
 
 
+def _canonicalise_param_aliases(
+    params: dict[str, Any], spec: Any, where: str, errors: list[str]
+) -> None:
+    """Rewrite well-known library-native param spellings to the curated name.
+
+    Mutates ``params`` in place so the canonical name is what validation checks,
+    what gets persisted, and what the estimator builder receives (agents
+    routinely write ``eta`` for xgboost or ``bagging_fraction`` for lightgbm).
+    """
+
+    for alias, canonical in getattr(spec, "param_aliases", ()) or ():
+        if alias not in params:
+            continue
+        if canonical in params:
+            errors.append(
+                f"{where}.params sets both {alias!r} and its canonical name "
+                f"{canonical!r}; keep only {canonical!r}"
+            )
+            continue
+        params[canonical] = params.pop(alias)
+
+
 def _validate_params(params: dict[str, Any], spec: Any, where: str, errors: list[str]) -> None:
     """Catch bad param names/types at proposal time, not as paid runtime repairs."""
+    _canonicalise_param_aliases(params, spec, where, errors)
     for name, value in params.items():
         if name in RESERVED_PARAM_NAMES:
             errors.append(f"{where}.params.{name} is framework-controlled and must not be set")
@@ -74,7 +97,7 @@ TARGET_OBJECTIVES = {
     # excluded by the zeros.
     "pure_premium": {"tweedie", "poisson", "squared_error"},
     "frequency": {"poisson", "tweedie", "squared_error"},
-    "severity": {"gamma", "squared_error"},          # strictly positive by construction
+    "severity": {"gamma", "poisson", "squared_error"},  # strictly positive by construction
 }
 
 
@@ -82,7 +105,11 @@ def _stage_target(structure: str, stage_name: str | None, target_mode: str) -> s
     if structure == "frequency_severity":
         return "frequency" if stage_name == "frequency" else "severity"
     # direct
-    return "frequency" if target_mode == FREQUENCY else "pure_premium"
+    if target_mode == FREQUENCY:
+        return "frequency"
+    if target_mode == SEVERITY:
+        return "severity"
+    return "pure_premium"
 
 
 def _validate_stage(

@@ -348,7 +348,10 @@ def render_handoff_markdown(
         f"`{name}` (obj {sorted(info['objectives'])})"
         for name, info in _menu["estimators"].items()
     )
-    _default_objective = "poisson" if target_mode == "frequency" else "tweedie"
+    _default_objective = {
+        "frequency": "poisson",
+        "severity": "gamma",
+    }.get(target_mode, "tweedie")
     feature_list = ", ".join(f"`{f}`" for f in features)
     tree = context.get("research_tree") or {}
     research_lines = context.get("research_lines") or {}
@@ -356,20 +359,21 @@ def render_handoff_markdown(
     research_line_lines = _render_research_line_lines(research_lines.get("active_lines") or [])
     parked_line_lines = _render_parked_line_lines(research_lines.get("parked_lines") or [])
     recommended_actions = (tree.get("tree_policy") or {}).get("recommended_actions") or []
-    recommended_action = recommended_actions[0] if recommended_actions else {}
     action_lines = _render_tree_policy_lines(recommended_actions)
     deferred_lines = _render_deferred_proposal_warning(config)
     learning_lines = _render_recent_learnings(config, context)
 
+    # Default target strategy for the active mode (severity is claim-rows-only).
+    _default_strategy = "direct_severity" if target_mode == "severity" else "direct_pure_premium"
     champion_recipe_path = config.handoff_proposal_inbox_dir / "champion_recipe.json"
     if champion_recipe_path.exists():
         try:
             champion_artifact = read_json(champion_recipe_path)
             template_target_strategy = (
-                champion_artifact.get("target_strategy") or "direct_pure_premium"
+                champion_artifact.get("target_strategy") or _default_strategy
             )
         except Exception:
-            template_target_strategy = "direct_pure_premium"
+            template_target_strategy = _default_strategy
         template_model = {
             "recipe_ref": "champion",
             "recipe_overrides": {
@@ -377,7 +381,7 @@ def render_handoff_markdown(
             },
         }
     else:
-        template_target_strategy = "direct_pure_premium"
+        template_target_strategy = _default_strategy
         template_model = {
             "recipe": {
                 "structure": "direct",
@@ -418,23 +422,24 @@ def render_handoff_markdown(
     # Escape-hatch shape, shown only as the alternative for novel models.
     script_config_json = json.dumps({
         "model_family": "scripted_challenger",
-        "target_strategy": "direct_pure_premium",
+        "target_strategy": _default_strategy,
         "model": {"script_path": "model_<name>.py"},
     }, indent=2)
 
     # Optional block — only include the keys you want to override. The controller
     # otherwise derives ids/parentage, follows the top recommended tree action,
     # and extends the most recent active research line.
+    # Placeholders only: concrete values here get copy-pasted into proposals
+    # wholesale (observed in run 20260612T105643Z), turning derivable defaults
+    # into validation failures.
     override_json = json.dumps({
-        "research_line_id": (
-            (research_lines.get("active_lines") or [{}])[0].get("line_id", "<existing_line_id>")
-        ),
+        "research_line_id": "<existing line_id to extend, or a short new id when creating>",
         "research_line_action": "<create_line|extend_line|revisit_line|close_line>",
         "research_line_label": "<label, only required when creating a new line>",
         "research_line_hypothesis": "<hypothesis, only required when creating a new line>",
-        "tree_action": recommended_action.get("tree_action", "<tree_action>"),
-        "selected_tree_action_id": recommended_action.get("action_id", "<recommended action_id>"),
-        "research_parent_node_id": recommended_action.get("parent_node_id"),
+        "tree_action": "<only when diverging from the recommended action>",
+        "selected_tree_action_id": "<an action_id from the recommended tree actions below>",
+        "research_parent_node_id": "<a node_id from this run's exploration tree, or null>",
         "tree_policy_override_rationale": "<required only when diverging from the recommended action>",
     }, indent=2)
 
@@ -504,7 +509,8 @@ def render_handoff_markdown(
         "",
         "**Prefer a declarative `model.recipe`** (below): trusted framework code builds the model "
         "and owns exposure→total conversion and calibration — no Python file, no hand-calibration. "
-        f"Estimators: {estimator_menu}. Structures: `direct`, `frequency_severity` (burning-cost only). "
+        f"Estimators: {estimator_menu}. Structures: `direct`, `frequency_severity` (burning-cost only; "
+        "in `severity` target mode use `direct` — the population is already claim rows only). "
         "Encoding defaults per estimator; `early_stopping` uses a framework train-internal split.",
         "When a recipe champion exists, use `model.recipe_ref: \"champion\"` plus only the nested "
         "`recipe_overrides` you are changing. The controller resolves and validates the full recipe "
@@ -531,8 +537,9 @@ def render_handoff_markdown(
         "```",
         "",
         "By default the controller follows the top recommended tree action and "
-        "extends the most recent active research line. To override either, add only "
-        "the keys you want to change from this optional block (omit the rest). To "
+        "extends the most recent active research line — **the usual move is to omit "
+        "this block entirely**. Do not copy it verbatim: add only the keys you want "
+        "to change (every `<...>` is a placeholder, not a value). To "
         "open a *new* line set `research_line_action` to `create_line` with a short "
         "new `research_line_id` plus a `research_line_label`/`research_line_hypothesis`; "
         "to extend an existing line use its id and you can omit the label/hypothesis:",
@@ -546,7 +553,7 @@ def render_handoff_markdown(
         f"- **Target mode**: `{target_mode}`",
         f"- **Features available**: {feature_list}",
         "- **Exposure policy**: `Exposure` is not a predictive feature. The framework uses it for sample weights, response denominators, and rate→total conversion — you do not.",
-        f"- **Target strategies**: {', '.join(f'`{s}`' for s in target_strategies)} (must agree with the recipe `structure`: `direct_pure_premium`/`frequency`→`direct`, `frequency_severity`→`frequency_severity`)",
+        f"- **Target strategies**: {', '.join(f'`{s}`' for s in target_strategies)} (must agree with the recipe `structure`: `direct_pure_premium`/`frequency`/`direct_severity`→`direct`, `frequency_severity`→`frequency_severity`)",
         "- **Claim cap**: `100000` (fixed — never change `claim_cap_threshold`)",
         "- **Units & calibration are framework-owned**: a recipe (or a script returning `Prediction`) needs no exposure conversion or `apply_training_calibration` call. Only a script returning a raw `np.ndarray` must return totals and calibrate itself.",
         "- **Never reference** `milestone_holdout`, `holdout_vault`, or `AUTORESEARCH_MILESTONE_TOKEN`",
@@ -672,7 +679,7 @@ def proposal_schema_document(config: ProjectConfig, context: dict[str, Any]) -> 
             "experiment_config.parent_experiment_id (derived) mirrors parent_experiment_id.",
             "Provide exactly one of model.recipe, model.recipe_ref='champion', or model.script_path. "
             "recipe_ref accepts an optional nested recipe_overrides object and is resolved before validation.",
-            "A recipe's structure must agree with target_strategy (direct↔direct_pure_premium/frequency; "
+            "A recipe's structure must agree with target_strategy (direct↔direct_pure_premium/frequency/direct_severity; "
             "frequency_severity↔frequency_severity).",
             "Do not use Exposure as a predictive feature; it is reserved for weights and response calculations.",
             "research_parent_node_id is optional and may only point to a node from this active run's research_tree.",
@@ -686,7 +693,9 @@ def proposal_schema_document(config: ProjectConfig, context: dict[str, Any]) -> 
             "When the previous cycle was auto-rejected, the next proposal must include "
             "previous_cycle_reflection with cycle, interpretation, and next. The framework "
             "uses it to complete the prior cycle before running the new proposal.",
-            f"Active target_mode is {config.target_mode}; use frequency only when the run was explicitly configured for it.",
+            f"Active target_mode is {config.target_mode}; use a non-default mode only when the run was explicitly configured for it. "
+            "In severity mode the population is claim rows only (ClaimNb > 0); ClaimNb is the metric weight and rate→total offset, never a feature; "
+            "the response is cost per claim (strictly positive) so objectives are gamma or squared_error.",
             "Do not reference milestone_holdout.",
         ],
     }

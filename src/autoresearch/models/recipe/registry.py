@@ -104,6 +104,11 @@ class FitContext:
     w_val: Any | None
     categorical_features: list[str] | None
     early_stopping: int | None
+    # Name → post-encoding column index, only for encodings that keep one
+    # column per feature (ordinal). None on native/one-hot paths. Lets
+    # estimators that take positional categorical indices (e.g. TabPFN)
+    # locate named features in the encoded matrix.
+    encoded_column_indices: dict[str, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +137,9 @@ class EstimatorSpec:
     allowed_params: frozenset[str] = field(default_factory=frozenset)
     # Groups of mutually-exclusive param names, e.g. ("power", "tweedie_variance_power").
     param_conflicts: tuple[tuple[str, ...], ...] = ()
+    # Well-known library-native spellings mapped to the curated canonical name,
+    # e.g. xgboost's "eta" -> "learning_rate". Canonicalised before validation.
+    param_aliases: tuple[tuple[str, str], ...] = ()
 
 
 _ESTIMATORS: dict[str, EstimatorSpec] = {}

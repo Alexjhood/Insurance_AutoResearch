@@ -335,6 +335,12 @@ def _compact_research_line_history(rows: list[dict[str, Any]]) -> list[dict[str,
     return result
 
 
+# After this many consecutive decided-and-rejected experiments since the last
+# promotion, the top recommendation switches to a structural move (or stopping):
+# run 20260612T105643Z kept hyperparameter-tuning through a 15-cycle plateau.
+PLATEAU_NON_PROMOTION_STREAK = 5
+
+
 def _build_tree_policy(champion: dict[str, Any] | None, nodes: list[dict[str, Any]]) -> dict[str, Any]:
     """Return compact active-run tree-walk guidance without prescribing model types."""
 
@@ -359,6 +365,23 @@ def _build_tree_policy(champion: dict[str, Any] | None, nodes: list[dict[str, An
             break
         streak += 1
 
+    # Plateau: consecutive decided-and-not-promoted experiments since the last
+    # promotion. Invalid/failed proposals are not evidence either way.
+    non_promotion_streak = 0
+    for node in nodes:  # newest first
+        status = node.get("status")
+        outcome = node.get("outcome_type")
+        if status == "promoted":
+            break
+        if status == "rejected" and outcome in {"llm_rejected", "clear_loser"}:
+            non_promotion_streak += 1
+        elif status in {"failed", "needs_repair"} or outcome in {"invalid", "system_error"}:
+            continue
+        elif status in {"awaiting_decision", "running", "screened", "proposed"}:
+            continue
+        else:
+            break
+
     actions: list[dict[str, Any]] = []
     active_nodes = [
         node for node in nodes
@@ -379,6 +402,21 @@ def _build_tree_policy(champion: dict[str, Any] | None, nodes: list[dict[str, An
             "requires_parent_node_id": False,
             "parent_node_id": None,
             "reason": "No active-run research nodes exist yet; start a first explicit hypothesis.",
+        })
+    elif non_promotion_streak >= PLATEAU_NON_PROMOTION_STREAK:
+        actions.append({
+            "action_id": "break_plateau_structurally",
+            "tree_action": "new_root",
+            "requires_parent_node_id": False,
+            "parent_node_id": None,
+            "reason": (
+                f"{non_promotion_streak} consecutive experiments have failed to beat the "
+                "champion — the run is at a plateau. Further tuning of the champion family "
+                "is provably below the gate's noise floor. Make a structural move: a new "
+                "model family, a different target framing or feature representation, or an "
+                "ensemble/blend of the strongest distinct models — or recommend stopping "
+                "the run if the signal ceiling is established."
+            ),
         })
     elif streak >= 2:
         actions.append({
@@ -430,6 +468,7 @@ def _build_tree_policy(champion: dict[str, Any] | None, nodes: list[dict[str, An
         "one_proposal_per_context_refresh": True,
         "axis_counts": axis_counts,
         "recent_axis_streak": {"axis": recent_axis, "count": streak},
+        "non_promotion_streak": non_promotion_streak,
         "recommended_actions": actions[:4],
         "override_policy": (
             "If no recommended action fits, set selected_tree_action_id to the closest action "

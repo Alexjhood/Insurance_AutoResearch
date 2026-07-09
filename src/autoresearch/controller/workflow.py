@@ -179,6 +179,50 @@ def _awaiting_decision_proposals(config: ProjectConfig) -> list[dict[str, Any]]:
     ]
 
 
+# A challenger whose score clears this ceiling (or whose lift over an
+# established champion clears the lift threshold) is almost certainly leaking
+# the target or gaming the evaluation, not finding signal — run 20260612T105643Z
+# posted CV gini 0.980 from a script that swept the actual claim amount into its
+# features, and every mechanical guardrail passed.
+_IMPLAUSIBLE_SCORE_CEILING = 0.55
+_IMPLAUSIBLE_LIFT = 0.15
+_MIN_ESTABLISHED_CHAMPION_SCORE = 0.05
+
+
+def _implausible_result_alert(
+    config: ProjectConfig,
+    metrics_summary: dict[str, Any],
+    screening: dict[str, Any] | None,
+) -> str | None:
+    """Advisory triage for too-good-to-be-true results, pre-decision."""
+
+    score_ceiling = float(getattr(config, "implausible_score_ceiling", _IMPLAUSIBLE_SCORE_CEILING))
+    lift_threshold = float(getattr(config, "implausible_lift_threshold", _IMPLAUSIBLE_LIFT))
+    challenger = float(metrics_summary.get("cv_challenger_score") or 0.0)
+    champion = float(metrics_summary.get("cv_champion_score") or 0.0)
+    lifts = [float(metrics_summary.get("cv_mean_lift") or 0.0)]
+    if screening:
+        if screening.get("split_lift") is not None:
+            lifts.append(float(screening["split_lift"]))
+        if screening.get("split_challenger_score") is not None:
+            challenger = max(challenger, float(screening["split_challenger_score"]))
+    if challenger >= score_ceiling:
+        return (
+            f"Challenger {config.primary_metric} {challenger:.3f} exceeds the plausibility "
+            f"ceiling {score_ceiling:.2f} for this problem. Scores this high almost always "
+            "mean target leakage or an evaluation artifact, not genuine signal. Inspect the "
+            "model's feature inputs and diagnostics before considering promotion; "
+            "reason-code artifact_suspected likely applies unless disproven."
+        )
+    if max(lifts) >= lift_threshold and champion >= _MIN_ESTABLISHED_CHAMPION_SCORE:
+        return (
+            f"Lift {max(lifts):+.3f} over an established champion is implausibly large for "
+            "genuine signal at this stage. Verify with diagnostics (feature inputs, decile "
+            "lift, calibration) before promoting; suspect leakage or an artifact."
+        )
+    return None
+
+
 def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
     """Run the next validated proposal and gate it against the official champion."""
 
@@ -387,6 +431,7 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
                     6,
                 ),
             })
+        artifact_alert = _implausible_result_alert(config, metrics_summary, screening)
         _upsert_proposal_node(
             config,
             proposal,
@@ -395,12 +440,14 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
             comparison_id=comparison_id,
             screening=screening,
             metrics={**_screening_metrics_summary(screening or {}), **metrics_summary},
+            guidance=artifact_alert,
         )
         return {
             "proposal_id": proposal_id,
             "experiment_id": experiment_id,
             "comparison_id": comparison_id,
             "decision": "pending_llm",
+            "artifact_alert": artifact_alert,
             "advisory_decision": (report.get("advisory_promotion_decision") or {}).get("decision"),
             "guardrail_passed": guardrail.get("passed"),
             "guardrail_failures": guardrail.get("failures", []),
@@ -521,6 +568,126 @@ def _hydrate_research_line(config: ProjectConfig, parsed: dict[str, Any]) -> Non
         _bind_existing_line(active[0])
 
 
+def _reconcile_tree_fields(
+    config: ProjectConfig,
+    parsed: dict[str, Any],
+    recommended: list[dict[str, Any]],
+) -> None:
+    """Repair redundant or incomplete agent-supplied tree-walk fields.
+
+    The controller derives all tree-walk fields itself, but agents routinely
+    copy them from the handoff anyway (run 20260612T105643Z lost 5 cycles to
+    the resulting cross-field consistency errors). When the supplied fields are
+    derivable, derive the missing companions instead of failing the proposal.
+    Every repair is recorded in ``tree_field_reconciliations`` for audit. An
+    explicit ``tree_policy_override_rationale`` disables nothing — it already
+    satisfies the validators, so no reconciliation is needed.
+    """
+
+    notes: list[str] = []
+    has_rationale = not _is_blank(parsed.get("tree_policy_override_rationale"))
+    supplied_action = None if _is_blank(parsed.get("tree_action")) else parsed["tree_action"]
+    supplied_selected = (
+        None if _is_blank(parsed.get("selected_tree_action_id"))
+        else parsed["selected_tree_action_id"]
+    )
+    selected_rec = next(
+        (item for item in recommended if item.get("action_id") == supplied_selected), None
+    )
+
+    if supplied_action and not supplied_selected:
+        # tree_action alone: bind it to the matching recommendation so the
+        # blank-fill below cannot pair it with a mismatched action id.
+        match = next(
+            (item for item in recommended if item.get("tree_action") == supplied_action), None
+        )
+        if match:
+            parsed["selected_tree_action_id"] = match.get("action_id")
+            selected_rec = match
+            notes.append(
+                f"selected_tree_action_id derived as {match.get('action_id')!r} to match "
+                f"supplied tree_action {supplied_action!r}"
+            )
+    elif (
+        selected_rec is not None
+        and supplied_action
+        and supplied_action != selected_rec.get("tree_action")
+        and not has_rationale
+    ):
+        # The selected recommendation is the stronger signal of intent.
+        parsed["tree_action"] = selected_rec.get("tree_action")
+        notes.append(
+            f"tree_action corrected from {supplied_action!r} to "
+            f"{selected_rec.get('tree_action')!r} to match selected_tree_action_id "
+            f"{supplied_selected!r}"
+        )
+
+    if selected_rec is not None and _is_blank(parsed.get("research_parent_node_id")):
+        parent_id = selected_rec.get("parent_node_id")
+        if parent_id:
+            parsed["research_parent_node_id"] = parent_id
+            notes.append(
+                f"research_parent_node_id derived as {parent_id!r} from the selected "
+                "recommendation"
+            )
+
+    # A brand-new research line with a stated hypothesis is, by construction,
+    # the materially-new-axis explanation the new_root policy asks for. A
+    # supplied-but-unknown line id also opens a new line (hydration marks it
+    # create_line later), so treat it the same way here.
+    line_id_value = parsed.get("research_line_id")
+    creating_line = parsed.get("research_line_action") == "create_line" or (
+        isinstance(line_id_value, str)
+        and line_id_value.strip()
+        and get_research_line(config.registry_path, line_id_value) is None
+    )
+    if (
+        parsed.get("tree_action") == "new_root"
+        and creating_line
+        and not has_rationale
+        and not _is_blank(parsed.get("research_line_hypothesis"))
+    ):
+        parsed["tree_policy_override_rationale"] = (
+            f"Opening new research line: {parsed['research_line_hypothesis']}"
+        )
+        notes.append("tree_policy_override_rationale derived from the new line's hypothesis")
+        has_rationale = True
+
+    # A parent node anchors the science: when the named line disagrees with the
+    # parent's line (and the agent is not opening a new line), follow the parent.
+    research_parent = parsed.get("research_parent_node_id")
+    line_id = parsed.get("research_line_id")
+    if (
+        research_parent
+        and isinstance(line_id, str)
+        and line_id.strip()
+        and parsed.get("research_line_action") != "create_line"
+        and not has_rationale
+    ):
+        parent_node = next(
+            (
+                node
+                for node in list_research_nodes(config.registry_path)
+                if node.get("node_id") == research_parent
+            ),
+            None,
+        )
+        parent_line = parent_node.get("line_id") if parent_node else None
+        if (
+            parent_line
+            and parent_line != line_id
+            and get_research_line(config.registry_path, line_id) is not None
+        ):
+            parsed["research_line_id"] = parent_line
+            notes.append(
+                f"research_line_id corrected from {line_id!r} to the parent node's line "
+                f"{parent_line!r}"
+            )
+
+    if notes:
+        parsed["tree_field_reconciliations"] = notes
+
+
 def _hydrate_derived_fields(
     config: ProjectConfig,
     parsed: dict[str, Any],
@@ -548,6 +715,7 @@ def _hydrate_derived_fields(
     policy = (context.get("research_tree") or {}).get("tree_policy") or {}
     recommended = policy.get("recommended_actions") or []
     rec = recommended[0] if recommended else {}
+    _reconcile_tree_fields(config, parsed, recommended)
     if _is_blank(parsed.get("tree_action")):
         parsed["tree_action"] = rec.get("tree_action") or "new_root"
     if _is_blank(parsed.get("selected_tree_action_id")):
@@ -734,9 +902,22 @@ def _validate_research_line_navigation(
         park_line_id = parsed.get("park_research_line_id")
         if len(active_lines) >= MAX_ACTIVE_RESEARCH_LINES:
             if not isinstance(park_line_id, str) or not park_line_id.strip():
-                errors.append(
-                    f"At most {MAX_ACTIVE_RESEARCH_LINES} active research lines are allowed; "
-                    "set park_research_line_id to park one existing active line before creating another."
+                # Controller-derived default: park the least-recently-updated
+                # active line rather than failing the proposal (parking is
+                # reversible via revisit_line). Run 20260612T105643Z lost a
+                # cycle to this error at the cap.
+                lru = min(
+                    active_lines,
+                    key=lambda line: str(line.get("updated_at") or line.get("created_at") or ""),
+                )
+                parsed["park_research_line_id"] = lru.get("line_id")
+                parsed.setdefault(
+                    "park_research_line_rationale",
+                    (
+                        f"Auto-parked least-recently-active line {lru.get('line_id')!r} to stay "
+                        f"within the {MAX_ACTIVE_RESEARCH_LINES}-active-line cap while opening "
+                        f"{line_id!r}. Revive it later with research_line_action=revisit_line."
+                    ),
                 )
             elif park_line_id == line_id:
                 errors.append("park_research_line_id cannot equal the new research_line_id")

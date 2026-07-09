@@ -54,6 +54,11 @@ def sync_opencode_session(
             "SELECT * FROM message WHERE session_id=? ORDER BY time_created",
             (native_session_id,),
         ).fetchall()
+        tool_part_rows = oc_con.execute(
+            "SELECT * FROM part WHERE session_id=? AND json_extract(data,'$.type')='tool' "
+            "ORDER BY time_created",
+            (native_session_id,),
+        ).fetchall()
     finally:
         oc_con.close()
 
@@ -85,7 +90,9 @@ def sync_opencode_session(
             transcript_path=db_path,
             metadata=metadata,
         )
-        imported = _import_opencode(con, sess_key, model_str, effort, message_rows)
+        imported = _import_opencode(
+            con, sess_key, model_str, effort, message_rows, tool_part_rows
+        )
         store.refresh_turn_aggregates(con, sess_key)
         store.refresh_session_status(con, sess_key, finalize=True)
         store.update_cursor(
@@ -930,10 +937,15 @@ def _import_opencode(
     model_str: str,
     effort: str | None,
     message_rows: list,
+    tool_part_rows: list | None = None,
 ) -> int:
     """Process OpenCode message rows into telemetry tables."""
     current_turn: str | None = store.latest_turn(con, session_key)
     imported = 0
+
+    tool_parts_by_message: dict[str, list] = {}
+    for part_row in tool_part_rows or []:
+        tool_parts_by_message.setdefault(str(part_row["message_id"]), []).append(part_row)
 
     for msg_row in message_rows:
         try:
@@ -987,6 +999,11 @@ def _import_opencode(
         total_tok = _int(tokens.get("total")) or (input_tok + output_tok)
         cost = data.get("cost")
 
+        # OpenCode normalises usage so `tokens.input` EXCLUDES cache reads and
+        # writes (observed: input 25k alongside cache.read 145k in one step).
+        # Report the full prompt size as input, and count cache writes as
+        # uncached work, so input == cached + uncached and cache-hit rates
+        # stay <= 100%.
         store.upsert_model_call(
             con,
             {
@@ -995,10 +1012,10 @@ def _import_opencode(
                 "turn_key": current_turn,
                 "occurred_at": timestamp,
                 "model": full_model,
-                "input_tokens": input_tok,
+                "input_tokens": input_tok + cache_read + cache_write,
                 "cached_input_tokens": cache_read,
                 "cache_creation_input_tokens": cache_write,
-                "uncached_input_tokens": max(input_tok - cache_read, 0),
+                "uncached_input_tokens": input_tok + cache_write,
                 "output_tokens": output_tok,
                 "reasoning_tokens": reasoning_tok,
                 "total_tokens": total_tok,
@@ -1008,7 +1025,57 @@ def _import_opencode(
         store.update_turn_context(con, current_turn, model=full_model, effort=effort)
         imported += 1
 
+        for part_row in tool_parts_by_message.get(msg_id, []):
+            imported += _import_opencode_tool_part(con, session_key, current_turn, part_row)
+
     return imported
+
+
+def _import_opencode_tool_part(
+    con: sqlite3.Connection,
+    session_key: str,
+    turn_key: str | None,
+    part_row: Any,
+) -> int:
+    """Record one OpenCode tool invocation (a message part of type 'tool')."""
+
+    try:
+        data: dict[str, Any] = json.loads(part_row["data"] or "{}") or {}
+    except (json.JSONDecodeError, TypeError):
+        return 0
+    state: dict[str, Any] = data.get("state") or {}
+    status = _str(state.get("status"))
+    times: dict[str, Any] = state.get("time") or {}
+    start_ms = times.get("start")
+    end_ms = times.get("end")
+    input_payload = state.get("input")
+    output_payload = state.get("output")
+    error_text = _str(state.get("error"))
+    success: bool | None = None
+    if status == "completed":
+        success = True
+    elif status == "error":
+        success = False
+    store.upsert_tool_call(
+        con,
+        {
+            "call_key": f"{session_key}:tool:{part_row['id']}",
+            "session_key": session_key,
+            "turn_key": turn_key,
+            "provider_call_id": _str(data.get("callID")),
+            "name": _str(data.get("tool")) or "tool",
+            "detail": json.dumps(input_payload)[:300] if input_payload is not None else None,
+            "started_at": _ms_to_iso(start_ms) if start_ms else None,
+            "completed_at": _ms_to_iso(end_ms) if end_ms else None,
+            "duration_ms": int(end_ms - start_ms) if start_ms and end_ms else None,
+            "status": status,
+            "success": success,
+            "input_bytes": len(json.dumps(input_payload)) if input_payload is not None else 0,
+            "output_bytes": len(output_payload) if isinstance(output_payload, str) else 0,
+            "error_type": error_text[:120] if error_text else None,
+        },
+    )
+    return 1
 
 
 def _find_opencode_db() -> Path | None:

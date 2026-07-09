@@ -894,7 +894,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--target-mode",
-        choices=("burning_cost", "frequency"),
+        choices=("burning_cost", "frequency", "severity"),
         default=None,
         help="Override the configured evaluation target. Default is burning_cost unless the config says otherwise.",
     )

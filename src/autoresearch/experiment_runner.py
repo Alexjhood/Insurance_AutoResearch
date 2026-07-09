@@ -495,6 +495,41 @@ def _resolve_model_script_path(experiment_config_path: Path, model_cfg: dict[str
     return local_path
 
 
+def _preflight_dispatch_kwargs(dispatch_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Copy of the dispatch kwargs with TabPFN thinking params stripped.
+
+    Thinking mode draws from a separate (much smaller) Prior Labs daily budget
+    and is charged per fit request, so leaving it enabled here would burn a
+    second thinking session per experiment on the 5k-row smoke sample. The
+    smoke test only needs to prove the model runs end-to-end; the plain
+    (non-thinking) fit exercises the same code path. Thinking-specific
+    parameter validation still happens client-side at the real fit.
+    """
+    import copy
+
+    from autoresearch.models.recipe.foundation import _THINKING_PARAMS
+
+    kwargs = dict(dispatch_kwargs)
+    hp = copy.deepcopy(kwargs.get("hyperparameters") or {})
+
+    def _strip(params: Any) -> None:
+        if isinstance(params, dict):
+            for key in _THINKING_PARAMS:
+                params.pop(key, None)
+
+    _strip(hp)  # script models receive hyperparameters directly
+    recipe = hp.get("recipe")
+    if isinstance(recipe, dict):
+        _strip(recipe.get("params"))
+        stages = recipe.get("stages")
+        if isinstance(stages, dict):
+            for stage in stages.values():
+                if isinstance(stage, dict):
+                    _strip(stage.get("params"))
+    kwargs["hyperparameters"] = hp
+    return kwargs
+
+
 def _run_preflight_smoke_test(
     frame: Any,
     dispatch_kwargs: dict[str, Any],
@@ -509,6 +544,8 @@ def _run_preflight_smoke_test(
     n = min(getattr(config, "preflight_sample_rows", 5000), len(frame))
     if n <= 0:
         return
+
+    dispatch_kwargs = _preflight_dispatch_kwargs(dispatch_kwargs)
 
     sample = frame.sample(n=n, random_state=42)
     # Filter split_frame to sampled rows so the splits are consistent.

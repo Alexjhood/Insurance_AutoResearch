@@ -561,7 +561,8 @@ def test_create_line_at_cap_requires_and_applies_parking(tmp_path: Path) -> None
     initialise_official_champion(config)
     config.metadata_dir.mkdir(parents=True, exist_ok=True)
     (config.metadata_dir / "dataset_schema.json").write_text(
-        '{"columns": [{"name": "Exposure", "role": "numeric_feature"}]}',
+        '{"columns": [{"name": "Exposure", "role": "numeric_feature"},'
+        ' {"name": "VehPower", "role": "numeric_feature"}]}',
         encoding="utf-8",
     )
     for idx in range(5):
@@ -583,24 +584,37 @@ def test_create_line_at_cap_requires_and_applies_parking(tmp_path: Path) -> None
     (config.handoff_proposal_inbox_dir / "proposal.json").write_text(json.dumps(proposal), encoding="utf-8")
 
     summary = ingest_proposals(config)
+    lines = {line["line_id"]: line for line in list_research_lines(config.registry_path)}
 
-    assert summary["invalid_count"] == 1
-    assert any("At most 5 active research lines" in err for err in summary["results"][0]["validation_errors"])
+    # Creating a line at the cap without park_research_line_id auto-parks the
+    # least-recently-active line instead of failing the proposal.
+    assert summary["valid_count"] == 1
+    assert lines["line_new"]["status"] == "active"
+    auto_parked = [line for line in lines.values() if line["status"] == "parked"]
+    assert len(auto_parked) == 1
+    active_count = sum(1 for line in lines.values() if line["status"] == "active")
+    assert active_count <= 5
 
+    # An explicit park_research_line_id is still honoured as supplied.
+    update_proposal_status(config.registry_path, "new_line_no_park", "rejected", notes="test")
     proposal["proposal_id"] = "new_line_with_park"
-    proposal["park_research_line_id"] = "line_0"
-    proposal["park_research_line_rationale"] = "Line 0 has no useful next step."
-    proposal["tree_policy_override_rationale"] = "Test isolates line parking after an intentionally invalid proposal."
+    proposal["research_line_id"] = "line_new_2"
+    proposal["park_research_line_id"] = "line_1"
+    proposal["park_research_line_rationale"] = "Line 1 has no useful next step."
+    proposal["tree_policy_override_rationale"] = "Test isolates explicit line parking."
     proposal["experiment_name"] = "new_line_with_park"
     proposal["experiment_config"]["experiment_name"] = "new_line_with_park"
+    # Distinct executable config + change summary so dedup doesn't match.
+    proposal["experiment_config"]["model"]["feature_exclusions"] = ["VehPower"]
+    proposal["change_summary"] = "Global-mean config without VehPower."
     (config.handoff_proposal_inbox_dir / "proposal2.json").write_text(json.dumps(proposal), encoding="utf-8")
 
     summary = ingest_proposals(config)
     lines = {line["line_id"]: line for line in list_research_lines(config.registry_path)}
 
-    assert summary["valid_count"] == 1
-    assert lines["line_0"]["status"] == "parked"
-    assert lines["line_new"]["status"] == "active"
+    assert summary["valid_count"] == 1, summary
+    assert lines["line_1"]["status"] == "parked"
+    assert lines["line_new_2"]["status"] == "active"
 
 
 def test_clear_research_line_champion_keeps_line_but_removes_incumbent(tmp_path: Path) -> None:
@@ -638,6 +652,8 @@ def test_tree_action_requires_parent_for_non_root(tmp_path: Path) -> None:
         '{"columns": [{"name": "Exposure", "role": "numeric_feature"}]}',
         encoding="utf-8",
     )
+    # A tree_action that conflicts with the selected recommendation is now
+    # reconciled to the recommendation (the selected id is the stronger signal).
     proposal = _valid_proposal()
     proposal["tree_action"] = "extend_node"
     proposal["selected_tree_action_id"] = "start_first_root"
@@ -646,8 +662,25 @@ def test_tree_action_requires_parent_for_non_root(tmp_path: Path) -> None:
 
     summary = ingest_proposals(config)
 
+    assert summary["valid_count"] == 1
+
+    # With no selected id and no matching recommendation, a non-root action
+    # without a parent is still a hard error.
+    update_proposal_status(config.registry_path, "handoff_valid_1", "rejected", notes="test")
+    proposal["proposal_id"] = "no_parent_strict"
+    proposal["experiment_name"] = "no_parent_strict"
+    proposal["experiment_config"]["experiment_name"] = "no_parent_strict"
+    proposal["tree_action"] = "extend_node"
+    del proposal["selected_tree_action_id"]
+    (config.handoff_proposal_inbox_dir / "proposal2.json").write_text(json.dumps(proposal), encoding="utf-8")
+
+    summary = ingest_proposals(config)
+
     assert summary["invalid_count"] == 1
-    assert any("requires research_parent_node_id" in err for err in summary["results"][0]["validation_errors"])
+    assert any(
+        "requires research_parent_node_id" in err
+        for err in summary["results"][0]["validation_errors"]
+    )
 
 
 def test_stale_parent_is_auto_rejected_before_execution(tmp_path: Path) -> None:

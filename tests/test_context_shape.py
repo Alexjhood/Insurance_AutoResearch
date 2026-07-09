@@ -85,3 +85,33 @@ claim_cap_threshold = 100000
     context = build_llm_context(config)
     assert set(context.keys()) == _EXPECTED_TOP_KEYS
     assert len(json.dumps(context)) < 8000
+
+
+def test_tree_policy_recommends_structural_move_at_plateau() -> None:
+    from autoresearch.controller.context import _build_tree_policy
+
+    def _rejected(i):
+        return {"node_id": f"n{i}", "status": "rejected", "outcome_type": "llm_rejected",
+                "exploration_axis": "hyperparameter", "experiment_id": f"e{i}"}
+
+    nodes = [_rejected(i) for i in range(5)]  # newest first
+    policy = _build_tree_policy(None, nodes)
+    assert policy["non_promotion_streak"] == 5
+    assert policy["recommended_actions"][0]["action_id"] == "break_plateau_structurally"
+
+    # A promotion inside the window resets the streak: no plateau action.
+    nodes_with_promotion = nodes[:2] + [
+        {"node_id": "champ", "status": "promoted", "outcome_type": None,
+         "exploration_axis": "model_family", "experiment_id": "echamp"},
+    ] + nodes[2:]
+    policy = _build_tree_policy(None, nodes_with_promotion)
+    assert policy["non_promotion_streak"] == 2
+    assert all(a["action_id"] != "break_plateau_structurally" for a in policy["recommended_actions"])
+
+    # Invalid proposals are not evidence and do not break the streak.
+    nodes_with_invalid = nodes[:3] + [
+        {"node_id": "bad", "status": "failed", "outcome_type": "invalid",
+         "exploration_axis": "hyperparameter"},
+    ] + nodes[3:]
+    policy = _build_tree_policy(None, nodes_with_invalid)
+    assert policy["non_promotion_streak"] == 5

@@ -64,6 +64,21 @@ def test_finalize_rate_to_total_and_calibration() -> None:
     assert train_mask.any()
 
 
+def test_hist_gbm_one_hot_runs_dense() -> None:
+    # Regression: advertised-legal hist_gbm × one_hot crashed on sparse X
+    # (sklearn TypeError) in run 20260612T105643Z cycle 9.
+    frame, split = _frame()
+    rc = {"structure": "direct", "estimator": "hist_gbm", "objective": "squared_error",
+          "encoding": "one_hot", "params": {"max_depth": 4}, "early_stopping": 10}
+    res = dispatch_model(
+        frame, split, model_family="recipe", target_strategy="direct_pure_premium",
+        train_split="train", score_splits=("search_validation",),
+        hyperparameters={"recipe": rc}, target_mode="burning_cost",
+    )
+    preds = res.predictions["predicted_claim_cost"].to_numpy()
+    assert np.all(np.isfinite(preds)) and np.all(preds >= 0)
+
+
 def test_validate_objective_labels() -> None:
     validate_objective_labels("poisson", np.array([0.0, 1.0, 2.0]))
     with pytest.raises(PredictionUnitError):
@@ -109,6 +124,26 @@ def test_recipe_validation_matrix() -> None:
          "stages": {"frequency": {"estimator": "lightgbm", "objective": "poisson"},
                     "severity": {"estimator": "lightgbm", "objective": "gamma"}}},
         target_mode="frequency")
+
+
+def test_param_aliases_canonicalised() -> None:
+    # Run 20260612T105643Z lost a cycle to xgboost's native `eta` spelling.
+    rc = {"structure": "direct", "estimator": "xgboost", "objective": "tweedie",
+          "params": {"eta": 0.05, "max_depth": 6}}
+    assert validate_recipe(rc, target_mode="burning_cost") == []
+    assert rc["params"] == {"learning_rate": 0.05, "max_depth": 6}
+
+    rc = {"structure": "direct", "estimator": "lightgbm", "objective": "tweedie",
+          "params": {"bagging_fraction": 0.8, "lambda_l2": 0.1}}
+    assert validate_recipe(rc, target_mode="burning_cost") == []
+    assert rc["params"] == {"subsample": 0.8, "reg_lambda": 0.1}
+
+
+def test_param_alias_conflict_rejected() -> None:
+    rc = {"structure": "direct", "estimator": "xgboost", "objective": "tweedie",
+          "params": {"eta": 0.05, "learning_rate": 0.1}}
+    errs = validate_recipe(rc, target_mode="burning_cost")
+    assert errs and "canonical" in errs[0]
 
 
 def test_unknown_estimator_points_to_escape_hatch() -> None:

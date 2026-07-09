@@ -11,7 +11,16 @@ import numpy as np
 import pandas as pd
 
 from autoresearch.models.prediction import Prediction, finalize_prediction
-from autoresearch.targets import BURNING_COST, FREQUENCY, normalise_target_mode, target_spec
+from autoresearch.targets import (
+    BURNING_COST,
+    FREQUENCY,
+    POPULATION_ALL,
+    POPULATION_CLAIM_ROWS,
+    POPULATION_POSITIVE_CLAIM_AMOUNT_ROWS,
+    SEVERITY,
+    normalise_target_mode,
+    target_spec,
+)
 
 
 # Column name constants (keep consistent across all model modules)
@@ -21,6 +30,62 @@ CLAIM_COUNT = "ClaimNb"
 CLAIM_EVENTS = "ClaimAmountCount"
 CLAIM_COST = "ClaimAmountCapped"
 RAW_CLAIM_COST = "ClaimAmount"
+
+
+def _filter_to_population(frame: pd.DataFrame, spec: Any, *, context: str) -> pd.DataFrame:
+    """Restrict a frame to the target's evaluation population.
+
+    Severity is modelled and assessed on positive paid-claim rows only
+    (ClaimAmountCount > 0); every other mode uses the full population. Filtering
+    here — the single dispatch chokepoint shared by the search runner, the CV
+    refit factory, and the holdout eval — means every surface selects the same
+    rows automatically.
+    """
+
+    if spec.population == POPULATION_ALL:
+        return frame
+    if spec.population == POPULATION_CLAIM_ROWS:
+        column = CLAIM_COUNT
+    elif spec.population == POPULATION_POSITIVE_CLAIM_AMOUNT_ROWS:
+        column = CLAIM_EVENTS
+    else:
+        raise ValueError(f"{context}: unknown target population {spec.population!r}")
+    filtered = frame[frame[column].astype(float) > 0]
+    if filtered.empty:
+        raise ValueError(
+            f"{context}: no rows with {column} > 0 for target_mode {spec.mode!r}"
+        )
+    return filtered.copy()
+
+
+def _add_target_rate_columns(
+    predictions: pd.DataFrame, target_mode: str, clipped_target: np.ndarray
+) -> None:
+    """Populate predicted-total and per-mode rate columns on a prediction frame.
+
+    The frame's ``exposure`` column already holds the active metric weight
+    (exposure, or claim count for severity), so each rate is
+    ``target_total / weight``: pure premium, claim frequency, or cost-per-claim
+    severity respectively.
+    """
+
+    exp = predictions["exposure"].clip(lower=1e-12)
+    if target_mode == FREQUENCY:
+        predictions["predicted_claim_count"] = clipped_target
+        predictions["predicted_claim_cost"] = np.nan
+    else:  # burning_cost and severity both predict a claim-cost total
+        predictions["predicted_claim_cost"] = clipped_target
+        predictions["predicted_claim_count"] = np.nan
+    if target_mode == SEVERITY:
+        # Claim-only frame: rate is cost per claim; population-wide pure-premium
+        # and frequency rates are not meaningful here.
+        predictions["actual_severity"] = predictions["actual_claim_cost"] / exp
+        predictions["predicted_severity"] = predictions["predicted_claim_cost"] / exp
+    else:
+        predictions["actual_pure_premium"] = predictions["actual_claim_cost"] / exp
+        predictions["predicted_pure_premium"] = predictions["predicted_claim_cost"] / exp
+        predictions["actual_frequency"] = predictions["actual_claim_count"] / exp
+        predictions["predicted_frequency"] = predictions["predicted_claim_count"] / exp
 
 
 @dataclass(frozen=True)
@@ -83,6 +148,9 @@ def dispatch_model(
         raise ValueError(f"Training split {train_split!r} is empty")
     if score.empty:
         raise ValueError("No rows available for scoring")
+    # Severity trains and scores on claim rows only; a no-op for other modes.
+    train = _filter_to_population(train, spec, context=f"train split {train_split!r}")
+    score = _filter_to_population(score, spec, context="score frame")
 
     predicted_target, notes, interpret_fn = _call_model(
         model_family,
@@ -99,7 +167,8 @@ def dispatch_model(
     )
 
     actual_target = score[spec.source_column].astype(float).to_numpy()
-    exposure = score[EXPOSURE].astype(float).to_numpy()
+    # Metric weight: exposure for population-wide modes, claim count for severity.
+    exposure = score[spec.weight_column].astype(float).to_numpy()
     predictions = pd.DataFrame({
         RECORD_ID: score[RECORD_ID].to_numpy(),
         "split": score["split"].to_numpy(),
@@ -112,19 +181,7 @@ def dispatch_model(
         "actual_target": actual_target,
         "predicted_target": clipped_target,
     })
-    exp = predictions["exposure"].clip(lower=1e-12)
-    if target_mode == BURNING_COST:
-        predictions["predicted_claim_cost"] = clipped_target
-        predictions["predicted_claim_count"] = np.nan
-    elif target_mode == FREQUENCY:
-        predictions["predicted_claim_count"] = clipped_target
-        predictions["predicted_claim_cost"] = np.nan
-    else:  # pragma: no cover - guarded by normalise_target_mode
-        raise ValueError(f"Unsupported target_mode: {target_mode}")
-    predictions["actual_pure_premium"] = predictions["actual_claim_cost"] / exp
-    predictions["predicted_pure_premium"] = predictions["predicted_claim_cost"] / exp
-    predictions["actual_frequency"] = predictions["actual_claim_count"] / exp
-    predictions["predicted_frequency"] = predictions["predicted_claim_count"] / exp
+    _add_target_rate_columns(predictions, target_mode, clipped_target)
     return ModelResult(predictions=predictions, model_notes=notes, interpret_fn=interpret_fn)
 
 
@@ -165,6 +222,10 @@ def dispatch_model_on_explicit_frames(
 
     hp.setdefault("_id_columns", _matching_id_columns(train_df))
 
+    # Severity trains and scores on claim rows only; a no-op for other modes.
+    train_df = _filter_to_population(train_df, spec, context="cv train frame")
+    val_df = _filter_to_population(val_df, spec, context="cv val frame")
+
     # Tag with synthetic split labels; score frame includes both so fit_predict
     # receives the same (train, score) structure as the standard runner.
     _train = train_df.copy()
@@ -193,7 +254,8 @@ def dispatch_model_on_explicit_frames(
 
     actual_target = score_val[spec.source_column].astype(float).to_numpy()
     clipped_target = finalised[val_mask]
-    exposure = score_val[EXPOSURE].astype(float).to_numpy()
+    # Metric weight: exposure for population-wide modes, claim count for severity.
+    exposure = score_val[spec.weight_column].astype(float).to_numpy()
 
     predictions = pd.DataFrame({
         RECORD_ID: score_val[RECORD_ID].to_numpy(),
@@ -205,17 +267,7 @@ def dispatch_model_on_explicit_frames(
         "actual_target": actual_target,
         "predicted_target": clipped_target,
     })
-    exp = predictions["exposure"].clip(lower=1e-12)
-    if target_mode == BURNING_COST:
-        predictions["predicted_claim_cost"] = clipped_target
-        predictions["predicted_claim_count"] = np.nan
-    else:
-        predictions["predicted_claim_count"] = clipped_target
-        predictions["predicted_claim_cost"] = np.nan
-    predictions["actual_pure_premium"] = predictions["actual_claim_cost"] / exp
-    predictions["predicted_pure_premium"] = predictions["predicted_claim_cost"] / exp
-    predictions["actual_frequency"] = predictions["actual_claim_count"] / exp
-    predictions["predicted_frequency"] = predictions["predicted_claim_count"] / exp
+    _add_target_rate_columns(predictions, target_mode, clipped_target)
     return ModelResult(predictions=predictions, model_notes=notes, interpret_fn=interpret_fn)
 
 
@@ -233,6 +285,30 @@ def _matching_id_columns(frame: pd.DataFrame) -> list[str]:
         if series.is_unique and series.equals(record_ids):
             matches.append(column)
     return matches
+
+
+# Target-bearing columns: a run-local script must never see these for the rows
+# it scores, or the actual claim outcome leaks straight into its feature space.
+_TARGET_COLUMNS = (CLAIM_COST, RAW_CLAIM_COST, CLAIM_COUNT, CLAIM_EVENTS)
+
+
+def _sanitize_script_frames(
+    train: pd.DataFrame, score: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return script-safe copies of the train/score frames.
+
+    The score frame loses every target-bearing column; both frames lose
+    identifier columns that duplicate ``record_id`` (a column-sweeping script
+    would otherwise pick up the source policy id, or worse, the realised claim
+    amount of the rows it is scored on). The train frame keeps the training
+    targets but loses the raw uncapped claim amount, which is never a legal
+    training input.
+    """
+
+    id_dupes = [c for c in _matching_id_columns(train) if c != RECORD_ID]
+    train_drop = [c for c in (RAW_CLAIM_COST, *id_dupes) if c in train.columns]
+    score_drop = [c for c in (*_TARGET_COLUMNS, *id_dupes) if c in score.columns]
+    return train.drop(columns=train_drop), score.drop(columns=score_drop)
 
 
 def _finalize_predicted(
@@ -256,7 +332,9 @@ def _finalize_predicted(
         totals, fin_notes = finalize_prediction(
             predicted,
             score,
-            exposure_column=EXPOSURE,
+            # For severity the "rate" is cost-per-claim, so rate→total multiplies
+            # by claim count, not exposure.
+            exposure_column=spec.weight_column,
             source_column=spec.source_column,
             train_split_label=train_split_label,
         )
@@ -308,6 +386,7 @@ def _call_model(
         )
 
     if model_script_path is not None:
+        train, score = _sanitize_script_frames(train, score)
         return _call_script_model(
             model_script_path,
             train,

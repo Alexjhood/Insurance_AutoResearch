@@ -95,10 +95,18 @@ def allowed_search_space(config, dataset_schema: dict[str, Any] | None = None) -
 
     families = list(ss.get("model_families", ["global_mean"]))
 
+    _default_strategies = (
+        ["direct_severity"] if config.target_mode == "severity"
+        else ["direct_pure_premium", "frequency_severity"]
+    )
+    target_strategies = list(ss.get("target_strategies", _default_strategies))
+    if config.target_mode == "severity" and "direct_severity" not in target_strategies:
+        target_strategies.append("direct_severity")
+
     space: dict[str, Any] = {
         "model_families": families,
-        "target_strategies": list(ss.get("target_strategies", ["direct_pure_premium", "frequency_severity"])),
-        "target_modes": ["burning_cost", "frequency"],
+        "target_strategies": target_strategies,
+        "target_modes": ["burning_cost", "frequency", "severity"],
         "active_target_mode": config.target_mode,
         "feature_columns": feature_columns,
         "non_predictive_columns": sorted(NON_PREDICTIVE_COLUMNS),

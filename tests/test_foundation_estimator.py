@@ -287,3 +287,78 @@ def test_real_tabpfn_smoke() -> None:
     )
     preds = res.predictions["predicted_claim_cost"].to_numpy()
     assert np.all(np.isfinite(preds)) and np.all(preds >= 0)
+
+
+# ── categorical feature flagging ─────────────────────────────────────────────
+
+def test_categorical_features_indices_passed_to_api(stub_tabpfn_client) -> None:
+    """Named categoricals map to post-ordinal-encoding column positions.
+
+    The _frame features are VehPower (numeric) + Region (categorical); the
+    ordinal transformer emits numerics first, so Region is column 1.
+    """
+    captured: dict = {}
+    orig_init = _StubClientRegressor.__init__
+
+    def _spy_init(self, **kwargs):
+        captured.update(kwargs)
+        orig_init(self, **kwargs)
+
+    _StubClientRegressor.__init__ = _spy_init
+    try:
+        frame, split = _frame()
+        rc = {"structure": "direct", "estimator": "tabpfn", "objective": "squared_error",
+              "encoding": "ordinal",
+              "params": {"backend": "api", "max_context_rows": 50,
+                         "categorical_features": ["Region"]}}
+        res = dispatch_model(
+            frame, split, model_family="recipe", target_strategy="direct_pure_premium",
+            train_split="train", score_splits=("search_validation",),
+            hyperparameters={"recipe": rc}, target_mode="burning_cost",
+        )
+    finally:
+        _StubClientRegressor.__init__ = orig_init
+
+    n_features = res.model_notes.get("n_features")
+    cat_count = 1  # Region is the only categorical feature in _frame
+    assert captured["categorical_features_indices"] == [n_features - cat_count]
+    assert res.model_notes.get("stage_categorical_features") == ["Region"]
+    assert res.model_notes.get("stage_categorical_features_indices") == [n_features - cat_count]
+
+
+def test_categorical_features_unknown_name_rejected(stub_tabpfn_client) -> None:
+    from autoresearch.models.recipe.registry import RecipeError
+
+    frame, split = _frame()
+    rc = {"structure": "direct", "estimator": "tabpfn", "objective": "squared_error",
+          "encoding": "ordinal",
+          "params": {"backend": "api", "categorical_features": ["VehBrand"]}}
+    with pytest.raises((RecipeError, Exception), match="VehBrand"):
+        dispatch_model(
+            frame, split, model_family="recipe", target_strategy="direct_pure_premium",
+            train_split="train", score_splits=("search_validation",),
+            hyperparameters={"recipe": rc}, target_mode="burning_cost",
+        )
+
+
+def test_categorical_features_omitted_sends_nothing(stub_tabpfn_client) -> None:
+    captured: dict = {}
+    orig_init = _StubClientRegressor.__init__
+
+    def _spy_init(self, **kwargs):
+        captured.update(kwargs)
+        orig_init(self, **kwargs)
+
+    _StubClientRegressor.__init__ = _spy_init
+    try:
+        frame, split = _frame()
+        rc = {"structure": "direct", "estimator": "tabpfn", "objective": "squared_error",
+              "encoding": "ordinal", "params": {"backend": "api", "max_context_rows": 50}}
+        dispatch_model(
+            frame, split, model_family="recipe", target_strategy="direct_pure_premium",
+            train_split="train", score_splits=("search_validation",),
+            hyperparameters={"recipe": rc}, target_mode="burning_cost",
+        )
+    finally:
+        _StubClientRegressor.__init__ = orig_init
+    assert "categorical_features_indices" not in captured
