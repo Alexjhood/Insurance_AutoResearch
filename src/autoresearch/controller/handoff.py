@@ -321,6 +321,44 @@ def _capping_constraint_line(context: dict[str, Any]) -> str:
     return "no capping for this dataset (`claim_capping_enabled=false`)."
 
 
+def _render_orchestration_brief(config: ProjectConfig) -> list[str]:
+    """Render the "Orchestration brief" block for a spawned sub-agent run.
+
+    Returns ``[]`` for a single-agent run: the block is keyed off the
+    ``orchestration_id``/``delegation_id`` back-pointer that only the spawner
+    writes into a child's run manifest, so an ordinary run's handoff is byte-for-
+    byte what it was before orchestration existed.
+
+    A brief that cannot be read is skipped rather than fatal — a sub-agent with a
+    slightly thinner handoff can still work; one that cannot read its handoff at
+    all cannot.
+    """
+
+    try:
+        from autoresearch.config import PROJECT_ROOT
+        from autoresearch.orchestration.brief import load_brief, render_brief_block
+        from autoresearch.orchestration.manifest import (
+            find_orchestration_for_run,
+            read_run_backpointer,
+        )
+
+        pointer = read_run_backpointer(config.artifacts_dir)
+        if pointer is None:
+            return []
+        _, delegation_id = pointer
+        orch = find_orchestration_for_run(config.artifacts_dir)
+        if orch is None:
+            return []
+        delegation = orch.delegation(delegation_id)
+        brief = load_brief(PROJECT_ROOT / delegation.brief_path)
+    except Exception:
+        return []
+
+    return render_brief_block(
+        brief, cycle_budget=delegation.cycle_budget, delegation_id=delegation_id
+    )
+
+
 def _render_active_dataset(active: dict[str, Any] | None) -> list[str]:
     """Render the binding "Active dataset" block from the context."""
 
@@ -635,6 +673,7 @@ def render_handoff_markdown(
         *pending_reflection_lines,
         *deferred_lines,
         "",
+        *_render_orchestration_brief(config),
         *_render_active_dataset(context.get("active_dataset")),
     ]
 

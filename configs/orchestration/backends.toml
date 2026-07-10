@@ -1,0 +1,101 @@
+# Sub-agent backend registry — human-owned ground truth (design §4.7 Layer 1).
+#
+# A backend is a MODEL × THINKING-EFFORT combination. Effort belongs in the
+# command template, so "Sonnet 5 low" and "Sonnet 5 medium" are two entries,
+# measured independently by `orchestrate backend-stats`.
+#
+# Lifecycle: add a new model with status = "trial"; it earns status = "default"
+# from its scorecard on this repo's actual workload, not from release notes.
+# Retire with status = "deprecated" — in-flight delegations finish, new spawns
+# refuse it.
+#
+# `track` must be one of claude/codex/opencode: the run-scope guard only binds a
+# research session to those, and the child inherits it via AUTORESEARCH_TRACK.
+#
+# Command placeholders: {prompt} (argv channel only), {max_turns}.
+
+# ── Claude Code ──────────────────────────────────────────────────────────────
+# TODO(pin): the `claude` binary is not installed on this machine, so none of
+# the flags below could be verified against `claude --help` during the build.
+# Verify `-p`, `--output-format`, `--permission-mode`, `--max-turns`, and pin a
+# real thinking-effort flag before the first real-model campaign. Until then the
+# two entries differ only in `model_name` attribution, NOT in actual effort.
+# `orchestrate spawn --dry-run` prints the exact argv + env for verification.
+
+[backends.claude-sonnet-low]
+tool = "claude"
+command = [
+    "claude", "-p",
+    "--model", "claude-sonnet-5",
+    "--output-format", "stream-json",
+    "--verbose",
+    "--permission-mode", "acceptEdits",
+    "--max-turns", "{max_turns}",
+]
+prompt_via = "stdin"
+track = "claude"
+model_provider = "anthropic"
+model_name = "claude-sonnet-5-low"
+max_turns = 120
+tier = "cheap"
+status = "trial"
+cost_hint = "$"
+good_for = ["recipe_tuning", "structured_sweeps"]
+avoid_for = ["novel_scripts"]
+notes = "Reliable on recipe-only briefs; escalate effort for repair-heavy estimators. Effort flag unpinned."
+
+[backends.claude-sonnet-medium]
+tool = "claude"
+command = [
+    "claude", "-p",
+    "--model", "claude-sonnet-5",
+    "--output-format", "stream-json",
+    "--verbose",
+    "--permission-mode", "acceptEdits",
+    "--max-turns", "{max_turns}",
+]
+prompt_via = "stdin"
+track = "claude"
+model_provider = "anthropic"
+model_name = "claude-sonnet-5-medium"
+max_turns = 160
+tier = "mid"
+status = "trial"
+cost_hint = "$$"
+good_for = ["novel_scripts", "diagnostic_probes", "repair_prone"]
+notes = "Default escalation rung above claude-sonnet-low. Effort flag unpinned."
+
+# ── Test backend ─────────────────────────────────────────────────────────────
+# Drives a scripted delegation through the real CLI with zero LLM calls. This is
+# the permanent orchestration smoke test: it exercises the whole spawn → run →
+# finish-delegation → report pipeline. Never remove it.
+
+[backends.stub]
+tool = "stub"
+command = ["python3", "scripts/stub_subagent.py"]
+prompt_via = "stdin"
+track = "claude"
+model_provider = "stub"
+model_name = "stub-scripted-agent"
+tier = "cheap"
+status = "trial"
+cost_hint = "$"
+good_for = ["smoke_tests"]
+avoid_for = ["recipe_tuning", "novel_scripts", "diagnostic_probes"]
+notes = "Scripted, no LLM. Proposes one trivial recipe per cycle and rejects it. Testing only."
+
+# A stub variant that deliberately exits without calling finish-delegation, so
+# the `no_finish_delegation` distress flag has a real end-to-end exercise.
+[backends.stub-no-finish]
+tool = "stub"
+command = ["python3", "scripts/stub_subagent.py", "--skip-finish"]
+prompt_via = "stdin"
+track = "claude"
+model_provider = "stub"
+model_name = "stub-scripted-agent-no-finish"
+tier = "cheap"
+status = "trial"
+cost_hint = "$"
+good_for = ["smoke_tests"]
+avoid_for = ["recipe_tuning", "novel_scripts", "diagnostic_probes"]
+notes = "Provokes the no_finish_delegation distress flag. Testing only."

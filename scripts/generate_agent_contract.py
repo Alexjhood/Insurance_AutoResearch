@@ -232,6 +232,24 @@ first `bootstrap-track`, which prints the id):
 
 {cmd_lines}
 
+### Orchestrated mode
+
+If your launch prompt names a **pre-bootstrapped run**, you are a sub-agent under
+an orchestrator. Skip step 1: never run `bootstrap-track`, never start another
+run, and pass the given `--track`/`--run-id` to every command. Your handoff
+carries an **"Orchestration brief"** block — treat its direction, constraints,
+and stop conditions as binding, on par with the Active dataset block, and spend
+your cycles adaptively inside it. When the budget is exhausted (or a brief
+stop-condition fires), finish with:
+
+```bash
+autoresearch --track <t> --run-id <id> orchestrate finish-delegation \\
+  --summary "<3–6 sentences: what you learned, what you'd try next, anything artifactual>"
+```
+
+and then stop. Your report is built from the registry either way — the summary is
+your testimony, not your score.
+
 ### When a cycle needs repair
 
 A cycle can stop in **`needs_repair`** (instead of `awaiting_decision`) when the

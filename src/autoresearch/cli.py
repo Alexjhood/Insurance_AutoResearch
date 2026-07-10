@@ -854,6 +854,124 @@ def _cmd_list_tracks(config, args) -> int:
     return 0
 
 
+def _cmd_orchestrate(config, args) -> int:
+    """Dispatch the `orchestrate` command group (orchestrator-side + child-side)."""
+
+    subcommand = getattr(args, "orchestrate_subcommand", None)
+    if subcommand == "list-backends":
+        return _orchestrate_list_backends()
+    if subcommand == "new":
+        return _orchestrate_new(config, args)
+    if subcommand == "spawn":
+        return _orchestrate_spawn(args)
+    if subcommand == "collect":
+        return _orchestrate_collect(args)
+    if subcommand == "finish-delegation":
+        return _orchestrate_finish_delegation(config, args)
+    build_parser().error(f"Unknown orchestrate subcommand: {subcommand}")
+    return 2
+
+
+def _orchestrate_list_backends() -> int:
+    from autoresearch.orchestration.backends import format_backend_table, load_backends
+
+    print(format_backend_table(load_backends()), end="")
+    return 0
+
+
+def _orchestrate_new(config, args) -> int:
+    from autoresearch.datasets import load_dataset_spec
+    from autoresearch.orchestration.manifest import create_orchestration
+    from autoresearch.targets import normalise_target_mode
+
+    parser = build_parser()
+    try:
+        spec = load_dataset_spec(args.dataset)
+        target_mode = normalise_target_mode(args.target_mode or spec.default_target_mode, spec)
+        orch = create_orchestration(
+            dataset=args.dataset,
+            target_mode=target_mode,
+            total_cycle_budget=args.total_cycles,
+            model_provider=args.model_provider,
+            model_name=args.model_name,
+        )
+    except (ValueError, FileNotFoundError, FileExistsError) as exc:
+        parser.error(str(exc))
+        return 2
+
+    print(json.dumps(orch.to_dict(), indent=2, sort_keys=True))
+    print(
+        f"\nOrchestration {orch.orchestration_id} created "
+        f"({orch.total_cycle_budget} cycles on {orch.dataset}/{orch.target_mode}).\n"
+        f"Write a brief, then: `autoresearch orchestrate spawn --orchestration-id "
+        f"{orch.orchestration_id} --brief <path> --backend <name> --wait`"
+    )
+    return 0
+
+
+def _orchestrate_spawn(args) -> int:
+    from autoresearch.orchestration.manifest import resolve_orchestration_id
+    from autoresearch.orchestration.spawner import spawn
+
+    parser = build_parser()
+    try:
+        orchestration_id = resolve_orchestration_id(args.orchestration_id)
+        result = spawn(
+            orchestration_id,
+            brief_path=Path(args.brief),
+            backend_name=args.backend,
+            wait=args.wait,
+            dry_run=args.dry_run,
+            memory_access=args.memory_access,
+        )
+    except (ValueError, KeyError, FileNotFoundError, NotImplementedError) as exc:
+        parser.error(str(exc))
+        return 2
+
+    if result["status"] == "dry_run":
+        print(result["plan"].render(), end="")
+        return 0
+    print(json.dumps({k: v for k, v in result.items() if k != "plan"}, indent=2, sort_keys=True))
+    return 0
+
+
+def _orchestrate_collect(args) -> int:
+    from autoresearch.orchestration.manifest import load_orchestration, resolve_orchestration_id
+    from autoresearch.orchestration.report import collect_report
+
+    parser = build_parser()
+    try:
+        orch = load_orchestration(resolve_orchestration_id(args.orchestration_id))
+        targets = (
+            [orch.delegation(args.delegation)] if args.delegation else list(orch.delegations)
+        )
+    except (KeyError, FileNotFoundError) as exc:
+        parser.error(str(exc))
+        return 2
+
+    if not targets:
+        print(f"Orchestration {orch.orchestration_id} has no delegations yet.")
+        return 0
+    for delegation in targets:
+        path = collect_report(orch, delegation)
+        print(f"{delegation.delegation_id}: {path}")
+    return 0
+
+
+def _orchestrate_finish_delegation(config, args) -> int:
+    from autoresearch.orchestration.spawner import finish_delegation
+
+    parser = build_parser()
+    try:
+        result = finish_delegation(config.artifacts_dir, summary=args.summary)
+    except (ValueError, KeyError, FileNotFoundError) as exc:
+        parser.error(str(exc))
+        return 2
+    print(json.dumps(result, indent=2, sort_keys=True))
+    print("\nDelegation summary recorded. Stop here — your run is complete.")
+    return 0
+
+
 COMMANDS = {
     "prepare-data": _cmd_prepare_data,
     "list-datasets": _cmd_list_datasets,
@@ -896,6 +1014,7 @@ COMMANDS = {
     "compare-tracks": _cmd_compare_tracks,
     "list-tracks": _cmd_list_tracks,
     "memory": _cmd_memory,
+    "orchestrate": _cmd_orchestrate,
     "telemetry": _cmd_telemetry,
 }
 
@@ -1109,6 +1228,85 @@ def build_parser() -> argparse.ArgumentParser:
     compare_tracks_parser.add_argument("track_a", help="First track name (e.g. 'claude').")
     compare_tracks_parser.add_argument("track_b", help="Second track name (e.g. 'codex').")
     subparsers.add_parser("list-tracks", help="List all tracks that have a registry under artifacts/tracks/.")
+
+    # Orchestration subcommand group. `new`/`spawn`/`collect`/`list-backends` are
+    # orchestrator-side; `finish-delegation` is run-scoped and called by the
+    # sub-agent itself at the end of its own run.
+    orchestrate_parser = subparsers.add_parser(
+        "orchestrate",
+        help="Plan a campaign and delegate experiment batches to headless sub-agent runs.",
+    )
+    orchestrate_subs = orchestrate_parser.add_subparsers(
+        dest="orchestrate_subcommand", required=True
+    )
+
+    orchestrate_subs.add_parser(
+        "list-backends",
+        help="Print the spawnable backend registry with selection metadata and scorecard.",
+    )
+
+    orchestrate_new = orchestrate_subs.add_parser(
+        "new", help="Create a new orchestration (campaign) with a total cycle budget."
+    )
+    orchestrate_new.add_argument("--dataset", required=True, help="Registered dataset name.")
+    orchestrate_new.add_argument(
+        "--target-mode", dest="target_mode", default=None,
+        help="Target mode for the campaign (defaults to the dataset's default).",
+    )
+    orchestrate_new.add_argument(
+        "--total-cycles", dest="total_cycles", type=int, required=True,
+        help="Total experiment cycles this campaign may spend across all delegations.",
+    )
+    orchestrate_new.add_argument(
+        "--model-provider", default=None,
+        help="The orchestrator's own provider, for memory attribution.",
+    )
+    orchestrate_new.add_argument(
+        "--model-name", default=None,
+        help="The orchestrator's own model name, for memory attribution.",
+    )
+
+    orchestrate_spawn = orchestrate_subs.add_parser(
+        "spawn", help="Pre-bootstrap a child run and launch a sub-agent against a brief."
+    )
+    orchestrate_spawn.add_argument("--orchestration-id", dest="orchestration_id", default=None)
+    orchestrate_spawn.add_argument("--brief", required=True, help="Path to the brief JSON file.")
+    orchestrate_spawn.add_argument(
+        "--backend", required=True, help="Backend name from `orchestrate list-backends`."
+    )
+    orchestrate_spawn.add_argument(
+        "--wait", action="store_true", default=True,
+        help="Block until the sub-agent exits, then build its report (default).",
+    )
+    orchestrate_spawn.add_argument(
+        "--no-wait", dest="wait", action="store_false",
+        help="Spawn detached and return immediately (for parallel delegations).",
+    )
+    orchestrate_spawn.add_argument(
+        "--dry-run", dest="dry_run", action="store_true",
+        help="Print the exact command argv, child environment, and prompt; launch nothing.",
+    )
+    orchestrate_spawn.add_argument(
+        "--memory-access", dest="memory_access", default=None, choices=("own", "all"),
+        help="Grant the sub-agent aggregator-mediated cross-run memory access.",
+    )
+
+    orchestrate_collect = orchestrate_subs.add_parser(
+        "collect", help="Rebuild delegation reports from child-run registry state."
+    )
+    orchestrate_collect.add_argument("--orchestration-id", dest="orchestration_id", default=None)
+    orchestrate_collect.add_argument(
+        "--delegation", default=None, help="Only collect this delegation (e.g. d01)."
+    )
+
+    orchestrate_finish = orchestrate_subs.add_parser(
+        "finish-delegation",
+        help="Sub-agent: record your end-of-run scientific summary and stop.",
+    )
+    orchestrate_finish.add_argument(
+        "--summary", required=True,
+        help="3–6 sentences: what you learned, what you'd try next, anything artifactual.",
+    )
 
     telemetry_parser = subparsers.add_parser(
         "telemetry",
