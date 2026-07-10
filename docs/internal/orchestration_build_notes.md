@@ -345,6 +345,40 @@ that the block renders comes from the stub's own warning check (0 hits) and from
 
 ---
 
+## Open questions for later phases (raise with Alex; do not improvise)
+
+1. **`seed_champion` / `respawn --seed-champion` is scheduled before the mechanic
+   it depends on.** Design §8 puts `respawn (--seed-champion, --continue-run)` in
+   **Phase 2**, but §4.3 says `seed_champion` is "the same replay mechanic the
+   playoff uses (4.6)" — and §8 puts recipe replay + script copy-in in **Phase 4**.
+   Phase 2 therefore cannot implement `--seed-champion` without either building
+   the Phase 4 replay path early, or shipping `respawn` with `--continue-run`
+   only. This materially changes a CLI interface, so per the build prompt's "when
+   to stop and ask" it needs Alex's call, not a build-time guess. Phase 1 already
+   fails loudly on a brief carrying `seed_champion` (deviation 2).
+2. **`--permission-mode acceptEdits` sufficiency** — the last `TODO(pin)`; needs
+   one real spawn. See "CLI flag pinning".
+
+---
+
+## Notes for whoever continues this build
+
+- `AUTORESEARCH_SKIP_PYTEST_GATE=1` skips the pytest gate that `bootstrap_track`
+  runs on every spawn. Use it for stub smoke runs (after running the suite), or a
+  2-delegation campaign re-runs the whole suite twice.
+- `tests/test_orchestration.py` redirects `artifacts/orchestrations/` into
+  `tmp_path` by monkeypatching `manifest.ORCHESTRATIONS_DIR` (the
+  `orchestrations_root` fixture). Module-global path constants are resolved at
+  call time, so this works for the whole package.
+- The `stub` / `stub-no-finish` backends are the only zero-cost way to exercise
+  spawn → run → report. Reach for them before reaching for a real model.
+- **The run-scope guard will block you** (an unbound session) from reading any
+  `artifacts/tracks/*/runs/*` folder — including a child's handoff. That is the
+  gap Phase 2's `orchestrator` scope closes. Until then, verify child-run state
+  through the stub's own log output and the delegation reports.
+
+---
+
 ## Deliberately left undone
 
 - **Real-model campaigns (Phase 1 and Phase 3 milestones).** No `claude -p` /
