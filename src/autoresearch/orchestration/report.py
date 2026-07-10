@@ -106,7 +106,7 @@ def assess_distress(
     if max_repair_attempts_seen >= MAX_REPAIR_ATTEMPTS:
         active.append("repair_exhausted")
         details.append(
-            f"a cycle consumed all {MAX_REPAIR_ATTEMPTS} model attempts without passing validation"
+            f"a cycle needed its {MAX_REPAIR_ATTEMPTS}rd and final model attempt"
         )
 
     if cycles_used > 0 and not any(d in _PROMOTING_DECISIONS for d in decisions):
@@ -285,6 +285,8 @@ def build_report(orch: Orchestration, delegation: Delegation) -> dict[str, Any]:
     cycles_used = max(0, _cycles_used(config.registry_path) - delegation.cycles_at_start)
     experiments = _experiment_rows(config)
     if delegation.continue_run:
+        # Positional slice: research-log entries' own cycle numbers restart per
+        # session, so the entry count is the only stable offset across sessions.
         experiments = experiments[delegation.cycles_at_start :]
     champion = _champion_facts(config)
     decisions = [row["decision"] for row in experiments if row.get("decision")]

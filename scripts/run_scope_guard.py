@@ -263,6 +263,12 @@ def _bindable_autoresearch_tokens(command: str) -> list[list[str]]:
     return out
 
 
+#: The only orchestrate action a bound research sub-agent may run. Everything
+#: else either leaks sibling-delegation state (status/collect/report) or
+#: mutates the campaign (spawn/respawn/kill/playoff/new/note).
+_RESEARCH_ALLOWED_ORCHESTRATE_ACTIONS = {"finish-delegation"}
+
+
 def _orchestrate_action(tokens: list[str]) -> str:
     try:
         index = tokens.index("orchestrate")
@@ -335,6 +341,16 @@ def find_autoresearch_scope_violations(scope: dict | None, texts: list[str]) -> 
             run_id = _flag_value(tokens, "--run-id")
             new_run = _has_flag(tokens, "--new-run")
             subcommand = _autoresearch_subcommand(tokens)
+
+            if subcommand == "orchestrate":
+                action = _orchestrate_action(tokens)
+                if action not in _RESEARCH_ALLOWED_ORCHESTRATE_ACTIONS:
+                    violations.append(
+                        f"research sessions may not run `orchestrate {action or '<none>'}`; "
+                        "sub-agents report only through `orchestrate finish-delegation`. "
+                        "Knowledge of other delegations reaches you only through memory."
+                    )
+                    continue
 
             if track and track != bound_track:
                 violations.append(
@@ -785,6 +801,10 @@ def handle_post_tool_use(payload: dict) -> int:
     if not session_id:
         return 0
     if load_scope_file(session_id) is not None:  # already analyst or bound
+        return 0
+    # An env-analyst session (no scope file on harnesses without SessionStart)
+    # must never be silently demoted to research/orchestrator by auto-bind.
+    if os.environ.get("AUTORESEARCH_SCOPE", "").strip().lower() == "analyst":
         return 0
     succeeded = _post_tool_succeeded(payload)
     if succeeded is False:

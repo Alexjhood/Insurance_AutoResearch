@@ -97,6 +97,34 @@ def test_non_run_paths_always_allowed():
         assert guard.decide(scope, ["src/autoresearch/cli.py", "configs/default.toml"])[0]
 
 
+def test_research_denies_orchestrate_actions_except_finish_delegation():
+    for action in (
+        "status --orchestration-id 20260710T120000Z",
+        "collect",
+        "report",
+        "spawn --brief b.json --backend stub",
+        "respawn --delegation d01 --brief b.json",
+        "kill --delegation d01",
+        "playoff --auto-decide",
+        "new --dataset french_motor --total-cycles 2",
+        "note --text x --kind other",
+        "backend-stats",
+        "list-backends",
+    ):
+        allow, reason = guard.decide(BOUND, [f"autoresearch orchestrate {action}"])
+        assert not allow, action
+        assert "finish-delegation" in reason
+
+
+def test_research_allows_own_finish_delegation():
+    cmd = (
+        "autoresearch --track claude --run-id RUN_A "
+        'orchestrate finish-delegation --summary "done"'
+    )
+
+    assert guard.decide(BOUND, [cmd])[0]
+
+
 # ── orchestrator scope ──────────────────────────────────────────────────────
 
 def test_orchestrator_reads_own_child_run():
@@ -391,6 +419,24 @@ def test_failed_autoresearch_command_does_not_bind(monkeypatch, tmp_path):
 
     assert guard.handle_post_tool_use(payload) == 0
     assert guard.resolve_scope("failed-bind") is None
+
+
+def test_env_analyst_without_scope_file_is_never_demoted_by_auto_bind(monkeypatch, tmp_path):
+    # Harnesses without a SessionStart event honour analyst mode via env only;
+    # a bindable command must not silently rebind such a session.
+    monkeypatch.setattr(guard, "SCOPE_DIR", tmp_path)
+    monkeypatch.setattr(guard, "LOG_PATH", tmp_path / "guard.log")
+    monkeypatch.setattr(guard, "_latest_run_id", lambda track: "20260610T063646Z")
+    monkeypatch.setenv("AUTORESEARCH_SCOPE", "analyst")
+
+    for command in (
+        "autoresearch --track claude --run-id 20260610T063646Z start-session review",
+        "autoresearch orchestrate new --dataset french_motor --total-cycles 2",
+    ):
+        payload = {"session_id": "env-analyst", "tool_input": {"command": command}}
+        assert guard.handle_post_tool_use(payload) == 0
+
+    assert guard.resolve_scope("env-analyst") == {"mode": "analyst", "source": "env"}
 
 
 def test_ambiguous_new_run_does_not_bind_stale_latest(monkeypatch, tmp_path):

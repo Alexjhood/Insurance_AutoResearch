@@ -83,7 +83,8 @@ a model that is not in it** — your training data does not know what is install
 authenticated, or currently good.
 
 1. Classify the brief. *Recipe-only tuning / structured sweep* → the cheapest
-   `default` backend whose `good_for` matches. *Novel script or unfamiliar
+   backend whose `good_for` matches, preferring `default` status when one
+   exists (early on, everything may still be `[TRIAL]`). *Novel script or unfamiliar
    estimator* → mid tier. *Diagnostic probe* → mid tier with K=1; a probe that
    misdiagnoses is worse than useless.
 2. **Escalation ladder, not loyalty.** On distress, respawn one rung up — effort

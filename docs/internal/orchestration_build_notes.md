@@ -1046,6 +1046,32 @@ usage shape still require the deliberately deferred paid validation campaign.
 
 ---
 
+## Post-review fixes (2026-07-10, reviewer session)
+
+The independent review confirmed the build sound and applied five fixes
+(full suite 565 passed / 2 skipped after; contract check in sync):
+
+1. **Guard:** a bound *research* session may now run only
+   `orchestrate finish-delegation`; every other `orchestrate` action is denied
+   (`status`/`collect`/`report` leaked sibling-delegation state;
+   `spawn`/`respawn`/`kill`/`playoff`/`new`/`note` could mutate the campaign).
+2. **Guard:** `handle_post_tool_use` again refuses to auto-bind an env-analyst
+   session that has no scope file (harnesses without SessionStart), restoring
+   the pre-orchestration guarantee that analyst mode is never silently demoted.
+3. **Spawner:** `child_environment` also strips `AUTORESEARCH_MILESTONE_TOKEN`
+   (holdout access) and `AUTORESEARCH_SKIP_PYTEST_GATE` from sub-agent children.
+4. **Spawner:** `respawn --continue-run` re-pins the run manifest's
+   `default_max_cycles` to the new brief's budget; previously the continued
+   session inherited the source delegation's smaller cap and would stall early.
+5. **Registry/docs:** `codex-gpt-5-5-medium` demoted `default` → `trial`
+   (nothing has earned `default` yet; lifecycle rule §4.7), with ORCHESTRATOR.md
+   §5 wording adjusted for the all-trial early state; `repair_exhausted` detail
+   text no longer overclaims that attempt 3 failed; continuation report slicing
+   got a comment explaining why it is positional.
+
+New tests: research-denies-orchestrate matrix + finish-delegation allowance,
+env-analyst non-demotion, child-env stripping, continue-run re-pin assertion.
+
 ## Deliberately left undone
 
 - **Real-model campaigns (Phase 1 and Phase 3 milestones).** No `claude -p` /

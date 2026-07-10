@@ -141,6 +141,11 @@ def child_environment(
     # An orchestrator session exports these; a child must never inherit them or
     # it would bind as an orchestrator instead of a research agent.
     env.pop("AUTORESEARCH_ORCHESTRATION_ID", None)
+    # Never forward holdout access or the pytest-gate skip: a sub-agent must not
+    # be able to read the milestone vault or dodge hard constraint #4 just
+    # because the operator's shell had these set.
+    env.pop("AUTORESEARCH_MILESTONE_TOKEN", None)
+    env.pop("AUTORESEARCH_SKIP_PYTEST_GATE", None)
     return env
 
 
@@ -615,9 +620,14 @@ def respawn(
         prompt_file.parent.mkdir(parents=True, exist_ok=True)
         prompt_file.write_text(plan.prompt, encoding="utf-8")
 
+        from autoresearch.bootstrap import _pin_default_max_cycles
         from autoresearch.orchestration.report import _child_config, _cycles_used
 
         child_config = _child_config(source)
+        # The run manifest still pins the source delegation's cycle budget; the
+        # continuation's new session inherits that pin, so re-pin it to the new
+        # brief's budget or a larger continuation would stall at the old cap.
+        _pin_default_max_cycles(child_config, brief.cycle_budget)
         delegation = Delegation(
             delegation_id=new_delegation_id,
             brief_path=str(stored_brief.relative_to(PROJECT_ROOT)),

@@ -41,7 +41,7 @@ from autoresearch.orchestration.manifest import (
     write_run_backpointer,
 )
 from autoresearch.orchestration.report import assess_distress, build_report
-from autoresearch.utils.io import write_json
+from autoresearch.utils.io import read_json, write_json
 
 
 @pytest.fixture
@@ -400,7 +400,9 @@ def test_codex_backend_pins_verified_headless_flags_and_metadata():
     assert backend.model_provider == "openai"
     assert backend.model_name == "gpt-5.5-medium"
     assert backend.tier == "mid"
-    assert backend.status == "default"
+    # Unvalidated against a real endpoint yet: enters as trial like every new
+    # backend and earns default from its scorecard (design §4.7 lifecycle).
+    assert backend.status == "trial"
     assert "diagnostic_probes" in backend.good_for
 
 
@@ -663,6 +665,15 @@ def test_child_environment_strips_inherited_orchestrator_binding(monkeypatch):
     assert "AUTORESEARCH_MEMORY_ACCESS" not in env
 
 
+def test_child_environment_strips_holdout_token_and_pytest_gate_skip(monkeypatch):
+    """A sub-agent must not inherit holdout access or a disabled pytest gate."""
+    monkeypatch.setenv("AUTORESEARCH_MILESTONE_TOKEN", "secret")
+    monkeypatch.setenv("AUTORESEARCH_SKIP_PYTEST_GATE", "1")
+    env = spawner_mod.child_environment(track="claude", run_id="r")
+    assert "AUTORESEARCH_MILESTONE_TOKEN" not in env
+    assert "AUTORESEARCH_SKIP_PYTEST_GATE" not in env
+
+
 def test_child_environment_grants_requested_memory_access():
     env = spawner_mod.child_environment(track="claude", run_id="r", memory_access="own")
     assert env["AUTORESEARCH_MEMORY_ACCESS"] == "own"
@@ -921,7 +932,7 @@ def test_respawn_continue_run_reuses_child_and_records_lineage(
     )
     save_orchestration(add_delegation(orch, source))
     brief_file = tmp_path / "revised.json"
-    write_json(brief_file, {"direction": "Continue the useful line.", "cycle_budget": 2})
+    write_json(brief_file, {"direction": "Continue the useful line.", "cycle_budget": 3})
     child_dir = tmp_path / "child"
     child_dir.mkdir()
     child_config = SimpleNamespace(artifacts_dir=child_dir, registry_path=tmp_path / "registry.sqlite")
@@ -947,6 +958,9 @@ def test_respawn_continue_run_reuses_child_and_records_lineage(
     assert continued.continue_run is True
     assert continued.cycles_at_start == 2
     assert read_run_backpointer(child_dir) == (orch.orchestration_id, "d02")
+    # The continuation re-pins the run's cycle cap to the new brief's budget;
+    # otherwise the new session would inherit d01's smaller pin and stall early.
+    assert read_json(child_dir / "run_manifest.json")["default_max_cycles"] == 3
 
 
 def test_respawn_new_run_passes_lineage_to_spawn(
