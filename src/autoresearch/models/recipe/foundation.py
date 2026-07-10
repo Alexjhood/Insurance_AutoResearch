@@ -42,6 +42,7 @@ from autoresearch.models.recipe.registry import (
 from autoresearch.models.recipe.foundation_specs import (  # re-exported (drift fix)
     FOUNDATION_ESTIMATOR_NAMES,
     FOUNDATION_ESTIMATOR_SPECS,
+    TABFM_SPEC as _TABFM_STATIC,
     TABPFN_SPEC as _TABPFN_STATIC,
     foundation_packages_available,
 )
@@ -51,6 +52,7 @@ __all__ = [
     "FOUNDATION_ESTIMATOR_SPECS",
     "register_foundation_estimators",
     "tabpfn_available",
+    "tabfm_available",
     "subsample_context",
 ]
 
@@ -380,12 +382,237 @@ _TABPFN_SPEC = EstimatorSpec(
 )
 
 
+# ── TabFM (Modal serverless GPU) ─────────────────────────────────────────────
+
+# TabFM has no hosted API and 6.6GB weights, so the forward pass runs on a rented
+# Modal GPU (default backend) that the local `modal` client calls; torch never
+# enters this process. `local` runs in-process tabfm on a CUDA box.
+_TABFM_DEFAULT_BACKEND = "modal"
+# Spike defaults (docs/internal/tabfm_integration_plan.md §6): 20k context is the
+# accuracy/VRAM sweet spot on an L4; n_estimators is the main quality-vs-budget
+# dial (library default 32 = 32 forward passes/row, which times out).
+_DEFAULT_TABFM_MAX_CONTEXT_ROWS = 20_000
+_DEFAULT_TABFM_PREDICT_BATCH = 20_000
+_DEFAULT_TABFM_N_ESTIMATORS = 4
+_DEFAULT_TABFM_GPU = "L4"
+
+#: The deployed Modal app + class the `modal` backend calls (spike:
+#: scripts/tabfm_modal_app.py, deployed with `modal deploy`).
+_TABFM_MODAL_APP = "tabfm-inference"
+_TABFM_MODAL_CLS = "TabFMRunner"
+
+
+def _resolve_tabfm_backend(params: dict[str, Any]) -> str:
+    backend = params.pop("backend", None) or os.environ.get(
+        "AUTORESEARCH_TABFM_BACKEND", _TABFM_DEFAULT_BACKEND
+    )
+    backend = str(backend).lower()
+    if backend not in {"modal", "local"}:
+        raise RecipeError(f"Unknown tabfm backend {backend!r}; use 'modal' or 'local'.")
+    return backend
+
+
+def _authenticate_modal() -> None:
+    """Verify the Modal client is importable and configured, else fail loudly.
+
+    This is the TabFM analogue of ``_authenticate_api`` for TabPFN: it is the
+    estimator-level preflight the build asks for (``modal`` importable + token
+    configured). No Modal network call is made here — auth is proven by the
+    presence of the client and its credentials; a bad credential still surfaces
+    when the deployed function is invoked.
+    """
+    try:
+        import modal  # noqa: F401
+    except ImportError as exc:
+        raise RecipeError(
+            "tabfm backend='modal' needs the Modal client: "
+            "pip install -e '.[foundation-modal]'. "
+            "See docs/internal/tabfm_integration_plan.md."
+        ) from exc
+
+    from pathlib import Path
+
+    token_configured = bool(
+        os.environ.get("MODAL_TOKEN_ID") and os.environ.get("MODAL_TOKEN_SECRET")
+    ) or (Path.home() / ".modal.toml").exists()
+    if not token_configured:
+        raise RecipeError(
+            "tabfm backend='modal' is not authenticated. Run `modal setup` (writes "
+            "~/.modal.toml) or export MODAL_TOKEN_ID / MODAL_TOKEN_SECRET, and ensure "
+            "the deployed app is up (`modal deploy scripts/tabfm_modal_app.py`). "
+            "See docs/internal/tabfm_integration_plan.md."
+        )
+
+
+def _tabfm_modal_fit_predict(
+    X_ctx: np.ndarray, y_ctx: np.ndarray, X_score: np.ndarray, *, params: dict[str, Any]
+) -> np.ndarray:
+    """Transport boundary: ship context + score frame to the deployed Modal app.
+
+    Zero-shot means fit and predict happen together remotely (the context rows
+    are the prompt), so one blocking ``.remote()`` call does both. Because the
+    call blocks locally until the GPU returns, the remote wall-clock is charged
+    to the local fit — the compute budget counts Modal time, exactly as required
+    (the clock does not stop because the GPU is remote).
+
+    **Tests fixture this function** — it is never called with a real Modal client
+    in the suite.
+    """
+    import modal
+
+    runner_cls = modal.Cls.from_name(_TABFM_MODAL_APP, _TABFM_MODAL_CLS)
+    gpu = params.get("gpu")
+    if gpu:
+        runner_cls = runner_cls.with_options(gpu=str(gpu))
+    runner = runner_cls()
+    result = runner.fit_predict.remote(
+        np.asarray(X_ctx, dtype=np.float32),
+        np.asarray(y_ctx, dtype=np.float64),
+        np.asarray(X_score, dtype=np.float32),
+        predict_batch=int(params.get("predict_batch_size", _DEFAULT_TABFM_PREDICT_BATCH)),
+        n_estimators=int(params.get("n_estimators", _DEFAULT_TABFM_N_ESTIMATORS)),
+    )
+    return np.asarray(result["predictions"], dtype=float)
+
+
+def _tabfm_local_fit_predict(
+    X_ctx: np.ndarray, y_ctx: np.ndarray, X_score: np.ndarray, *, params: dict[str, Any]
+) -> np.ndarray:
+    """In-process TabFM on a CUDA box (secondary backend, smoke/CUDA only).
+
+    Mirrors the spike's model load. Imports LightGBM first so torch's OpenMP
+    runtime registers second (the macOS libomp guard, see _make_regressor).
+    """
+    try:
+        import lightgbm  # noqa: F401
+    except ImportError:
+        pass
+
+    from tabfm import TabFMRegressor, tabfm_v1_0_0_pytorch
+
+    device = params.get("device") or _select_device()
+    model = tabfm_v1_0_0_pytorch.load(model_type="regression", device=device)
+    reg = TabFMRegressor(
+        model=model, n_estimators=int(params.get("n_estimators", _DEFAULT_TABFM_N_ESTIMATORS))
+    )
+    reg.fit(np.asarray(X_ctx, dtype=np.float32), np.asarray(y_ctx, dtype=np.float64))
+    batch = int(params.get("predict_batch_size", _DEFAULT_TABFM_PREDICT_BATCH))
+    preds = np.concatenate([
+        np.asarray(reg.predict(X_score[s : s + batch]), dtype=float)
+        for s in range(0, X_score.shape[0], batch)
+    ]) if X_score.shape[0] else np.zeros(0, dtype=float)
+    return preds
+
+
+def _tabfm_fit_predict(
+    backend: str, X_ctx: np.ndarray, y_ctx: np.ndarray, X_score: np.ndarray,
+    *, params: dict[str, Any],
+) -> np.ndarray:
+    if backend == "modal":
+        return _tabfm_modal_fit_predict(X_ctx, y_ctx, X_score, params=params)
+    return _tabfm_local_fit_predict(X_ctx, y_ctx, X_score, params=params)
+
+
+class _TabFMRemoteModel:
+    """A fitted TabFM 'model' whose ``predict`` ships the context + score frame
+    to the backend and returns non-negative rate predictions.
+
+    Zero-shot models keep the context as their state; each ``predict`` re-sends it
+    (payload is small — ≤ a few MB at the capped context). Remote batching is the
+    backend's job (``predict_batch_size``), so this does not re-batch locally; it
+    only densifies and clips, matching the estimator contract (rates ≥ 0)."""
+
+    def __init__(self, *, backend: str, X_ctx: np.ndarray, y_ctx: np.ndarray, params: dict[str, Any]) -> None:
+        self._backend = backend
+        self._X_ctx = np.asarray(_densify(X_ctx), dtype=np.float32)
+        self._y_ctx = np.asarray(y_ctx, dtype=np.float64)
+        self._params = params
+
+    def predict(self, X: Any) -> np.ndarray:
+        X = np.asarray(_densify(X), dtype=np.float32)
+        preds = _tabfm_fit_predict(
+            self._backend, self._X_ctx, self._y_ctx, X, params=self._params
+        )
+        return np.clip(np.asarray(preds, dtype=float), 0.0, None)
+
+
+def _fit_tabfm(ctx: FitContext) -> tuple[Any, dict[str, Any]]:
+    params = dict(ctx.params or {})
+    backend = _resolve_tabfm_backend(params)
+    max_context = int(params.pop("max_context_rows", _DEFAULT_TABFM_MAX_CONTEXT_ROWS))
+    strategy = str(params.pop("subsample_strategy", "exposure"))
+    seed = int(params.pop("random_state", 42))
+    # Remaining curated params (predict_batch_size, n_estimators, gpu, device) are
+    # consumed by the backend transport, so keep them in `params` for the model.
+    transport_params = {
+        "predict_batch_size": int(params.pop("predict_batch_size", _DEFAULT_TABFM_PREDICT_BATCH)),
+        "n_estimators": int(params.pop("n_estimators", _DEFAULT_TABFM_N_ESTIMATORS)),
+    }
+    gpu = params.pop("gpu", None)  # modal-only
+    device = params.pop("device", None)  # local-only
+    if backend == "modal":
+        if device is not None:
+            raise RecipeError("tabfm param 'device' is local-only; the modal backend picks the GPU via 'gpu'.")
+        transport_params["gpu"] = gpu or _DEFAULT_TABFM_GPU
+        _authenticate_modal()
+    else:
+        if gpu is not None:
+            raise RecipeError("tabfm param 'gpu' is modal-only; the local backend picks the device via 'device'.")
+        transport_params["device"] = device
+
+    X = _densify(ctx.X_train)
+    X_ctx, y_ctx, _w_ctx, n_context = subsample_context(
+        X, ctx.y_train, ctx.w_train, max_context, strategy, seed
+    )
+
+    model = _TabFMRemoteModel(
+        backend=backend, X_ctx=X_ctx, y_ctx=y_ctx, params=transport_params
+    )
+    notes = {
+        "estimator": "tabfm",
+        "objective": ctx.objective,
+        "backend": backend,
+        "device": (transport_params.get("gpu") if backend == "modal" else (device or _select_device())),
+        "context_rows": int(n_context),
+        "max_context_rows": max_context,
+        "subsample_strategy": strategy,
+        "subsampled": bool(n_context < len(ctx.y_train)),
+        "n_estimators": transport_params["n_estimators"],
+    }
+    return model, notes
+
+
+# Built from the static declaration (foundation_specs.TABFM_SPEC), like TabPFN.
+_TABFM_SPEC = EstimatorSpec(
+    name=_TABFM_STATIC.name,
+    objectives=_TABFM_STATIC.objectives,
+    encodings=_TABFM_STATIC.encodings,
+    default_encoding=_TABFM_STATIC.default_encoding,
+    fit=_fit_tabfm,
+    supports_early_stopping=_TABFM_STATIC.supports_early_stopping,
+    native_categorical=_TABFM_STATIC.native_categorical,
+    description=_TABFM_STATIC.description,
+    allowed_params=frozenset({
+        "backend", "max_context_rows", "subsample_strategy", "random_state",
+        "predict_batch_size", "n_estimators",
+        "gpu",     # modal-only (GPU tier, e.g. L4/A100)
+        "device",  # local-only (cuda/cpu)
+    }),
+)
+
+
 # ── registration ─────────────────────────────────────────────────────────────
 
 def tabpfn_available() -> bool:
     """True if either backend is usable: the local ``tabpfn`` package or the
     ``tabpfn_client`` API package."""
     return foundation_packages_available(_TABPFN_STATIC)
+
+
+def tabfm_available() -> bool:
+    """True if TabFM is usable: the ``modal`` client (remote backend) or the local
+    ``tabfm`` package."""
+    return foundation_packages_available(_TABFM_STATIC)
 
 
 def register_foundation_estimators() -> list[str]:
@@ -398,4 +625,7 @@ def register_foundation_estimators() -> list[str]:
     if tabpfn_available():
         register_estimator(_TABPFN_SPEC)
         registered.append("tabpfn")
+    if tabfm_available():
+        register_estimator(_TABFM_SPEC)
+        registered.append("tabfm")
     return registered

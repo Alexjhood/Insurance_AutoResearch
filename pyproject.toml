@@ -32,6 +32,14 @@ dev = [
 foundation = [
   "tabpfn-client>=0.3",
 ]
+# TabFM via Modal serverless GPU — the `modal` client only (torch-free; the 6.6GB
+# TabFM weights and torch stay entirely remote on the rented GPU, so this is safe
+# next to tabpfn-client in the same env). Needs `modal setup` auth + a deployed
+# app (`modal deploy scripts/tabfm_modal_app.py`); weights are non-commercial.
+# See docs/internal/tabfm_integration_plan.md.
+foundation-modal = [
+  "modal",
+]
 # Local backend — in-machine inference on this host's CPU/GPU. Heavy (~3-4GB with
 # torch) and, on Apple Silicon, both slow and OpenMP-fragile: torch must be
 # imported before LightGBM or the interpretation surrogate segfaults (the

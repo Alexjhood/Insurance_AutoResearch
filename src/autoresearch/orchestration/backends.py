@@ -382,30 +382,34 @@ def preflight_foundation_models() -> None:
     """Fail a foundation-opted spawn fast when the environment cannot run TabPFN.
 
     Called by :func:`spawner.spawn`/``respawn`` only when the brief sets
-    ``foundation_models: true`` (skipped on ``--dry-run``). Two checks, each
-    naming its fix:
+    ``foundation_models: true`` (skipped on ``--dry-run``). Checks, each naming
+    its fix:
 
-    * the ``[foundation]`` extra must be importable (the child inherits the
-      parent env and interpreter, so an extra-less orchestrator means an
-      extra-less child); and
+    * **at least one** foundation estimator's extra must be importable (TabPFN's
+      ``[foundation]`` or TabFM's ``[foundation-modal]``) — the child inherits
+      the parent env and interpreter, so an extra-less orchestrator means an
+      extra-less child; and
     * if ``AUTORESEARCH_TABPFN_BACKEND`` resolves to ``api``, ``TABPFN_TOKEN``
       must be set — the child inherits an exported token, so this catches the
       case where neither the orchestrator nor its shell has one.
 
-    Cannot verify the token is *valid* without a paid call; an invalid token
-    still surfaces through the delegation report's ``crashed`` flag.
+    TabFM's own readiness (a deployed Modal app + ``~/.modal.toml``) surfaces at
+    fit time via the estimator's ``_authenticate_modal`` check; a Modal deploy is
+    not something a spawn can cheaply verify. Neither can we verify a token is
+    *valid* without a paid call; an invalid one still surfaces through the
+    delegation report's ``crashed`` flag.
     """
 
     import os
 
-    from autoresearch.models.recipe.foundation import tabpfn_available
+    from autoresearch.models.recipe.foundation import tabfm_available, tabpfn_available
 
-    if not tabpfn_available():
+    if not (tabpfn_available() or tabfm_available()):
         raise RuntimeError(
-            "Brief opts into foundation models but the [foundation] extra is not "
-            "importable in this environment. Install it "
-            "(`pip install -e '.[foundation]'`) before spawning a foundation "
-            "delegation; the child inherits this interpreter."
+            "Brief opts into foundation models but no foundation extra is importable "
+            "in this environment. Install one (`pip install -e '.[foundation]'` for "
+            "TabPFN, or `'.[foundation-modal]'` for TabFM) before spawning a "
+            "foundation delegation; the child inherits this interpreter."
         )
     backend = os.environ.get("AUTORESEARCH_TABPFN_BACKEND", "local").strip().lower()
     if backend == "api" and not os.environ.get("TABPFN_TOKEN"):

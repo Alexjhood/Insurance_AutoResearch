@@ -80,7 +80,34 @@ TABPFN_SPEC = FoundationEstimatorSpec(
     ),
 )
 
-FOUNDATION_ESTIMATOR_SPECS: tuple[FoundationEstimatorSpec, ...] = (TABPFN_SPEC,)
+TABFM_SPEC = FoundationEstimatorSpec(
+    name="tabfm",
+    # TabFM has a single regression head; advertise the honest objective only.
+    objectives=frozenset({"squared_error"}),
+    encodings=frozenset({"ordinal", "one_hot"}),
+    default_encoding="ordinal",
+    supports_early_stopping=False,
+    native_categorical=False,
+    # The `modal` client is enough for the default (remote-GPU) backend; the
+    # local `tabfm` package is only needed on a CUDA box.
+    required_packages=("modal", "tabfm"),
+    caveat=(
+        "requires `bootstrap-track --enable-foundation-models` + the "
+        "`[foundation-modal]` extra (Modal GPU; non-commercial weights)"
+    ),
+    description=(
+        "TabFM foundation model (Google; zero-shot in-context learning, no gradient "
+        "training). Runs on a Modal serverless GPU by default (backend='modal', needs "
+        "`modal setup` auth) — TabFM has no hosted API and its 6.6GB weights need a "
+        "real GPU; backend='local' runs in-process on a CUDA box. Training context is "
+        "subsampled to max_context_rows (exposure-weighted); scoring is batched and "
+        "exposure enters via the subsample with framework calibration fixing the level. "
+        "Weights are under a NON-COMMERCIAL licence (research use only). Requires the "
+        "[foundation-modal] extra and a per-run opt-in."
+    ),
+)
+
+FOUNDATION_ESTIMATOR_SPECS: tuple[FoundationEstimatorSpec, ...] = (TABPFN_SPEC, TABFM_SPEC)
 
 FOUNDATION_ESTIMATOR_NAMES: frozenset[str] = frozenset(
     spec.name for spec in FOUNDATION_ESTIMATOR_SPECS

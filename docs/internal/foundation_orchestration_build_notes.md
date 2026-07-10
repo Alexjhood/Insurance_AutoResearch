@@ -2,7 +2,8 @@
 
 **Branch:** `foundation-orchestration` (from the `Orchestrator` head,
 `23b7b9c`).
-**Status:** Phases 1–2 complete. Phase 3 pending (stop-and-ask gate).
+**Status:** Phases 1–3 complete. Real Modal/TabPFN endpoint validation deferred
+to Alex (build ran no paid calls, per the rules).
 **Spec:** `docs/internal/foundation_orchestration_build_prompt.md`, which extends
 `docs/internal/orchestration_design.md` (built in
 `docs/internal/orchestration_build_notes.md`). All ground rules of
@@ -47,7 +48,7 @@ deliberately left undone. One commit per phase.
 | 4 | Stub campaign brief `foundation_models: true` → child manifest flag + handoff note | ✅ Phase 2 — clean spawn (see note on guard) + forwarding/brief-block tests |
 | 5 | Preflight failure cases for missing token / missing extra (tested, no paid calls) | ✅ Phase 2 — 4 preflight tests |
 | 6 | Playoff replay of a foundation finalist gated correctly (fixture test) | ✅ Phase 2 — replay-gating tests |
-| 7 | Build notes with every deviation logged; Phase 3 implemented or recorded blocked | ⏳ Phase 3 gate |
+| 7 | Build notes with every deviation logged; Phase 3 implemented or recorded blocked | ✅ Phase 3 implemented (Alex confirmed Modal setup done) |
 
 ---
 
@@ -326,9 +327,112 @@ plus the two unit tests above, not by a direct read from this session.
    so the estimator is registered explicitly there. Both together mean every
    process that touches a foundation replay can interpret the recipe.
 
-## Phase 3 — TabFM via Modal (stop-and-ask first)
+## Phase 3 — TabFM via Modal (stop-and-ask resolved: PROCEED)
 
-⏳ Not started. Gated on verifying with Alex that the Modal account/secret setup
-(the two user setup steps `tabfm_integration_plan.md` records as blocking) is
-done. If not, Phase 3 is recorded here as blocked and the build stops after
-Phase 2.
+**Stop-and-ask gate.** `tabfm_integration_plan.md` §2 records two blocking
+operator setup steps: (1) Modal account + `modal setup` (writes `~/.modal.toml`),
+and (2) HF licence accepted + `modal secret create huggingface`. Local signals
+were partial — `~/.modal.toml` present (dated the Jul 5 spike), `.venv-api`
+present, but `modal` not importable in `.venv`/system Python and the HF secret
+unverifiable without a paid Modal call. **I asked Alex; he confirmed the setup is
+done and to proceed.** Per build-prompt rule 5 the build still made **no real
+Modal call** — the transport boundary is fixtured in every test.
+
+**Commit:** *(this phase's commit)*. Suite: **600 passed, 4 skipped**; `--check`
+byte-identical in both `.venv` and system Python 3.13. **No protected file
+touched.**
+
+### What was built
+
+- **`foundation_specs.py`** — added `TABFM_SPEC` to `FOUNDATION_ESTIMATOR_SPECS`
+  by the same static-declaration pattern as TabPFN: obj `{squared_error}`, enc
+  `{ordinal, one_hot}`, `required_packages=("modal", "tabfm")`, a caveat naming
+  the `[foundation-modal]` extra + Modal GPU + non-commercial weights, and a
+  description carrying the non-commercial licence. The estimator is therefore
+  **declared everywhere** (contract, validation messages) regardless of whether
+  `modal` is installed; only its *execution* is gated.
+- **`foundation.py`** — the TabFM estimator:
+  - `_TABFM_SPEC` built from `TABFM_STATIC` (obj/enc matrix cannot drift from the
+    declaration), `fit=_fit_tabfm`, `allowed_params` = `backend`,
+    `max_context_rows`, `subsample_strategy`, `random_state`,
+    `predict_batch_size`, `n_estimators`, `gpu` (modal-only), `device`
+    (local-only).
+  - `_fit_tabfm` reuses the shared `subsample_context` (exposure-weighted context
+    cap) and returns a `_TabFMRemoteModel` whose `predict` ships the context +
+    score frame to the backend and clips to ≥ 0. Zero-shot means fit+predict
+    happen together remotely, so the context is re-sent each `predict` (payload
+    is small at the capped context).
+  - **Transport boundary** `_tabfm_fit_predict(backend, …)` → `modal` calls the
+    deployed app (`modal.Cls.from_name("tabfm-inference", "TabFMRunner")` →
+    `.fit_predict.remote(...)`, matching `scripts/tabfm_modal_app.py`); `local`
+    runs in-process `tabfm[pytorch]` (LightGBM-first libomp guard, `_select_device`).
+    **This function is what every test fixtures — no Modal client is ever
+    constructed in the suite.**
+  - `_authenticate_modal()` is the estimator-level **preflight** the build asks
+    for: `modal` importable **and** a token configured (`~/.modal.toml` or
+    `MODAL_TOKEN_ID`/`_SECRET`), each failure naming its fix. No network call —
+    the TabFM analogue of TabPFN's `_authenticate_api`.
+  - Defaults from the spike (`tabfm_integration_plan.md` §6): 20k context, 4
+    ensemble members (library default 32 times out), L4 GPU, 20k predict batch.
+  - `tabfm_available()` + `register_foundation_estimators` now also registers
+    `tabfm` when `modal`/`tabfm` is importable.
+- **Compute budget** — no special handling needed and none added: a `modal`
+  `.remote()` call **blocks locally** until the GPU returns, so the remote
+  wall-clock is charged to the experiment's compute budget automatically (the
+  clock does not stop because the GPU is remote). Documented in the OPERATING
+  MANUAL and the transport docstring.
+- **`pyproject.toml`** — new `foundation-modal = ["modal"]` extra (the client
+  only; torch/weights stay remote, so it is safe next to `tabpfn-client`).
+- **`backends.py`** — `preflight_foundation_models` broadened: the extra check
+  now passes if **TabPFN _or_ TabFM** is importable (a TabFM-only environment is
+  no longer wrongly told to install the TabPFN extra). TabFM's deeper readiness
+  (deployed app + `~/.modal.toml`) surfaces at fit time via `_authenticate_modal`
+  — a Modal deploy is not cheaply verifiable at spawn.
+- **Contract** — regenerated once; the `tabfm` row now appears **by
+  declaration**, byte-identical everywhere (15,968 → 17,296 bytes, ceiling
+  17,500).
+- **Docs** — `docs/OPERATING_MANUAL.md` gains a TabFM subsection (Modal setup,
+  recipe usage, params, the remote-clock budget note, the regime, and a
+  **NON-COMMERCIAL licence** warning); the section heading now reads
+  "(TabPFN, TabFM)".
+
+### Tests added (`tests/test_foundation_estimator.py`, 10 TabFM tests)
+
+Registration gating (not registered without `modal`/`tabfm`); runtime spec
+matches the static declaration; unknown-backend rejection; `_authenticate_modal`
+failure on missing client and on missing token (fixtured, no network);
+`_TabFMRemoteModel` clip; registered-and-validates and invalid-objective through
+the recipe validator; end-to-end `dispatch_model` through a **stub `modal`
+module + fixtured transport** asserting the context was capped and shipped with
+`gpu=L4`, and notes carry `estimator=tabfm`/`backend=modal`; and that a `modal`
+recipe setting the local-only `device` param is rejected.
+
+### Deviations from the build prompt (Phase 3)
+
+7. **`_TabFMRemoteModel` is a bespoke wrapper, not `_BatchedRegressor`.** TabPFN
+   uses `_BatchedRegressor` to batch scoring locally; TabFM batches *remotely*
+   (the `predict_batch` arg to the Modal function), and re-sending the context
+   per local chunk would be wasteful. The wrapper ships the whole score frame in
+   one `.remote()` call and applies the same `_densify` + clip-to-≥0 contract.
+6. **Spawn preflight broadened to "TabPFN or TabFM".** See `backends.py` above —
+   a small correctness fix so a TabFM-only orchestrator is not told to install
+   the wrong extra. Existing Phase 2 preflight tests updated accordingly (they
+   now stub both availability checks).
+
+### Deliberately left undone / deferred to Alex (Phase 3)
+
+- **No real Modal call** was made (build-prompt rule 5): the deployed-app call
+  path (`modal.Cls.from_name(...).fit_predict.remote(...)`), the exact
+  `with_options(gpu=...)` behaviour on a *deployed* app, and the local
+  `tabfm[pytorch]` load are all validated by Alex's post-review campaign. The
+  spike (`scripts/tabfm_modal_app.py`) proves the remote science; this phase
+  wires it into the recipe framework behind the fixtured boundary.
+- **`modal` is not installed** in `.venv` (the extra pulls a large client and
+  the build makes no Modal calls), so `tabfm` is *unregistered* in the gate
+  environment — exactly the extra-less case the static declaration exists to make
+  reproducible. `test_tabfm_not_registered_without_modal_or_tabfm` asserts it.
+- **Fan-out scoring** (the spike's recommended Phase-2 speed path — split the
+  score frame across N Modal containers) is **not** implemented: single-container
+  `.remote()` is the correctness-first integration. Wiring `.map()`/`.starmap()`
+  is a follow-up once Alex's real campaign confirms the accuracy is worth it.
+  Documented in the OPERATING MANUAL's budget note (scoring is slow single-container).

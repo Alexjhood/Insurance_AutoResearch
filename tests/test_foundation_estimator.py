@@ -401,6 +401,150 @@ def test_categorical_features_unknown_name_rejected(stub_tabpfn_client) -> None:
         )
 
 
+# ── TabFM (Modal serverless GPU) ─────────────────────────────────────────────
+
+@pytest.fixture
+def stub_tabfm(monkeypatch):
+    """Register tabfm with a stub `modal` client and a fixtured transport, so the
+    fit/predict plumbing is exercised with no Modal call and no real weights."""
+    mod = types.ModuleType("modal")
+    monkeypatch.setitem(sys.modules, "modal", mod)
+    # Never authenticate or hit the network in tests.
+    monkeypatch.setattr(foundation, "_authenticate_modal", lambda: None)
+
+    calls = {"ship": []}
+
+    def fake_transport(backend, X_ctx, y_ctx, X_score, *, params):
+        calls["ship"].append(
+            {"backend": backend, "n_ctx": np.asarray(X_ctx).shape[0],
+             "n_score": np.asarray(X_score).shape[0], "params": dict(params)}
+        )
+        # Return a value that can dip below zero so the clip is exercised.
+        return np.full(np.asarray(X_score).shape[0], float(np.mean(y_ctx)) - 0.5)
+
+    monkeypatch.setattr(foundation, "_tabfm_fit_predict", fake_transport)
+
+    from autoresearch.models.recipe import registry as reg
+
+    before = dict(reg._ESTIMATORS)
+    recipe_pkg.enable_foundation_models()
+    yield calls
+    reg._ESTIMATORS.clear()
+    reg._ESTIMATORS.update(before)
+
+
+def test_tabfm_not_registered_without_modal_or_tabfm() -> None:
+    if foundation.tabfm_available():
+        pytest.skip("modal/tabfm importable in this environment")
+    assert "tabfm" not in recipe_pkg.list_estimators()
+
+
+def test_tabfm_runtime_spec_matches_static_declaration() -> None:
+    from autoresearch.models.recipe.foundation_specs import TABFM_SPEC
+
+    rt = foundation._TABFM_SPEC
+    assert rt.name == "tabfm"
+    assert rt.objectives == TABFM_SPEC.objectives
+    assert rt.encodings == TABFM_SPEC.encodings
+    assert rt.default_encoding == TABFM_SPEC.default_encoding
+
+
+def test_tabfm_unknown_backend_rejected() -> None:
+    from autoresearch.models.recipe.registry import RecipeError
+
+    with pytest.raises(RecipeError, match="Unknown tabfm backend"):
+        foundation._resolve_tabfm_backend({"backend": "cloud"})
+
+
+def test_authenticate_modal_requires_client(monkeypatch) -> None:
+    from autoresearch.models.recipe.registry import RecipeError
+
+    monkeypatch.setitem(sys.modules, "modal", None)  # import modal -> ImportError
+    with pytest.raises(RecipeError, match="foundation-modal"):
+        foundation._authenticate_modal()
+
+
+def test_authenticate_modal_requires_token(monkeypatch, tmp_path) -> None:
+    from autoresearch.models.recipe.registry import RecipeError
+
+    monkeypatch.setitem(sys.modules, "modal", types.ModuleType("modal"))
+    monkeypatch.delenv("MODAL_TOKEN_ID", raising=False)
+    monkeypatch.delenv("MODAL_TOKEN_SECRET", raising=False)
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: tmp_path))
+    with pytest.raises(RecipeError, match="modal setup"):
+        foundation._authenticate_modal()
+
+
+def test_tabfm_remote_model_clips_negatives() -> None:
+    model = foundation._TabFMRemoteModel(
+        backend="modal", X_ctx=np.zeros((3, 2)), y_ctx=np.zeros(3), params={},
+    )
+    # Patch the module-level transport to return negatives.
+    import autoresearch.models.recipe.foundation as f
+
+    orig = f._tabfm_fit_predict
+    f._tabfm_fit_predict = lambda *a, **k: np.full(4, -2.0)
+    try:
+        out = model.predict(np.zeros((4, 2)))
+    finally:
+        f._tabfm_fit_predict = orig
+    assert out.shape == (4,)
+    assert np.all(out == 0.0)
+
+
+def test_tabfm_registered_and_validates(stub_tabfm) -> None:
+    assert "tabfm" in recipe_pkg.list_estimators()
+    errors = validate_recipe(
+        {"structure": "direct", "estimator": "tabfm", "objective": "squared_error",
+         "encoding": "ordinal"},
+        target_mode="burning_cost",
+    )
+    assert errors == []
+
+
+def test_tabfm_invalid_objective_rejected(stub_tabfm) -> None:
+    errors = validate_recipe(
+        {"structure": "direct", "estimator": "tabfm", "objective": "gamma"},
+        target_mode="burning_cost",
+    )
+    assert any("objective" in e for e in errors)
+
+
+def test_tabfm_dispatch_subsamples_and_ships_context(stub_tabfm) -> None:
+    frame, split = _frame()
+    rc = {"structure": "direct", "estimator": "tabfm", "objective": "squared_error",
+          "encoding": "ordinal", "params": {"max_context_rows": 40}}
+    res = dispatch_model(
+        frame, split, model_family="recipe", target_strategy="direct_pure_premium",
+        train_split="train", score_splits=("search_validation",),
+        hyperparameters={"recipe": rc}, target_mode="burning_cost",
+    )
+    preds = res.predictions["predicted_claim_cost"].to_numpy()
+    assert np.all(np.isfinite(preds)) and np.all(preds >= 0)
+    # Context was capped to max_context_rows and shipped to the (stub) backend.
+    assert stub_tabfm["ship"], "transport was never called"
+    for ship in stub_tabfm["ship"]:
+        assert ship["backend"] == "modal"
+        assert ship["n_ctx"] == 40  # 300 train rows capped to 40
+        assert ship["params"]["gpu"] == "L4"
+    assert res.model_notes.get("stage_estimator") == "tabfm"
+    assert res.model_notes.get("stage_backend") == "modal"
+
+
+def test_tabfm_modal_rejects_device_param(stub_tabfm) -> None:
+    from autoresearch.models.recipe.registry import RecipeError
+
+    frame, split = _frame()
+    rc = {"structure": "direct", "estimator": "tabfm", "objective": "squared_error",
+          "encoding": "ordinal", "params": {"backend": "modal", "device": "cuda"}}
+    with pytest.raises((RecipeError, Exception), match="local-only"):
+        dispatch_model(
+            frame, split, model_family="recipe", target_strategy="direct_pure_premium",
+            train_split="train", score_splits=("search_validation",),
+            hyperparameters={"recipe": rc}, target_mode="burning_cost",
+        )
+
+
 def test_categorical_features_omitted_sends_nothing(stub_tabpfn_client) -> None:
     captured: dict = {}
     orig_init = _StubClientRegressor.__init__

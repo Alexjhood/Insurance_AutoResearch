@@ -753,7 +753,7 @@ autoresearch --track <track> --run-id <run-id> record-cycle-reflection \
 
 ---
 
-## Foundation tabular models (TabPFN) — opt-in
+## Foundation tabular models (TabPFN, TabFM) — opt-in
 
 Foundation tabular models predict by **in-context learning** (a single forward
 pass over the training rows) instead of gradient training. They are an optional,
@@ -863,6 +863,50 @@ M3 Air 16GB, set `max_context_rows` to ~15000 in the recipe. Re-run
 (incl. benchmarking on proprietary data) and are distributed via a gated
 HuggingFace repo (accept terms + `hf auth login`). Commercial/production use
 needs a separate Prior Labs enterprise licence — out of scope for research runs.
+
+### TabFM (Google) — Modal serverless GPU
+
+TabFM is a second foundation estimator: also zero-shot in-context learning, but
+with no hosted API and 6.6 GB weights, so its forward pass runs on a **rented
+Modal GPU**. The local `modal` client is torch-free (torch stays remote), so it
+coexists with the TabPFN client in the same env.
+
+**Enabling it (operator).**
+```bash
+pip install -e '.[foundation-modal]'                 # the modal client only (torch-free)
+modal setup                                           # browser auth, writes ~/.modal.toml
+# accept the TabFM licence on huggingface.co/google/tabfm-1.0.0-pytorch, then:
+modal secret create huggingface HF_TOKEN=<hf token>
+modal deploy scripts/tabfm_modal_app.py               # deploy the inference app once
+```
+Then start the run with `--enable-foundation-models` exactly as for TabPFN (the
+same per-run flag enables both); `tabfm` then appears in the recipe menu. On a
+Mac use the default `modal` backend; `AUTORESEARCH_TABFM_BACKEND=local` runs
+in-process `tabfm[pytorch]` and is for CUDA boxes only.
+
+**Using it (agent).**
+```json
+{"structure": "direct", "estimator": "tabfm", "objective": "squared_error",
+ "encoding": "ordinal", "params": {"backend": "modal", "max_context_rows": 20000, "gpu": "L4"}}
+```
+- **Objective `squared_error` only; no early stopping.** Context is subsampled to
+  `max_context_rows` (default 20000, exposure-weighted) exactly like TabPFN.
+- Curated params: `backend` (`modal`/`local`), `max_context_rows`,
+  `subsample_strategy`, `random_state`, `predict_batch_size`, `n_estimators`
+  (the main quality-vs-budget dial — the library default 32 is 32 forward passes
+  per row and times out; default here is 4), `gpu` (modal-only, e.g. `L4`/`A100`),
+  `device` (local-only). Else → a script.
+- **Compute budget: the GPU is remote but the clock keeps running.** A `modal`
+  fit blocks locally until the GPU returns, so the remote wall-clock is charged
+  against the experiment's compute budget. Single-container scoring is slow
+  (~50–60 min at 20k context per the spike); keep `max_context_rows` and
+  `n_estimators` modest, or run under a `[compute] enforce = false` config.
+- Regime (2026-07-05 cross-run analysis): strong on sparse / severity-shaped
+  problems, weak on dense feature sets.
+
+**Licence — NON-COMMERCIAL.** TabFM weights are under the *TabFM Non-Commercial
+License v1.0* (code Apache-2.0). Fine for this research project; **nothing built
+on TabFM weights may be used commercially.**
 
 ---
 

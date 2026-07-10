@@ -119,8 +119,24 @@ def test_preflight_foundation_fails_when_extra_missing(monkeypatch):
     monkeypatch.setattr(
         "autoresearch.models.recipe.foundation.tabpfn_available", lambda: False
     )
-    with pytest.raises(RuntimeError, match=r"\[foundation\] extra"):
+    monkeypatch.setattr(
+        "autoresearch.models.recipe.foundation.tabfm_available", lambda: False
+    )
+    with pytest.raises(RuntimeError, match="no foundation extra is importable"):
         preflight_foundation_models()
+
+
+def test_preflight_foundation_accepts_tabfm_only(monkeypatch):
+    """A TabFM-only environment (no TabPFN extra) passes the extra check."""
+    monkeypatch.setattr(
+        "autoresearch.models.recipe.foundation.tabpfn_available", lambda: False
+    )
+    monkeypatch.setattr(
+        "autoresearch.models.recipe.foundation.tabfm_available", lambda: True
+    )
+    monkeypatch.setenv("AUTORESEARCH_TABPFN_BACKEND", "local")
+    monkeypatch.delenv("TABPFN_TOKEN", raising=False)
+    preflight_foundation_models()  # no raise: TabFM covers the foundation extra
 
 
 def test_preflight_foundation_fails_on_api_without_token(monkeypatch):
