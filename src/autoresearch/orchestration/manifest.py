@@ -41,8 +41,9 @@ TERMINAL_DELEGATION_STATUSES = frozenset(
     {"completed", "failed", "timed_out", "killed"}
 )
 
-_LOCK_STALE_SECONDS = 120.0
+_LOCK_STALE_SECONDS = 900.0
 _LOCK_POLL_SECONDS = 0.05
+_LOCK_WAIT_SECONDS = 300.0
 
 
 def utc_stamp() -> str:
@@ -81,6 +82,9 @@ class Delegation:
     command: tuple[str, ...] = ()
     timeout_minutes: float | None = None
     agent_summary: str | None = None
+    respawn_of: str | None = None
+    continue_run: bool = False
+    cycles_at_start: int = 0
 
     def __post_init__(self) -> None:
         if not DELEGATION_ID_RE.fullmatch(self.delegation_id):
@@ -97,6 +101,10 @@ class Delegation:
                 f"delegation {self.delegation_id}: cycle_budget must be positive, "
                 f"got {self.cycle_budget}"
             )
+        if self.cycles_at_start < 0:
+            raise ValueError("cycles_at_start must be non-negative")
+        if self.continue_run and not self.respawn_of:
+            raise ValueError("continue_run delegations must name respawn_of")
 
     @property
     def is_terminal(self) -> bool:
@@ -126,6 +134,9 @@ class Delegation:
             "command": list(self.command),
             "timeout_minutes": self.timeout_minutes,
             "agent_summary": self.agent_summary,
+            "respawn_of": self.respawn_of,
+            "continue_run": self.continue_run,
+            "cycles_at_start": self.cycles_at_start,
         }
         return payload
 
@@ -151,6 +162,9 @@ class Delegation:
                 float(raw["timeout_minutes"]) if raw.get("timeout_minutes") is not None else None
             ),
             agent_summary=raw.get("agent_summary"),
+            respawn_of=raw.get("respawn_of"),
+            continue_run=bool(raw.get("continue_run", False)),
+            cycles_at_start=int(raw.get("cycles_at_start") or 0),
         )
 
 
@@ -304,6 +318,10 @@ def log_path(orchestration_id: str, delegation_id: str) -> Path:
     return orchestration_dir(orchestration_id) / "logs" / f"{delegation_id}.stdout.log"
 
 
+def exit_status_path(orchestration_id: str, delegation_id: str) -> Path:
+    return orchestration_dir(orchestration_id) / "logs" / f"{delegation_id}.exit.json"
+
+
 def report_path(orchestration_id: str, delegation_id: str) -> Path:
     return orchestration_dir(orchestration_id) / "reports" / f"{delegation_id}.json"
 
@@ -426,7 +444,9 @@ def update_delegation(orch: Orchestration, updated: Delegation) -> Orchestration
 
 
 @contextmanager
-def manifest_lock(orchestration_id: str, *, timeout: float = 30.0) -> Iterator[None]:
+def manifest_lock(
+    orchestration_id: str, *, timeout: float = _LOCK_WAIT_SECONDS
+) -> Iterator[None]:
     """Exclusive lock around manifest read-modify-write and child bootstrap.
 
     Bootstrapping a child run mutates ``latest_run.json`` for its track, so two

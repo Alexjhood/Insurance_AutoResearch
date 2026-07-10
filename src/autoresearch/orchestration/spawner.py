@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,7 @@ from autoresearch.orchestration.manifest import (
     Delegation,
     Orchestration,
     add_delegation,
+    exit_status_path,
     load_orchestration,
     log_path,
     manifest_lock,
@@ -267,6 +268,7 @@ def spawn(
     wait: bool = True,
     dry_run: bool = False,
     memory_access: str | None = None,
+    respawn_of: str | None = None,
 ) -> dict[str, Any]:
     """Pre-bootstrap a child run and launch the sub-agent against it.
 
@@ -325,6 +327,7 @@ def spawn(
             log_path=str(log_path(orchestration_id, delegation_id).relative_to(PROJECT_ROOT)),
             command=plan.command,
             timeout_minutes=plan.timeout_minutes,
+            respawn_of=respawn_of,
         )
         orch = add_delegation(orch, delegation)
         save_orchestration(orch)
@@ -333,19 +336,19 @@ def spawn(
         # the delegation record written immediately above.
         _export_handoff_with_brief(child_config, delegation_id)
 
-    process = _launch(plan, delegation)
-
-    if not wait:
-        orch = load_orchestration(orchestration_id)
-        delegation = orch.delegation(delegation_id)
-        from dataclasses import replace
-
+        # Launch and record the PID while still holding the manifest lock. This
+        # closes the detached-spawn race where two callers could overwrite each
+        # other's read-modify-write after bootstrapping serially.
+        process = _launch(plan, delegation)
         orch = update_delegation(
             orch, replace(delegation, pid=process.pid, status="running")
         )
         save_orchestration(orch)
+
+    if not wait:
         return {
             "status": "running",
+            "orchestration_id": orchestration_id,
             "delegation_id": delegation_id,
             "run_id": run_id,
             "pid": process.pid,
@@ -370,25 +373,36 @@ def _store_brief(
 
 
 def _launch(plan: SpawnPlan, delegation: Delegation) -> subprocess.Popen:
-    """Launch the backend as a detached child, teeing output to the delegation log."""
+    """Launch a detached wrapper that records the backend's eventual exit code."""
 
     log_file = PROJECT_ROOT / str(delegation.log_path)
     log_file.parent.mkdir(parents=True, exist_ok=True)
-    handle = log_file.open("ab")
-
-    stdin_target = subprocess.PIPE if plan.backend.prompt_via == "stdin" else subprocess.DEVNULL
+    status_file = exit_status_path(plan.orchestration_id, delegation.delegation_id)
+    prompt_file = prompt_path(plan.orchestration_id, delegation.delegation_id)
+    runner = PROJECT_ROOT / "scripts" / "run_orchestration_child.py"
+    wrapper_command = [
+        sys.executable,
+        str(runner),
+        "--status-path",
+        str(status_file),
+        "--log-path",
+        str(log_file),
+        "--prompt-path",
+        str(prompt_file),
+        "--prompt-via",
+        plan.backend.prompt_via,
+        "--",
+        *plan.command,
+    ]
     process = subprocess.Popen(  # noqa: S603 — argv comes from the curated registry
-        list(plan.command),
+        wrapper_command,
         cwd=PROJECT_ROOT,
         env=plan.env,
-        stdin=stdin_target,
-        stdout=handle,
-        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    if plan.backend.prompt_via == "stdin" and process.stdin is not None:
-        process.stdin.write(plan.prompt.encode("utf-8"))
-        process.stdin.close()
     return process
 
 
@@ -396,8 +410,6 @@ def _finalise_after_wait(
     orchestration_id: str, delegation_id: str, *, exit_code: int
 ) -> dict[str, Any]:
     """Record the child's exit, then generate its report from the registry."""
-
-    from dataclasses import replace
 
     from autoresearch.orchestration.report import collect_report
 
@@ -428,6 +440,7 @@ def _finalise_after_wait(
 
     return {
         "status": delegation.status,
+        "orchestration_id": orchestration_id,
         "delegation_id": delegation_id,
         "run_id": delegation.run_id,
         "exit_code": exit_code,
@@ -469,3 +482,130 @@ def finish_delegation(run_dir: Path, *, summary: str) -> dict[str, Any]:
         "delegation_id": delegation_id,
         "summary_chars": len(summary),
     }
+
+
+def respawn(
+    orchestration_id: str,
+    *,
+    delegation_id: str,
+    brief_path: Path,
+    backend_name: str | None = None,
+    continue_run: bool = False,
+    wait: bool = True,
+    dry_run: bool = False,
+    memory_access: str | None = None,
+) -> dict[str, Any]:
+    """Spawn a revised brief, optionally continuing the source child run."""
+
+    from autoresearch.orchestration.monitor import refresh_orchestration
+    from autoresearch.orchestration.monitor import process_is_alive
+
+    orch = refresh_orchestration(orchestration_id)
+    source = orch.delegation(delegation_id)
+    selected_backend = backend_name or source.backend
+    if not source.is_terminal or process_is_alive(source.pid):
+        raise ValueError(
+            f"Cannot respawn {delegation_id}: status is {source.status!r} and its "
+            "process has not stopped. Wait for completion or kill it first."
+        )
+    if not continue_run:
+        return spawn(
+            orchestration_id,
+            brief_path=brief_path,
+            backend_name=selected_backend,
+            wait=wait,
+            dry_run=dry_run,
+            memory_access=memory_access,
+            respawn_of=delegation_id,
+        )
+
+    brief = load_brief(brief_path)
+    _reject_unsupported_brief(brief)
+    backend = get_backend(selected_backend)
+    if backend.track != source.track:
+        raise ValueError(
+            f"Cannot continue {source.track}/{source.run_id} with backend "
+            f"{selected_backend!r} on track {backend.track!r}. Choose a backend on "
+            f"track {source.track!r}, or respawn without --continue-run."
+        )
+    _check_budget(orch, brief)
+
+    if dry_run:
+        plan = plan_spawn(
+            orch,
+            brief=brief,
+            backend_name=selected_backend,
+            run_id=source.run_id,
+            memory_access=memory_access,
+        )
+        return {"status": "dry_run", "plan": plan}
+
+    with manifest_lock(orchestration_id):
+        orch = load_orchestration(orchestration_id)
+        source = orch.delegation(delegation_id)
+        if not source.is_terminal:
+            raise ValueError(
+                f"Cannot continue {delegation_id}: status changed to {source.status!r}."
+            )
+        _check_budget(orch, brief)
+        new_delegation_id = orch.next_delegation_id()
+        stored_brief = _store_brief(orch, new_delegation_id, brief, brief_path)
+        plan = plan_spawn(
+            orch,
+            brief=brief,
+            backend_name=selected_backend,
+            delegation_id=new_delegation_id,
+            run_id=source.run_id,
+            memory_access=memory_access,
+        )
+        prompt_file = prompt_path(orchestration_id, new_delegation_id)
+        prompt_file.parent.mkdir(parents=True, exist_ok=True)
+        prompt_file.write_text(plan.prompt, encoding="utf-8")
+
+        from autoresearch.orchestration.report import _child_config, _cycles_used
+
+        child_config = _child_config(source)
+        delegation = Delegation(
+            delegation_id=new_delegation_id,
+            brief_path=str(stored_brief.relative_to(PROJECT_ROOT)),
+            backend=backend.name,
+            track=source.track,
+            run_id=source.run_id,
+            cycle_budget=brief.cycle_budget,
+            status="spawned",
+            spawned_at=utc_stamp(),
+            prompt_path=str(prompt_file.relative_to(PROJECT_ROOT)),
+            log_path=str(log_path(orchestration_id, new_delegation_id).relative_to(PROJECT_ROOT)),
+            command=plan.command,
+            timeout_minutes=plan.timeout_minutes,
+            respawn_of=delegation_id,
+            continue_run=True,
+            cycles_at_start=_cycles_used(child_config.registry_path),
+        )
+        orch = add_delegation(orch, delegation)
+        save_orchestration(orch)
+        write_run_backpointer(
+            child_config.artifacts_dir,
+            orchestration_id=orchestration_id,
+            delegation_id=new_delegation_id,
+        )
+        _export_handoff_with_brief(child_config, new_delegation_id)
+        process = _launch(plan, delegation)
+        orch = update_delegation(
+            orch, replace(delegation, pid=process.pid, status="running")
+        )
+        save_orchestration(orch)
+
+    if not wait:
+        return {
+            "status": "running",
+            "orchestration_id": orchestration_id,
+            "delegation_id": new_delegation_id,
+            "run_id": source.run_id,
+            "pid": process.pid,
+            "respawn_of": delegation_id,
+            "continue_run": True,
+        }
+    return _finalise_after_wait(
+        orchestration_id, new_delegation_id, exit_code=process.wait()
+    )

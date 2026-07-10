@@ -145,7 +145,7 @@ def _cycles_used(registry_path: Path) -> int:
     sessions = list_sessions(registry_path)
     if not sessions:
         return 0
-    return max(int(s.get("current_cycle") or 0) for s in sessions)
+    return sum(int(s.get("current_cycle") or 0) for s in sessions)
 
 
 def _max_repair_attempts_seen(run_dir: Path) -> int:
@@ -267,8 +267,10 @@ def build_report(orch: Orchestration, delegation: Delegation) -> dict[str, Any]:
     # config rather than rebuilding the path keeps this testable against a fixture.
     run_dir = config.artifacts_dir
 
-    cycles_used = _cycles_used(config.registry_path)
+    cycles_used = max(0, _cycles_used(config.registry_path) - delegation.cycles_at_start)
     experiments = _experiment_rows(config)
+    if delegation.continue_run:
+        experiments = experiments[delegation.cycles_at_start :]
     champion = _champion_facts(config)
     decisions = [row["decision"] for row in experiments if row.get("decision")]
 
@@ -290,6 +292,8 @@ def build_report(orch: Orchestration, delegation: Delegation) -> dict[str, Any]:
         "run_id": delegation.run_id,
         "track": delegation.track,
         "backend": delegation.backend,
+        "respawn_of": delegation.respawn_of,
+        "continue_run": delegation.continue_run,
         "status": delegation.status,
         "cycles": {"budget": delegation.cycle_budget, "used": cycles_used},
         "champion": champion,

@@ -12,11 +12,16 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+import sys
+import threading
+import time
 
 import pytest
 
 from autoresearch.orchestration import backends as backends_mod
 from autoresearch.orchestration import manifest as manifest_mod
+from autoresearch.orchestration import monitor as monitor_mod
 from autoresearch.orchestration import report as report_mod
 from autoresearch.orchestration import spawner as spawner_mod
 from autoresearch.orchestration.backends import Backend, get_backend, load_backends
@@ -26,6 +31,7 @@ from autoresearch.orchestration.manifest import (
     Orchestration,
     add_delegation,
     create_orchestration,
+    exit_status_path,
     load_orchestration,
     manifest_lock,
     read_run_backpointer,
@@ -153,6 +159,32 @@ def test_manifest_lock_is_exclusive_and_released(orchestrations_root):
             with manifest_lock(oid, timeout=0.2):
                 pass
     assert not lock_file.exists()
+
+
+def test_manifest_lock_serialises_parallel_spawners(orchestrations_root):
+    from concurrent.futures import ThreadPoolExecutor
+
+    orch = create_orchestration(
+        dataset="porto_seguro", target_mode="claim_incidence", total_cycle_budget=4
+    )
+    active = 0
+    max_active = 0
+    state_lock = threading.Lock()
+
+    def enter() -> None:
+        nonlocal active, max_active
+        with manifest_lock(orch.orchestration_id):
+            with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.04)
+            with state_lock:
+                active -= 1
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda _: enter(), range(2)))
+
+    assert max_active == 1
 
 
 def test_run_backpointer_round_trip(tmp_path):
@@ -568,6 +600,222 @@ def test_spawn_rejects_seed_champion_before_creating_anything(orchestrations_roo
     assert load_orchestration(orch.orchestration_id).delegations == ()
 
 
+def test_detached_wrapper_records_exit_code_and_output(
+    orchestrations_root, tmp_path, monkeypatch
+):
+    oid = "20260710T120000Z"
+    manifest_mod.orchestration_dir(oid).mkdir(parents=True)
+    prompt_file = manifest_mod.prompt_path(oid, "d01")
+    prompt_file.parent.mkdir(parents=True)
+    prompt_file.write_text("wrapper prompt", encoding="utf-8")
+    log_file = tmp_path / "child.log"
+    backend = Backend(
+        name="test-wrapper",
+        tool="stub",
+        command=(sys.executable, "-c", "import sys; print(sys.stdin.read())"),
+        prompt_via="stdin",
+        track="claude",
+        model_provider="test",
+        model_name="test",
+    )
+    plan = spawner_mod.SpawnPlan(
+        orchestration_id=oid,
+        delegation_id="d01",
+        backend=backend,
+        track="claude",
+        run_id="20260710T120100Z",
+        cycle_budget=1,
+        command=backend.command,
+        env=dict(spawner_mod.os.environ),
+        prompt="wrapper prompt",
+        timeout_minutes=20,
+    )
+    delegation = Delegation(
+        delegation_id="d01",
+        brief_path="briefs/d01.json",
+        backend=backend.name,
+        track="claude",
+        run_id=plan.run_id,
+        cycle_budget=1,
+        log_path=str(log_file),
+    )
+
+    process = spawner_mod._launch(plan, delegation)
+
+    assert process.wait(timeout=10) == 0
+    assert "wrapper prompt" in log_file.read_text(encoding="utf-8")
+    status = manifest_mod.read_json(exit_status_path(oid, "d01"))
+    assert status["exit_code"] == 0
+
+
+def test_respawn_continue_run_reuses_child_and_records_lineage(
+    orchestrations_root, tmp_path, monkeypatch
+):
+    orch = create_orchestration(
+        dataset="porto_seguro", target_mode="claim_incidence", total_cycle_budget=5
+    )
+    source = Delegation(
+        delegation_id="d01",
+        brief_path="briefs/d01.json",
+        backend="stub",
+        track="claude",
+        run_id="20260710T120100Z",
+        cycle_budget=2,
+        status="completed",
+        pid=None,
+    )
+    save_orchestration(add_delegation(orch, source))
+    brief_file = tmp_path / "revised.json"
+    write_json(brief_file, {"direction": "Continue the useful line.", "cycle_budget": 2})
+    child_dir = tmp_path / "child"
+    child_dir.mkdir()
+    child_config = SimpleNamespace(artifacts_dir=child_dir, registry_path=tmp_path / "registry.sqlite")
+
+    monkeypatch.setattr(spawner_mod, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(report_mod, "_child_config", lambda delegation: child_config)
+    monkeypatch.setattr(report_mod, "_cycles_used", lambda registry: 2)
+    monkeypatch.setattr(spawner_mod, "_export_handoff_with_brief", lambda config, did: None)
+    monkeypatch.setattr(spawner_mod, "_launch", lambda plan, delegation: SimpleNamespace(pid=4321))
+
+    result = spawner_mod.respawn(
+        orch.orchestration_id,
+        delegation_id="d01",
+        brief_path=brief_file,
+        continue_run=True,
+        wait=False,
+    )
+
+    assert result["delegation_id"] == "d02"
+    continued = load_orchestration(orch.orchestration_id).delegation("d02")
+    assert continued.run_id == source.run_id
+    assert continued.respawn_of == "d01"
+    assert continued.continue_run is True
+    assert continued.cycles_at_start == 2
+    assert read_run_backpointer(child_dir) == (orch.orchestration_id, "d02")
+
+
+def test_respawn_new_run_passes_lineage_to_spawn(
+    orchestrations_root, tmp_path, monkeypatch
+):
+    orch = create_orchestration(
+        dataset="porto_seguro", target_mode="claim_incidence", total_cycle_budget=4
+    )
+    source = _running_delegation(status="completed", pid=None)
+    save_orchestration(add_delegation(orch, source))
+    captured = {}
+
+    def fake_spawn(orchestration_id, **kwargs):
+        captured.update(kwargs)
+        return {"status": "running", "delegation_id": "d02"}
+
+    monkeypatch.setattr(spawner_mod, "spawn", fake_spawn)
+
+    spawner_mod.respawn(
+        orch.orchestration_id,
+        delegation_id="d01",
+        brief_path=tmp_path / "brief.json",
+        wait=False,
+    )
+
+    assert captured["backend_name"] == "stub"
+    assert captured["respawn_of"] == "d01"
+
+
+def test_respawn_requires_timed_out_process_to_be_killed(
+    orchestrations_root, tmp_path, monkeypatch
+):
+    orch = create_orchestration(
+        dataset="porto_seguro", target_mode="claim_incidence", total_cycle_budget=4
+    )
+    source = _running_delegation(status="timed_out")
+    orch = add_delegation(orch, source)
+    save_orchestration(orch)
+    monkeypatch.setattr(monitor_mod, "refresh_orchestration", lambda oid: orch)
+    monkeypatch.setattr(monitor_mod, "process_is_alive", lambda pid: True)
+
+    with pytest.raises(ValueError, match="kill it first"):
+        spawner_mod.respawn(
+            orch.orchestration_id,
+            delegation_id="d01",
+            brief_path=tmp_path / "brief.json",
+        )
+
+
+# ── detached monitor ────────────────────────────────────────────────────────
+
+
+def _running_delegation(**overrides) -> Delegation:
+    values = dict(
+        delegation_id="d01",
+        brief_path="briefs/d01.json",
+        backend="stub",
+        track="claude",
+        run_id="20260710T120100Z",
+        cycle_budget=1,
+        status="running",
+        pid=1234,
+        spawned_at="2026-07-10T12:00:00Z",
+        timeout_minutes=20,
+    )
+    values.update(overrides)
+    return Delegation(**values)
+
+
+def test_monitor_observes_clean_detached_exit(orchestrations_root, monkeypatch):
+    orch = create_orchestration(
+        dataset="porto_seguro", target_mode="claim_incidence", total_cycle_budget=2
+    )
+    save_orchestration(add_delegation(orch, _running_delegation()))
+    write_json(
+        exit_status_path(orch.orchestration_id, "d01"),
+        {"exit_code": 0, "ended_at": "2026-07-10T12:05:00Z"},
+    )
+    monkeypatch.setattr(monitor_mod, "process_is_alive", lambda pid: False)
+
+    refreshed = monitor_mod.refresh_orchestration(orch.orchestration_id)
+
+    completed = refreshed.delegation("d01")
+    assert completed.status == "completed"
+    assert completed.exit_code == 0
+    assert completed.ended_at == "2026-07-10T12:05:00Z"
+
+
+def test_monitor_marks_timeout_without_killing(orchestrations_root, monkeypatch):
+    from datetime import datetime, timezone
+
+    orch = create_orchestration(
+        dataset="porto_seguro", target_mode="claim_incidence", total_cycle_budget=2
+    )
+    save_orchestration(add_delegation(orch, _running_delegation()))
+    monkeypatch.setattr(monitor_mod, "process_is_alive", lambda pid: True)
+    kill_calls = []
+    monkeypatch.setattr(monitor_mod.os, "killpg", lambda *args: kill_calls.append(args))
+
+    refreshed = monitor_mod.refresh_orchestration(
+        orch.orchestration_id,
+        now=datetime(2026, 7, 10, 12, 21, tzinfo=timezone.utc),
+    )
+
+    assert refreshed.delegation("d01").status == "timed_out"
+    assert kill_calls == []
+
+
+def test_kill_terminates_process_group_and_records_status(orchestrations_root, monkeypatch):
+    orch = create_orchestration(
+        dataset="porto_seguro", target_mode="claim_incidence", total_cycle_budget=2
+    )
+    save_orchestration(add_delegation(orch, _running_delegation()))
+    monkeypatch.setattr(monitor_mod, "process_is_alive", lambda pid: True)
+    calls = []
+    monkeypatch.setattr(monitor_mod.os, "killpg", lambda pid, sig: calls.append((pid, sig)))
+
+    killed = monitor_mod.kill_delegation(orch.orchestration_id, "d01")
+
+    assert calls and calls[0][0] == 1234
+    assert killed.status == "killed"
+    assert load_orchestration(orch.orchestration_id).delegation("d01").status == "killed"
+
+
 # ── distress predicates (pure) ──────────────────────────────────────────────
 
 
@@ -803,6 +1051,22 @@ def test_report_flags_baseline_champion_and_all_rejected(fixture_child_run):
 def test_report_flags_missing_finish_delegation(fixture_child_run):
     report = build_report(_fixture_orchestration(), _fixture_delegation(agent_summary=None))
     assert "no_finish_delegation" in report["distress"]["active"]
+
+
+def test_continued_report_excludes_cycles_before_its_offset(fixture_child_run):
+    delegation = _fixture_delegation(
+        delegation_id="d02",
+        cycle_budget=1,
+        respawn_of="d01",
+        continue_run=True,
+        cycles_at_start=1,
+    )
+
+    report = build_report(_fixture_orchestration(), delegation)
+
+    assert report["cycles"] == {"budget": 1, "used": 0}
+    assert report["experiments"] == []
+    assert report["respawn_of"] == "d01"
 
 
 def test_report_flags_crash_on_nonzero_exit(fixture_child_run):

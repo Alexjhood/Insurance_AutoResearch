@@ -35,6 +35,15 @@ FOREIGN_TRACK = "artifacts/tracks/codex/runs/RUN_X/registry.sqlite"
 RUNS_DIR = "artifacts/tracks/claude/runs"
 ABS_OWN = "/Users/x/Insurance_AutoResearch/artifacts/tracks/claude/runs/RUN_A/context/latest_context.json"
 
+ORCHESTRATOR = {
+    "mode": "orchestrator",
+    "orchestration_id": "20260710T120000Z",
+    "child_runs": [
+        {"track": "claude", "run_id": "20260710T120100Z"},
+        {"track": "codex", "run_id": "20260710T120200Z"},
+    ],
+}
+
 
 # ── reference parser ────────────────────────────────────────────────────────
 
@@ -86,6 +95,57 @@ def test_analyst_sees_everything():
 def test_non_run_paths_always_allowed():
     for scope in (None, BOUND, ANALYST):
         assert guard.decide(scope, ["src/autoresearch/cli.py", "configs/default.toml"])[0]
+
+
+# ── orchestrator scope ──────────────────────────────────────────────────────
+
+def test_orchestrator_reads_own_child_run():
+    path = "artifacts/tracks/claude/runs/20260710T120100Z/context/latest_context.json"
+
+    assert guard.decide(ORCHESTRATOR, [path])[0]
+
+
+def test_orchestrator_denies_foreign_run():
+    path = "artifacts/tracks/claude/runs/20260710T999999Z/RESEARCH_LOG.md"
+    allow, reason = guard.decide(ORCHESTRATOR, [path])
+
+    assert not allow
+    assert "unlisted child run" in reason
+
+
+def test_orchestrator_denies_another_orchestration_folder():
+    path = "artifacts/orchestrations/20260710T130000Z/orchestration.json"
+    allow, reason = guard.decide(ORCHESTRATOR, [path])
+
+    assert not allow
+    assert "another orchestration" in reason
+
+
+def test_orchestrator_allows_child_takeover_command():
+    cmd = (
+        "autoresearch --track codex --run-id 20260710T120200Z "
+        "run-session-cycles 1"
+    )
+
+    assert guard.decide(ORCHESTRATOR, [cmd])[0]
+
+
+def test_orchestrator_denies_runs_dir_enumeration():
+    allow, reason = guard.decide(ORCHESTRATOR, ["artifacts/tracks/claude/runs"])
+
+    assert not allow
+    assert "enumerating sibling runs" in reason
+
+
+def test_orchestrator_denies_implicit_latest_when_another_campaign_is_newer():
+    scope = {
+        **ORCHESTRATOR,
+        "latest_orchestration_id": "20260710T130000Z",
+    }
+    allow, reason = guard.decide(scope, ["autoresearch orchestrate status"])
+
+    assert not allow
+    assert "would resolve to 20260710T130000Z" in reason
 
 
 def test_command_with_embedded_foreign_path_denied():
@@ -359,6 +419,46 @@ def test_invalid_start_session_shape_does_not_bind(monkeypatch, tmp_path):
 
     assert guard.handle_post_tool_use(payload) == 0
     assert guard.resolve_scope("invalid-bind") is None
+
+
+def test_orchestrate_new_auto_binds_from_success_output(monkeypatch, tmp_path):
+    monkeypatch.setattr(guard, "SCOPE_DIR", tmp_path)
+    monkeypatch.setattr(guard, "LOG_PATH", tmp_path / "guard.log")
+    monkeypatch.delenv("AUTORESEARCH_SCOPE", raising=False)
+    payload = {
+        "session_id": "orchestrator-new",
+        "tool_input": {
+            "command": "autoresearch orchestrate new --dataset french_motor --total-cycles 6"
+        },
+        "tool_response": {
+            "exit_code": 0,
+            "output": '{"orchestration_id": "20260710T120000Z"}',
+        },
+    }
+
+    assert guard.handle_post_tool_use(payload) == 0
+    scope = guard.load_scope_file("orchestrator-new")
+    assert scope["mode"] == "orchestrator"
+    assert scope["orchestration_id"] == "20260710T120000Z"
+
+
+def test_orchestrate_spawn_auto_binds_explicit_orchestration(monkeypatch, tmp_path):
+    monkeypatch.setattr(guard, "SCOPE_DIR", tmp_path)
+    monkeypatch.setattr(guard, "LOG_PATH", tmp_path / "guard.log")
+    monkeypatch.delenv("AUTORESEARCH_SCOPE", raising=False)
+    payload = {
+        "session_id": "orchestrator-spawn",
+        "tool_input": {
+            "command": (
+                "autoresearch orchestrate spawn --orchestration-id 20260710T120000Z "
+                "--brief b.json --backend stub --no-wait"
+            )
+        },
+        "tool_response": {"exit_code": 0},
+    }
+
+    assert guard.handle_post_tool_use(payload) == 0
+    assert guard.load_scope_file("orchestrator-spawn")["mode"] == "orchestrator"
 
 
 def test_codex_hooks_json_uses_codex_schema_and_wires_guards():

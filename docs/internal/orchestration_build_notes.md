@@ -1,8 +1,8 @@
 # Orchestration Build Notes
 
 **Branch:** `orchestration` (from `MultiDataset`)
-**Status:** Phase 1 complete. Full suite green (497 passed, 2 skipped);
-`generate_agent_contract.py --check` passes. Phases 2–5 not started.
+**Status:** Phases 1–2 complete. Full suite green (514 passed, 2 skipped);
+`generate_agent_contract.py --check` passes. Phases 3–5 not started.
 
 This is the review entry point for the implementation of
 `docs/internal/orchestration_design.md`, per the execution constraints in
@@ -46,10 +46,10 @@ Baseline before any work: **433 passed, 2 skipped**.
 
 | # | Criterion | Status |
 |---|---|---|
-| 1 | Full pytest green; `generate_agent_contract.py --check` passes | ✅ 497 passed / 2 skipped; check in sync |
+| 1 | Full pytest green; `generate_agent_contract.py --check` passes | ✅ 514 passed / 2 skipped; check in sync |
 | 2 | Stub end-to-end campaign: `new` → 2 × `spawn --wait` → `collect`; correct cycle counts, champion facts from child registry, ≥1 provoked distress flag | ✅ (`no_finish_delegation` provoked via `stub-no-finish`) |
-| 3 | Parallel: 2 detached stub delegations, `status` shows both, manifest lock prevents bootstrap races | ⬜ Phase 2 (lock built + unit-tested now; `--no-wait` wired but `status`/`monitor.py` are Phase 2) |
-| 4 | Guard: orchestrator allow/deny cases; existing guard tests unchanged | ⬜ Phase 2 |
+| 3 | Parallel: 2 detached stub delegations, `status` shows both, manifest lock prevents bootstrap races | ✅ 3 detached stubs live concurrently; lock unit test + concurrent smoke |
+| 4 | Guard: orchestrator allow/deny cases; existing guard tests unchanged | ✅ all five required cases; pre-existing tests unchanged |
 | 5 | Playoff fixture passes; consolidation promotion fires the holdout-eval hook | ⬜ Phase 4 |
 | 6 | `list-backends` prints registry + metadata; `backend-stats` aggregates a fixture manifest | 🟡 `list-backends` ✅ (scorecard column renders "—"); `backend-stats` is Phase 5 |
 | 7 | Single-agent smoke test proves no Orchestration-brief block and no behaviour change | ✅ `test_single_agent_handoff_has_no_orchestration_brief` |
@@ -107,6 +107,45 @@ public entry points. **No protected file was touched.**
 - **`scripts/stub_subagent.py`** + two `backends.toml` entries (`stub`,
   `stub-no-finish`) — the permanent zero-LLM smoke test (build-prompt rule 5).
 - **`tests/test_orchestration.py`** — 64 tests.
+
+### Phase 2 — orchestrator scope + parallelism
+
+- **`scripts/run_scope_guard.py`** — third `orchestrator` mode. The scope file
+  stores only the orchestration id; `resolve_scope()` hydrates the current child
+  list from `orchestration.json` on every hook invocation, then passes that plain
+  data to the still-pure `decide()`. The orchestrator may read its own campaign
+  folder and manifest-listed child runs and may issue explicit takeover commands;
+  foreign runs, other orchestration folders, implicit run selection, and `runs/`
+  enumeration are denied. Successful non-dry-run `orchestrate new` / `spawn`
+  commands auto-bind the session. Existing research/analyst cases were not
+  changed; the five required cases and binding paths were appended as new tests.
+- **`monitor.py`** — refreshes process state, registry progress, champion/gini,
+  last activity, and elapsed/timeout values for `orchestrate status`. A live
+  process crossing its stored allowance is marked `timed_out` but never signalled.
+  `orchestrate kill` sends SIGTERM to the detached process group and records
+  `killed` under the manifest lock.
+- **Detached observation** — `scripts/run_orchestration_child.py` is a zero-LLM
+  wrapper around the exact backend argv. It writes `logs/dNN.exit.json`
+  atomically when the backend exits, allowing a later CLI process to distinguish
+  clean completion from a crash. The backend argv, not the wrapper argv, remains
+  the command recorded in the manifest/audit surface.
+- **Parallel spawning** — launch + PID/status persistence now happen inside the
+  same manifest lock as bootstrap and delegation creation. This closes the
+  read-modify-write window where concurrent detached spawners could lose one
+  another's records. The lock has both an exclusivity test and a two-thread
+  serialization test.
+- **`orchestrate respawn`** — inherits the source backend by default and creates
+  a new run, or `--continue-run` reuses the stopped child's run/champion with a
+  revised brief and fresh cycle budget. Continuations record `respawn_of`,
+  `continue_run`, and `cycles_at_start`, so reports contain only the new cycles.
+  Respawn refuses a still-running process, including a live `timed_out` child;
+  the operator must wait or call `kill` first.
+- **Report collection** — `collect` refreshes detached state first and persists
+  each generated `report_path`. Cycle accounting now sums sessions in a run and
+  subtracts `cycles_at_start` for same-run continuation.
+- **Tests** — detached wrapper output/exit capture, timeout-without-kill, explicit
+  process-group kill, same-run continuation lineage, stopped-process enforcement,
+  report accounting, lock concurrency, guard policy, and orchestrator auto-bind.
 
 ---
 
@@ -190,6 +229,34 @@ Worth recording, because they are the argument for the stub existing.
     `--effort`, which would re-create the exact defect (two "different" backends
     that are secretly the same) that the scorecard cannot detect. Fails at load
     time; scoped per `tool`.
+11. **`respawn --seed-champion` is deferred to Phase 4; Phase 2 exposes no
+    placeholder flag.** Alex delegated the phase-ordering choice to the build
+    agent. Pulling replay forward would duplicate the playoff's most sensitive
+    mechanic before its fixture gauntlet exists; accepting a flag that raises at
+    runtime would be a dishonest interface. `brief.seed_champion` continues to
+    fail before creating anything, and Phase 4 will land replay and the respawn
+    flag together. Phase 2 ships default new-run respawn plus `--continue-run`.
+12. **Detached backends run through a stdlib exit-status wrapper.** The design
+    says the spawner launches the backend command directly, but a later CLI
+    process cannot `waitpid()` a child it did not parent. PID liveness alone
+    cannot distinguish exit 0 from a crash. The wrapper preserves the exact
+    backend argv as the audit command and adds only an atomic exit sidecar.
+13. **Continuation lineage adds three optional delegation fields:** `respawn_of`,
+    `continue_run`, and `cycles_at_start`. The design's sketch does not include
+    them, but without a start offset a continued run's second report would claim
+    the first delegation's cycles and experiments as its own. Ordinary
+    delegations serialize the backward-compatible defaults (`null`, `false`, 0).
+14. **Manifest lock wait/staleness increased from 30 s / 120 s to 300 s / 900 s.**
+    The first three-way concurrent smoke correctly serialized bootstrap, but a
+    cold matplotlib/font-cache build held the lock beyond 30 seconds and one
+    caller timed out. The original stale threshold was also unsafe for any valid
+    bootstrap longer than two minutes. Explicit-test timeouts remain configurable.
+15. **`finish-delegation` records testimony; terminal report generation happens
+    after backend exit (`--wait`) or on `collect`.** The design says finish
+    triggers report generation, but at that instant the detached backend is still
+    live and its exit status is unknowable. Generating then would create a stale
+    report with `status=running`. `collect` refreshes the exit sidecar first and
+    produces the authoritative report.
 
 ---
 
@@ -213,6 +280,13 @@ Worth recording, because they are the argument for the stub existing.
 - **`child_environment` strips `AUTORESEARCH_ORCHESTRATION_ID` and any inherited
   `AUTORESEARCH_MEMORY_ACCESS`** from the child, or a child spawned by an
   orchestrator session would inherit the orchestrator's scope.
+- **Timeout enforcement means state, not signalling.** `status` marks an overdue
+  live child `timed_out`; only the explicit `kill` command sends SIGTERM. This is
+  the design's "never auto-kills in v1" rule applied literally.
+- **Respawn source must be stopped.** A `timed_out` delegation can still be live,
+  so it is not eligible until killed. This prevents two agents from writing the
+  same continued run and prevents unnoticed spend from an old process while a
+  replacement starts.
 
 ---
 
@@ -343,21 +417,68 @@ session — which is exactly the gap Phase 2's `orchestrator` scope closes. Evid
 that the block renders comes from the stub's own warning check (0 hits) and from
 `test_orchestrated_handoff_carries_the_brief_block`.
 
+## Exact commands run (Phase 2 milestone)
+
+Full suite and generated-contract check were run before using the documented
+pytest-gate skip for the stub campaign:
+
+```bash
+.venv/bin/python -m pytest
+.venv/bin/python scripts/generate_agent_contract.py --check
+autoresearch orchestrate new --dataset french_motor --total-cycles 6 \
+  --model-provider openai --model-name codex
+# orchestration_id: 20260710T103721Z
+
+# These three commands were issued concurrently (Promise.all at the harness):
+AUTORESEARCH_SKIP_PYTEST_GATE=1 autoresearch orchestrate spawn \
+  --orchestration-id 20260710T103721Z --brief /private/tmp/phase2_brief_d01.json \
+  --backend stub --no-wait
+AUTORESEARCH_SKIP_PYTEST_GATE=1 autoresearch orchestrate spawn \
+  --orchestration-id 20260710T103721Z --brief /private/tmp/phase2_brief_d02.json \
+  --backend stub --no-wait
+AUTORESEARCH_SKIP_PYTEST_GATE=1 autoresearch orchestrate spawn \
+  --orchestration-id 20260710T103721Z --brief /private/tmp/phase2_brief_d03.json \
+  --backend stub --no-wait
+
+autoresearch orchestrate status --orchestration-id 20260710T103721Z
+autoresearch orchestrate collect --orchestration-id 20260710T103721Z
+.venv/bin/python -m pytest \
+  tests/test_run_scope_guard.py::test_orchestrator_denies_foreign_run -q
+```
+
+The first concurrent attempt proved exclusion but exposed the old wait timeout:
+two spawns succeeded as `d01`/`d02`; one caller received `TimeoutError` after
+30 seconds while cold bootstrap/cache work legitimately held the lock. After
+raising wait/staleness to 300/900 seconds, the remaining two-cycle brief was
+spawned as `d03`. This did not exceed budget: the failed caller never appended a
+delegation, so the final campaign is exactly 6/6 cycles.
+
+The key live status (all three processes alive concurrently):
+
+```
+Orchestration 20260710T103721Z: active cycles=6/6
+d01  stub  running  true  1/2  gini=0.0000  claude/20260710T103729Z
+d02  stub  running  true  0/2  gini=0.0000  claude/20260710T103748Z
+d03  stub  running  true  0/2  gini=0.0000  claude/20260710T103857Z
+```
+
+Final status showed all three `completed`, `process_alive=false`, and `2/2`
+cycles. `collect` wrote all three reports, which were then read directly by the
+orchestrator scope. Registry-backed key facts were identical by construction:
+`status=completed`, `cycles=2/2`, `model_family=global_mean`,
+`gini_weighted=0.0`, summary present, distress
+`[all_rejected, champion_is_baseline]`. The direct pure-decision guard probe
+passed (`1 passed`); no live foreign-path tool call was attempted.
+
 ---
 
 ## Open questions for later phases (raise with Alex; do not improvise)
 
-1. **`seed_champion` / `respawn --seed-champion` is scheduled before the mechanic
-   it depends on.** Design §8 puts `respawn (--seed-champion, --continue-run)` in
-   **Phase 2**, but §4.3 says `seed_champion` is "the same replay mechanic the
-   playoff uses (4.6)" — and §8 puts recipe replay + script copy-in in **Phase 4**.
-   Phase 2 therefore cannot implement `--seed-champion` without either building
-   the Phase 4 replay path early, or shipping `respawn` with `--continue-run`
-   only. This materially changes a CLI interface, so per the build prompt's "when
-   to stop and ask" it needs Alex's call, not a build-time guess. Phase 1 already
-   fails loudly on a brief carrying `seed_champion` (deviation 2).
-2. **`--permission-mode acceptEdits` sufficiency** — the last `TODO(pin)`; needs
+1. **`--permission-mode acceptEdits` sufficiency** — the last `TODO(pin)`; needs
    one real spawn. See "CLI flag pinning".
+
+The seed/replay ordering question was resolved for Phase 2 after Alex said to use
+best judgement: defer the flag and replay together to Phase 4 (deviation 11).
 
 ---
 
@@ -405,13 +526,7 @@ that the block renders comes from the stub's own warning check (0 hits) and from
 - **Whether `--permission-mode acceptEdits` suffices for a headless sub-agent's
   Bash calls** — the one remaining `TODO(pin)`; see "CLI flag pinning". Needs one
   real spawn to settle.
-- **`seed_champion`** — deviation 2 above.
-- **Phases 2–5**: orchestrator guard scope, `monitor.py`/`status`/`kill`/timeout
-  enforcement, `respawn`, the Codex backend, `playoff.py`, `ORCHESTRATOR.md`,
+- **`seed_champion` replay + `respawn --seed-champion`** — deliberately deferred
+  together to Phase 4; deviations 2 and 11 above.
+- **Phases 3–5**: the Codex backend, `playoff.py`, `ORCHESTRATOR.md`,
   `docs/RUN_ORCHESTRATED.md`, `orchestrate note`/`report`/`backend-stats`.
-- **`--no-wait`** is wired through `spawn()` and records `pid`/`status=running`,
-  but nothing yet observes the process (that is `monitor.py`, Phase 2). Do not
-  rely on it before Phase 2.
-- **Timeout is computed and stored** on the delegation, **not enforced**. Design
-  §4.5 puts enforcement in `monitor.py` (Phase 2) and says the monitor "never
-  auto-kills in v1".

@@ -15,6 +15,8 @@ Policy (research by default for run artifacts):
     source/docs/configs but not run folders. A research agent must bootstrap
     before inspecting artifacts.
   * An *analyst* session sees everything.
+  * An *orchestrator* session sees its own orchestration folder and only the
+    child runs listed in that orchestration's manifest.
 
 Events (dispatched on ``hook_event_name``; the JS adapter maps OpenCode's
 before/after hooks onto PreToolUse/PostToolUse):
@@ -68,6 +70,9 @@ LOG_PATH = SCOPE_DIR / "guard.log"
 #   artifacts/tracks/<track>/runs/<run-id>   -> (track, run)    a specific run
 _RUN_REF = re.compile(
     r"artifacts/tracks/([^/\s'\";:|&]+)/runs(?:/([^/\s'\";:|&]+))?"
+)
+_ORCHESTRATION_REF = re.compile(
+    r"artifacts/orchestrations(?:/([^/\s'\";:|&]+))?"
 )
 _TRACK_FLAG = re.compile(r"--track[\s=]+([A-Za-z0-9_\-]+)")
 _RUNID_FLAG = re.compile(r"--run-id[\s=]+([A-Za-z0-9_\-]+)")
@@ -258,6 +263,53 @@ def _bindable_autoresearch_tokens(command: str) -> list[list[str]]:
     return out
 
 
+def _orchestrate_action(tokens: list[str]) -> str:
+    try:
+        index = tokens.index("orchestrate")
+    except ValueError:
+        return ""
+    return tokens[index + 1] if index + 1 < len(tokens) else ""
+
+
+def _orchestrator_bindable_tokens(command: str) -> list[list[str]]:
+    return [
+        tokens
+        for tokens in _autoresearch_tokens(command)
+        if _autoresearch_subcommand(tokens) == "orchestrate"
+        and _orchestrate_action(tokens) in {"new", "spawn"}
+        and not _has_flag(tokens, "--dry-run")
+    ]
+
+
+def _orchestration_id_from_post_payload(payload: dict) -> str:
+    pattern = re.compile(
+        r'''["']?(?:orchestration_id|orchestration)["']?\s*[:=]?\s*["']?'''
+        r"(\d{8}T\d{6}Z)"
+    )
+
+    def _search(value: object) -> str:
+        if isinstance(value, dict):
+            direct = str(value.get("orchestration_id") or "")
+            if RUN_ID_TIMESTAMP.fullmatch(direct):
+                return direct
+            for child in value.values():
+                found = _search(child)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = _search(child)
+                if found:
+                    return found
+        elif isinstance(value, str):
+            match = pattern.search(value)
+            if match:
+                return match.group(1)
+        return ""
+
+    return _search(payload)
+
+
 def find_autoresearch_scope_violations(scope: dict | None, texts: list[str]) -> list[str]:
     """Return semantic run-scope violations for ``autoresearch`` commands.
 
@@ -265,8 +317,11 @@ def find_autoresearch_scope_violations(scope: dict | None, texts: list[str]) -> 
     This catches the equivalent framework access, e.g. ``autoresearch --run-id R``.
     """
     scope = scope or {}
-    if scope.get("mode") != "research":
+    if scope.get("mode") not in {"research", "orchestrator"}:
         return []
+
+    if scope.get("mode") == "orchestrator":
+        return _find_orchestrator_command_violations(scope, texts)
 
     bound_track = str(scope.get("track") or "")
     bound_run = str(scope.get("run_id") or "")
@@ -306,6 +361,62 @@ def find_autoresearch_scope_violations(scope: dict | None, texts: list[str]) -> 
                         f"this research run is scoped to {bound_track}/{bound_run}; "
                         f"autoresearch command without --run-id would resolve to {track}/{latest}."
                     )
+    return violations
+
+
+def _find_orchestrator_command_violations(scope: dict, texts: list[str]) -> list[str]:
+    orchestration_id = str(scope.get("orchestration_id") or "")
+    children = {
+        (str(child.get("track") or ""), str(child.get("run_id") or ""))
+        for child in scope.get("child_runs") or ()
+        if isinstance(child, dict)
+    }
+    violations: list[str] = []
+    for text in texts:
+        for tokens in _autoresearch_tokens(text):
+            subcommand = _autoresearch_subcommand(tokens)
+            if subcommand == "orchestrate":
+                action = _orchestrate_action(tokens)
+                target_oid = _flag_value(tokens, "--orchestration-id")
+                if action == "new":
+                    violations.append(
+                        f"this session is already scoped to orchestration {orchestration_id}; "
+                        "`orchestrate new` would create another orchestration."
+                    )
+                elif target_oid and target_oid != orchestration_id:
+                    violations.append(
+                        f"this session is scoped to orchestration {orchestration_id}; "
+                        f"the command targets orchestration {target_oid}."
+                    )
+                elif not target_oid and action not in {"list-backends", "finish-delegation"}:
+                    latest = str(scope.get("latest_orchestration_id") or "")
+                    if latest and latest != orchestration_id:
+                        violations.append(
+                            f"this session is scoped to orchestration {orchestration_id}; "
+                            f"an omitted --orchestration-id would resolve to {latest}."
+                        )
+                continue
+
+            track = _flag_value(tokens, "--track")
+            run_id = _flag_value(tokens, "--run-id")
+            if _has_flag(tokens, "--new-run"):
+                violations.append(
+                    f"this session is scoped to orchestration {orchestration_id}; "
+                    "`autoresearch --new-run` would create an unlisted run."
+                )
+            elif run_id:
+                matches = [child for child in children if child[1] == run_id]
+                if not matches or (track and (track, run_id) not in children):
+                    target = f"{track}/{run_id}" if track else run_id
+                    violations.append(
+                        f"this session is scoped to orchestration {orchestration_id}; "
+                        f"autoresearch command targets unlisted child run {target}."
+                    )
+            elif track:
+                violations.append(
+                    f"this session is scoped to orchestration {orchestration_id}; "
+                    "takeover commands must pass an explicit --run-id for a listed child."
+                )
     return violations
 
 # Which tool_input fields denote an access *target* (a path), keyed by the
@@ -358,13 +469,51 @@ def load_scope_file(session_id: str) -> dict | None:
 
 
 def resolve_scope(session_id: str) -> dict | None:
-    """Scope for a session: bound file wins; else env analyst; else unbound."""
+    """Scope for a session, hydrating orchestrator children from its manifest."""
     scope = load_scope_file(session_id)
     if scope is not None:
-        return scope
-    if os.environ.get("AUTORESEARCH_SCOPE", "").strip().lower() == "analyst":
+        return _hydrate_orchestrator_scope(scope)
+    requested = os.environ.get("AUTORESEARCH_SCOPE", "").strip().lower()
+    if requested == "analyst":
         return {"mode": "analyst", "source": "env"}
+    if requested == "orchestrator":
+        orchestration_id = os.environ.get("AUTORESEARCH_ORCHESTRATION_ID", "").strip()
+        if orchestration_id:
+            return _hydrate_orchestrator_scope(
+                {"mode": "orchestrator", "orchestration_id": orchestration_id, "source": "env"}
+            )
     return None
+
+
+def _hydrate_orchestrator_scope(scope: dict) -> dict:
+    """Return a fresh pure-decision scope from the orchestration manifest.
+
+    The scope file stores only the orchestration id. Reading the manifest here,
+    outside :func:`decide`, keeps decision logic pure while making newly spawned
+    children visible on every hook invocation.
+    """
+
+    if scope.get("mode") != "orchestrator":
+        return scope
+    orchestration_id = str(scope.get("orchestration_id") or "")
+    if not orchestration_id:
+        return scope
+    path = ROOT / "artifacts" / "orchestrations" / orchestration_id / "orchestration.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    hydrated = dict(scope)
+    hydrated["orchestration_dir"] = f"artifacts/orchestrations/{orchestration_id}"
+    hydrated["child_runs"] = [
+        {"track": str(item["track"]), "run_id": str(item["run_id"])}
+        for item in payload.get("delegations") or ()
+    ]
+    root = ROOT / "artifacts" / "orchestrations"
+    known = sorted(
+        candidate.name
+        for candidate in root.iterdir()
+        if candidate.is_dir() and (candidate / "orchestration.json").exists()
+    )
+    hydrated["latest_orchestration_id"] = known[-1] if known else orchestration_id
+    return hydrated
 
 
 def write_scope(session_id: str, scope: dict) -> None:
@@ -450,6 +599,12 @@ def find_run_refs(text: str) -> list[tuple[str, str | None]]:
     return [(m.group(1), m.group(2)) for m in _RUN_REF.finditer(text)]
 
 
+def find_orchestration_refs(text: str) -> list[str | None]:
+    """Return orchestration ids (or ``None`` for root enumeration) in *text*."""
+
+    return [match.group(1) for match in _ORCHESTRATION_REF.finditer(text)]
+
+
 # ── decision (pure, unit-tested) ────────────────────────────────────────────
 
 def decide(scope: dict | None, texts: list[str]) -> tuple[bool, str]:
@@ -484,11 +639,58 @@ def decide(scope: dict | None, texts: list[str]) -> tuple[bool, str]:
     if scope.get("mode") == "analyst":
         return True, ""
 
+    semantic_violations = find_autoresearch_scope_violations(scope, texts)
+    if semantic_violations:
+        return False, semantic_violations[0]
+
+    orchestration_refs: list[str | None] = []
+    for text in texts:
+        orchestration_refs.extend(find_orchestration_refs(text))
+
+    if scope.get("mode") == "orchestrator":
+        orchestration_id = str(scope.get("orchestration_id") or "")
+        children = {
+            (str(child.get("track") or ""), str(child.get("run_id") or ""))
+            for child in scope.get("child_runs") or ()
+            if isinstance(child, dict)
+        }
+        for referenced_id in orchestration_refs:
+            if referenced_id == orchestration_id:
+                continue
+            if referenced_id is None:
+                return False, "enumerating artifacts/orchestrations is not allowed"
+            return (
+                False,
+                f"this session is scoped to orchestration {orchestration_id}; the path "
+                f"references another orchestration ({referenced_id}).",
+            )
+        refs = [ref for text in texts for ref in find_run_refs(text)]
+        for track, run in refs:
+            if run is None:
+                return (
+                    False,
+                    f"enumerating sibling runs under artifacts/tracks/{track}/runs is "
+                    "not allowed in orchestrator scope.",
+                )
+            if (track, run) not in children:
+                return (
+                    False,
+                    f"this session is scoped to orchestration {orchestration_id}; the path "
+                    f"references an unlisted child run ({track}/{run}).",
+                )
+        return True, ""
+
     if scope.get("mode") != "research":
         refs: list[tuple[str, str | None]] = []
         for text in texts:
             refs.extend(find_run_refs(text))
-        if refs:
+        if refs or orchestration_refs:
+            if orchestration_refs:
+                return (
+                    False,
+                    "orchestration not bound yet — orchestration artifacts are not allowed. "
+                    "Run `autoresearch orchestrate new` first, or relaunch in analyst mode.",
+                )
             track, run = refs[0]
             if run is None:
                 return (
@@ -510,9 +712,12 @@ def decide(scope: dict | None, texts: list[str]) -> tuple[bool, str]:
     if not bound_run:
         return True, ""  # defensive: a research scope must name a run
 
-    semantic_violations = find_autoresearch_scope_violations(scope, texts)
-    if semantic_violations:
-        return False, semantic_violations[0]
+    if orchestration_refs:
+        return (
+            False,
+            "research sessions may not inspect orchestration artifacts; obey the brief "
+            "in your own handoff and report through `finish-delegation`.",
+        )
 
     refs: list[tuple[str, str | None]] = []
     for text in texts:
@@ -555,6 +760,14 @@ def handle_session_start(payload: dict) -> int:
         if track and run_id:
             write_scope(session_id, _research_scope(track, run_id, source="env"))
             _log(f"session {session_id}: research scope {track}/{run_id} (env)")
+    elif requested == "orchestrator":
+        orchestration_id = os.environ.get("AUTORESEARCH_ORCHESTRATION_ID", "").strip()
+        if orchestration_id:
+            write_scope(
+                session_id,
+                {"mode": "orchestrator", "orchestration_id": orchestration_id, "source": "env"},
+            )
+            _log(f"session {session_id}: orchestrator scope {orchestration_id} (env)")
     return 0
 
 
@@ -563,12 +776,23 @@ def handle_post_tool_use(payload: dict) -> int:
     session_id = payload.get("session_id") or ""
     if not session_id:
         return 0
-    if resolve_scope(session_id) is not None:  # already analyst or bound
+    if load_scope_file(session_id) is not None:  # already analyst or bound
         return 0
     succeeded = _post_tool_succeeded(payload)
     if succeeded is False:
         return 0
     command = (payload.get("tool_input") or {}).get("command", "")
+    orchestrator_invocations = _orchestrator_bindable_tokens(command)
+    if orchestrator_invocations:
+        orchestration_id = _flag_value(orchestrator_invocations[0], "--orchestration-id")
+        orchestration_id = orchestration_id or _orchestration_id_from_post_payload(payload)
+        if orchestration_id and RUN_ID_TIMESTAMP.fullmatch(orchestration_id):
+            write_scope(
+                session_id,
+                {"mode": "orchestrator", "orchestration_id": orchestration_id, "source": "auto"},
+            )
+            _log(f"session {session_id}: orchestrator scope {orchestration_id} (auto)")
+        return 0
     invocations = _bindable_autoresearch_tokens(command)
     if not invocations:
         return 0

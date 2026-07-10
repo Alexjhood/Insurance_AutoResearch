@@ -864,6 +864,12 @@ def _cmd_orchestrate(config, args) -> int:
         return _orchestrate_new(config, args)
     if subcommand == "spawn":
         return _orchestrate_spawn(args)
+    if subcommand == "respawn":
+        return _orchestrate_respawn(args)
+    if subcommand == "status":
+        return _orchestrate_status(args)
+    if subcommand == "kill":
+        return _orchestrate_kill(args)
     if subcommand == "collect":
         return _orchestrate_collect(args)
     if subcommand == "finish-delegation":
@@ -935,13 +941,89 @@ def _orchestrate_spawn(args) -> int:
     return 0
 
 
+def _orchestrate_respawn(args) -> int:
+    from autoresearch.orchestration.manifest import resolve_orchestration_id
+    from autoresearch.orchestration.spawner import respawn
+
+    parser = build_parser()
+    try:
+        result = respawn(
+            resolve_orchestration_id(args.orchestration_id),
+            delegation_id=args.delegation,
+            brief_path=Path(args.brief),
+            backend_name=args.backend,
+            continue_run=args.continue_run,
+            wait=args.wait,
+            dry_run=args.dry_run,
+            memory_access=args.memory_access,
+        )
+    except (ValueError, KeyError, FileNotFoundError, NotImplementedError) as exc:
+        parser.error(str(exc))
+        return 2
+
+    if result["status"] == "dry_run":
+        print(result["plan"].render(), end="")
+        return 0
+    print(json.dumps({k: v for k, v in result.items() if k != "plan"}, indent=2, sort_keys=True))
+    return 0
+
+
+def _orchestrate_status(args) -> int:
+    from autoresearch.orchestration.manifest import resolve_orchestration_id
+    from autoresearch.orchestration.monitor import format_status_table, status_rows
+
+    parser = build_parser()
+    try:
+        orch, rows = status_rows(resolve_orchestration_id(args.orchestration_id))
+    except (ValueError, KeyError, FileNotFoundError) as exc:
+        parser.error(str(exc))
+        return 2
+    print(format_status_table(orch, rows), end="")
+    return 0
+
+
+def _orchestrate_kill(args) -> int:
+    from autoresearch.orchestration.manifest import resolve_orchestration_id
+    from autoresearch.orchestration.monitor import kill_delegation
+
+    parser = build_parser()
+    try:
+        delegation = kill_delegation(
+            resolve_orchestration_id(args.orchestration_id), args.delegation
+        )
+    except (ValueError, KeyError, FileNotFoundError) as exc:
+        parser.error(str(exc))
+        return 2
+    print(
+        json.dumps(
+            {
+                "delegation_id": delegation.delegation_id,
+                "pid": delegation.pid,
+                "status": delegation.status,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _orchestrate_collect(args) -> int:
-    from autoresearch.orchestration.manifest import load_orchestration, resolve_orchestration_id
+    from autoresearch.config import PROJECT_ROOT
+    from autoresearch.orchestration.manifest import (
+        load_orchestration,
+        manifest_lock,
+        resolve_orchestration_id,
+        save_orchestration,
+        update_delegation,
+    )
+    from autoresearch.orchestration.monitor import refresh_orchestration
     from autoresearch.orchestration.report import collect_report
 
     parser = build_parser()
     try:
-        orch = load_orchestration(resolve_orchestration_id(args.orchestration_id))
+        orchestration_id = resolve_orchestration_id(args.orchestration_id)
+        orch = refresh_orchestration(orchestration_id)
         targets = (
             [orch.delegation(args.delegation)] if args.delegation else list(orch.delegations)
         )
@@ -954,6 +1036,19 @@ def _orchestrate_collect(args) -> int:
         return 0
     for delegation in targets:
         path = collect_report(orch, delegation)
+        try:
+            stored_path = str(path.relative_to(PROJECT_ROOT))
+        except ValueError:
+            stored_path = str(path)
+        with manifest_lock(orch.orchestration_id):
+            current = load_orchestration(orch.orchestration_id)
+            current_delegation = current.delegation(delegation.delegation_id)
+            save_orchestration(
+                update_delegation(
+                    current,
+                    replace(current_delegation, report_path=stored_path),
+                )
+            )
         print(f"{delegation.delegation_id}: {path}")
     return 0
 
@@ -1290,6 +1385,38 @@ def build_parser() -> argparse.ArgumentParser:
         "--memory-access", dest="memory_access", default=None, choices=("own", "all"),
         help="Grant the sub-agent aggregator-mediated cross-run memory access.",
     )
+
+    orchestrate_respawn = orchestrate_subs.add_parser(
+        "respawn", help="Launch a revised brief after a delegation finishes."
+    )
+    orchestrate_respawn.add_argument("--orchestration-id", dest="orchestration_id", default=None)
+    orchestrate_respawn.add_argument("--delegation", required=True, help="Source delegation (e.g. d01).")
+    orchestrate_respawn.add_argument("--brief", required=True, help="Path to the revised brief JSON.")
+    orchestrate_respawn.add_argument(
+        "--backend", default=None,
+        help="Backend override; defaults to the source delegation's backend.",
+    )
+    orchestrate_respawn.add_argument(
+        "--continue-run", action="store_true",
+        help="Reuse the source child run and its champion instead of bootstrapping a new run.",
+    )
+    orchestrate_respawn.add_argument("--wait", action="store_true", default=True)
+    orchestrate_respawn.add_argument("--no-wait", dest="wait", action="store_false")
+    orchestrate_respawn.add_argument("--dry-run", dest="dry_run", action="store_true")
+    orchestrate_respawn.add_argument(
+        "--memory-access", dest="memory_access", default=None, choices=("own", "all"),
+    )
+
+    orchestrate_status = orchestrate_subs.add_parser(
+        "status", help="Refresh and display detached delegation progress."
+    )
+    orchestrate_status.add_argument("--orchestration-id", dest="orchestration_id", default=None)
+
+    orchestrate_kill = orchestrate_subs.add_parser(
+        "kill", help="Terminate one detached delegation process group."
+    )
+    orchestrate_kill.add_argument("--orchestration-id", dest="orchestration_id", default=None)
+    orchestrate_kill.add_argument("--delegation", required=True, help="Delegation to terminate.")
 
     orchestrate_collect = orchestrate_subs.add_parser(
         "collect", help="Rebuild delegation reports from child-run registry state."
