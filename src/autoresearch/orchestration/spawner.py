@@ -141,6 +141,13 @@ def child_environment(
     # An orchestrator session exports these; a child must never inherit them or
     # it would bind as an orchestrator instead of a research agent.
     env.pop("AUTORESEARCH_ORCHESTRATION_ID", None)
+    # Foundation enablement is a per-run decision driven by the child's own run
+    # manifest (set at bootstrap from the brief). Strip any inherited env flag so
+    # a non-opted child cannot silently self-register foundation estimators just
+    # because the orchestrator's process set AUTORESEARCH_FOUNDATION_MODELS when
+    # it bootstrapped an earlier foundation child. (TABPFN_TOKEN is deliberately
+    # NOT stripped — an opted-in child needs it to reach the api backend.)
+    env.pop("AUTORESEARCH_FOUNDATION_MODELS", None)
     # Never forward holdout access or the pytest-gate skip: a sub-agent must not
     # be able to read the milestone vault or dodge hard constraint #4 just
     # because the operator's shell had these set.
@@ -223,7 +230,11 @@ def _bootstrap_child_run(
         target_mode=orch.target_mode,
     )
 
-    bootstrap_track(config, default_max_cycles=brief.cycle_budget)
+    bootstrap_track(
+        config,
+        default_max_cycles=brief.cycle_budget,
+        enable_foundation_models=brief.foundation_models,
+    )
 
     write_run_backpointer(
         config.artifacts_dir,
@@ -297,9 +308,14 @@ def spawn(
     _check_budget(orch, brief)
 
     if not dry_run:
-        from autoresearch.orchestration.backends import preflight_backend
+        from autoresearch.orchestration.backends import (
+            preflight_backend,
+            preflight_foundation_models,
+        )
 
         preflight_backend(backend)
+        if brief.foundation_models:
+            preflight_foundation_models()
 
     if dry_run:
         plan = plan_spawn(
@@ -610,9 +626,14 @@ def respawn(
         )
         return {"status": "dry_run", "plan": plan}
 
-    from autoresearch.orchestration.backends import preflight_backend
+    from autoresearch.orchestration.backends import (
+        preflight_backend,
+        preflight_foundation_models,
+    )
 
     preflight_backend(backend)
+    if brief.foundation_models:
+        preflight_foundation_models()
 
     with manifest_lock(orchestration_id):
         orch = load_orchestration(orchestration_id)

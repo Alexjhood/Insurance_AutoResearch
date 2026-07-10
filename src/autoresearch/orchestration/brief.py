@@ -69,6 +69,10 @@ class Brief:
     constraints: tuple[str, ...] = ()
     success_criteria: str | None = None
     seed_champion: SeedChampion | None = None
+    #: Opt the child run into foundation estimators (TabPFN). Forwarded to
+    #: ``bootstrap_track(enable_foundation_models=...)``; the child's handoff then
+    #: states foundation estimators are available. Off by default.
+    foundation_models: bool = False
 
     def __post_init__(self) -> None:
         if not self.direction.strip():
@@ -85,6 +89,7 @@ class Brief:
             "starting_knowledge": list(self.starting_knowledge),
             "constraints": list(self.constraints),
             "success_criteria": self.success_criteria,
+            "foundation_models": self.foundation_models,
         }
         if self.seed_champion is not None:
             payload["seed_champion"] = self.seed_champion.to_dict()
@@ -103,6 +108,7 @@ _KNOWN_FIELDS = frozenset(
         "constraints",
         "success_criteria",
         "seed_champion",
+        "foundation_models",
     }
 )
 _REQUIRED_FIELDS = ("direction", "cycle_budget")
@@ -138,6 +144,10 @@ def validate_brief(raw: dict[str, Any]) -> Brief:
     if isinstance(raw["cycle_budget"], bool) or not isinstance(raw["cycle_budget"], int):
         raise ValueError("brief.cycle_budget must be an integer")
 
+    foundation = raw.get("foundation_models", False)
+    if not isinstance(foundation, bool):
+        raise ValueError("brief.foundation_models must be a boolean")
+
     seed = raw.get("seed_champion")
     seed_champion = SeedChampion.from_dict(seed) if seed else None
 
@@ -150,6 +160,7 @@ def validate_brief(raw: dict[str, Any]) -> Brief:
             str(raw["success_criteria"]) if raw.get("success_criteria") else None
         ),
         seed_champion=seed_champion,
+        foundation_models=foundation,
     )
 
 
@@ -192,6 +203,14 @@ def render_brief_block(brief: Brief, *, cycle_budget: int, delegation_id: str) -
     if brief.constraints:
         lines.append("- **Constraints** (binding; a stop-condition here ends your run early):")
         lines.extend(f"  - {item}" for item in brief.constraints)
+    if brief.foundation_models:
+        lines.append(
+            "- **Foundation estimators enabled**: TabPFN is available as a recipe "
+            "estimator (`{\"estimator\": \"tabpfn\", ...}`) for this run. It suits "
+            "sparse / severity-shaped problems and is weak on dense feature sets; a "
+            "fit is minutes not seconds, so budget your Prior Labs API credits and "
+            "cap TabPFN fits — the compute-budget rules in the contract still apply."
+        )
     if brief.seed_champion is not None:
         lines.append(
             f"- **Seeded champion**: this run starts from experiment "

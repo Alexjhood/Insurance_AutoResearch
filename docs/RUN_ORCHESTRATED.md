@@ -20,6 +20,17 @@ single-agent workflow instead.
   `claude` (`npm install -g @anthropic-ai/claude-code`) or `codex`.
 - `autoresearch orchestrate list-backends` prints at least one non-deprecated
   backend for that tool.
+- **For foundation-model briefs (`foundation_models: true`)** only: the
+  `[foundation]` extra is installed in the environment you orchestrate from
+  (`pip install -e '.[foundation]'` — the api client, no torch), and, if you use
+  the API backend (`AUTORESEARCH_TABPFN_BACKEND=api`, the practical choice on
+  Apple Silicon), `TABPFN_TOKEN` is exported (Prior Labs API key from
+  <https://ux.priorlabs.ai/account>, licence accepted). The child inherits your
+  interpreter and environment, so both reach it; the spawn preflights them and
+  fails fast, naming the fix, if either is missing. **Prior Labs credits are a
+  finite daily budget** — a TabPFN fit is minutes and a comparison refits it ~5×,
+  so cap TabPFN fits in the brief and keep cycle budgets small. Watch usage at
+  <https://ux.priorlabs.ai/account/usage>.
 
 ## Launching the orchestrator session
 
@@ -109,6 +120,11 @@ then tier.
   "success_criteria": "Beat gini_weighted 0.32 on search-validation, or produce a clear negative learning."
 }
 ```
+
+Add `"foundation_models": true` to opt the child into the TabPFN recipe
+estimator (default `false`; see Prerequisites for the token/extra it requires and
+the credit budget). TabPFN suits sparse / severity-shaped directions and is weak
+on dense feature sets, so reserve it for those and keep the cycle budget small.
 
 Preview exactly what will be launched before spending anything:
 

@@ -48,7 +48,8 @@ launching anything. Use it whenever you are unsure what a spawn will do.
 ## 3. The brief
 
 `direction` and `cycle_budget` are required; `starting_knowledge`,
-`constraints`, `success_criteria`, and `seed_champion` are optional.
+`constraints`, `success_criteria`, `seed_champion`, and `foundation_models` are
+optional.
 
 ```json
 {
@@ -58,7 +59,8 @@ launching anything. Use it whenever you are unsure what a spawn will do.
   "constraints": ["Stay within approach_family=gbm.",
                   "If two consecutive cycles are rejected as noise, stop early and report."],
   "success_criteria": "Beat gini_weighted 0.32 on search-validation, or produce a clear negative learning.",
-  "seed_champion": {"from_run": "claude/20260712T091500Z", "experiment_id": "exp_..."}
+  "seed_champion": {"from_run": "claude/20260712T091500Z", "experiment_id": "exp_..."},
+  "foundation_models": false
 }
 ```
 
@@ -66,6 +68,16 @@ The brief is rendered into the child's handoff as an **Orchestration brief**
 block, which the sub-agent must read before proposing. Parallel children cannot
 see one another: knowledge flows between delegations **only** through your briefs
 and, when you enable it, the memory aggregator (`--memory-access own|all`).
+
+**`foundation_models: true`** opts the child run into the TabPFN recipe
+estimator (default `false`). Only set it for a brief whose direction actually
+wants TabPFN (see §5), because the spawn then **preflights** the environment and
+fails fast if the `[foundation]` extra is missing or the API backend has no
+`TABPFN_TOKEN` — the fix is named in the error. The child's handoff states that
+foundation estimators are available. Prior Labs API credits are a **finite daily
+budget**: a TabPFN fit is minutes, not seconds, and a comparison refits it ~5×,
+so cap TabPFN fits in the brief's `constraints` and keep `cycle_budget` small.
+See `docs/RUN_ORCHESTRATED.md` for the token/extra prerequisites.
 
 ## 4. Delegation heuristics
 
@@ -99,6 +111,13 @@ authenticated, or currently good.
 4. The scorecard beneath each entry is measured on this repo's workload. When it
    contradicts the curated `notes`, say so in a campaign note — that is the signal
    for Alex to edit `configs/orchestration/backends.toml`.
+
+**When to reach for foundation models (`foundation_models: true`).** Per the
+2026-07-05 cross-run analysis, TabPFN wins on **sparse / severity-shaped**
+problems (few informative features, positive-target severity stages) and is
+**weak on dense feature sets**, where a tuned GBM dominates. So enable it for a
+severity or sparse-signal direction, not as a first move on a dense pure-premium
+problem — and pair it with a small `cycle_budget`, since credits are finite.
 
 ## 6. Reading reports
 

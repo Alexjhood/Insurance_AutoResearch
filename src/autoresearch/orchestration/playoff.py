@@ -276,6 +276,7 @@ def replay_experiment(
 
     model = json.loads(json.dumps(source_model))
     is_recipe = isinstance(model.get("recipe"), dict)
+    _ensure_foundation_support(model, source, destination)
     copied_script: Path | None = None
     if not is_recipe:
         script_source = _source_script_path(
@@ -336,6 +337,59 @@ def replay_experiment(
     )
     _append_lineage(destination, audit)
     return audit
+
+
+def _recipe_foundation_estimators(model: dict[str, Any]) -> set[str]:
+    """Foundation estimator names a recipe model references (empty for scripts)."""
+
+    from autoresearch.models.recipe.foundation_specs import FOUNDATION_ESTIMATOR_NAMES
+
+    recipe = model.get("recipe")
+    if not isinstance(recipe, dict):
+        return set()
+    names: set[str] = set()
+    estimator = recipe.get("estimator")
+    if isinstance(estimator, str):
+        names.add(estimator)
+    stages = recipe.get("stages")
+    if isinstance(stages, dict):
+        for stage in stages.values():
+            if isinstance(stage, dict) and isinstance(stage.get("estimator"), str):
+                names.add(stage["estimator"])
+    return names & set(FOUNDATION_ESTIMATOR_NAMES)
+
+
+def _ensure_foundation_support(
+    model: dict[str, Any], source: ReplaySource, destination: ProjectConfig
+) -> None:
+    """Make a foundation finalist replayable, or fail with a clear message.
+
+    A foundation estimator only appears in the recipe interpreter's registry when
+    the package is importable and it has been enabled. Replaying a TabPFN finalist
+    into a destination that cannot support it would otherwise fail deep in
+    ``run_experiment`` as a misleading "unknown estimator". Instead: if the extra
+    is missing, refuse the replay here naming the fix; if it is present, register
+    the estimators so the fresh fit can interpret the portable recipe.
+    """
+
+    needed = _recipe_foundation_estimators(model)
+    if not needed:
+        return
+
+    from autoresearch.models.recipe.foundation import tabpfn_available
+
+    if not tabpfn_available():
+        raise RuntimeError(
+            f"Cannot replay {source.run_ref}/{source.experiment_id} into "
+            f"{destination.track_id}/{destination.run_id}: it uses foundation "
+            f"estimator(s) {sorted(needed)} but the [foundation] extra is not "
+            "importable in this environment. Install it "
+            "(`pip install -e '.[foundation]'`) before consolidating a foundation "
+            "finalist."
+        )
+    from autoresearch.models.recipe import enable_foundation_models
+
+    enable_foundation_models()
 
 
 def seed_champion_from_source(
@@ -404,7 +458,10 @@ def run_playoff(
                     "Another playoff initialised this campaign concurrently; rerun the command"
                 )
             consolidation = _create_consolidation_run(
-                orch, finalists[0].source.track, len(finalists) - 1
+                orch,
+                finalists[0].source.track,
+                len(finalists) - 1,
+                enable_foundation_models=_any_finalist_needs_foundation(finalists),
             )
             write_consolidation_backpointer(
                 consolidation.artifacts_dir,
@@ -511,8 +568,30 @@ def run_playoff(
     return state
 
 
+def _any_finalist_needs_foundation(finalists: list[Finalist]) -> bool:
+    """True if any finalist's source run opted into foundation estimators.
+
+    Read from each source run's manifest flag, so the consolidation run enables
+    foundation models iff it will actually need to replay a foundation finalist.
+    """
+
+    from autoresearch.bootstrap import read_run_manifest
+
+    for finalist in finalists:
+        source_config = load_config(
+            track_id=finalist.source.track, run_id=finalist.source.run_id
+        )
+        if read_run_manifest(source_config).get("foundation_models"):
+            return True
+    return False
+
+
 def _create_consolidation_run(
-    orch: Orchestration, track: str, challenger_count: int
+    orch: Orchestration,
+    track: str,
+    challenger_count: int,
+    *,
+    enable_foundation_models: bool = False,
 ) -> ProjectConfig:
     from autoresearch.bootstrap import bootstrap_track
 
@@ -524,7 +603,11 @@ def _create_consolidation_run(
         model_harness="orchestrate-playoff",
         target_mode=orch.target_mode,
     )
-    bootstrap_track(config, default_max_cycles=max(1, challenger_count))
+    bootstrap_track(
+        config,
+        default_max_cycles=max(1, challenger_count),
+        enable_foundation_models=enable_foundation_models,
+    )
     return config
 
 

@@ -403,7 +403,9 @@ def _playoff_fixture(tmp_path: Path, monkeypatch):
         track_id="claude",
         run_id="20260710T150000Z",
     )
-    monkeypatch.setattr(playoff_mod, "_create_consolidation_run", lambda *args: consolidation)
+    monkeypatch.setattr(
+        playoff_mod, "_create_consolidation_run", lambda *args, **kwargs: consolidation
+    )
     monkeypatch.setattr(playoff_mod, "_load_consolidation_config", lambda orch: consolidation)
     monkeypatch.setattr(
         comparison_runner, "_refresh_decision_outputs", lambda *args, **kwargs: None

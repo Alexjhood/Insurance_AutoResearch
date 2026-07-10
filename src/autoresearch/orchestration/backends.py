@@ -378,6 +378,44 @@ def preflight_backend(backend: Backend) -> None:
         ) from exc
 
 
+def preflight_foundation_models() -> None:
+    """Fail a foundation-opted spawn fast when the environment cannot run TabPFN.
+
+    Called by :func:`spawner.spawn`/``respawn`` only when the brief sets
+    ``foundation_models: true`` (skipped on ``--dry-run``). Two checks, each
+    naming its fix:
+
+    * the ``[foundation]`` extra must be importable (the child inherits the
+      parent env and interpreter, so an extra-less orchestrator means an
+      extra-less child); and
+    * if ``AUTORESEARCH_TABPFN_BACKEND`` resolves to ``api``, ``TABPFN_TOKEN``
+      must be set — the child inherits an exported token, so this catches the
+      case where neither the orchestrator nor its shell has one.
+
+    Cannot verify the token is *valid* without a paid call; an invalid token
+    still surfaces through the delegation report's ``crashed`` flag.
+    """
+
+    import os
+
+    from autoresearch.models.recipe.foundation import tabpfn_available
+
+    if not tabpfn_available():
+        raise RuntimeError(
+            "Brief opts into foundation models but the [foundation] extra is not "
+            "importable in this environment. Install it "
+            "(`pip install -e '.[foundation]'`) before spawning a foundation "
+            "delegation; the child inherits this interpreter."
+        )
+    backend = os.environ.get("AUTORESEARCH_TABPFN_BACKEND", "local").strip().lower()
+    if backend == "api" and not os.environ.get("TABPFN_TOKEN"):
+        raise RuntimeError(
+            "Brief opts into foundation models with AUTORESEARCH_TABPFN_BACKEND=api "
+            "but TABPFN_TOKEN is unset. Export TABPFN_TOKEN (Prior Labs API key from "
+            "https://ux.priorlabs.ai/account) before spawning; the child inherits it."
+        )
+
+
 def format_backend_table(
     backends: dict[str, Backend],
     stats: dict[str, dict[str, Any]] | None = None,
