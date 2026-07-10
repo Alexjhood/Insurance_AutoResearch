@@ -515,7 +515,11 @@ def _break_stale_lock(lock_file: Path) -> None:
 
 
 def write_run_backpointer(
-    run_dir: Path, *, orchestration_id: str, delegation_id: str
+    run_dir: Path,
+    *,
+    orchestration_id: str,
+    delegation_id: str,
+    target_mode: str | None = None,
 ) -> None:
     """Stamp ``orchestration_id``/``delegation_id`` into the child's run manifest.
 
@@ -532,6 +536,31 @@ def write_run_backpointer(
             manifest = {}
     manifest["orchestration_id"] = orchestration_id
     manifest["delegation_id"] = delegation_id
+    if target_mode is not None:
+        manifest["target_mode"] = target_mode
+    write_json(path, manifest)
+
+
+def write_consolidation_backpointer(
+    run_dir: Path, *, orchestration_id: str, target_mode: str | None = None
+) -> None:
+    """Mark a fresh tracked run as this campaign's consolidation run.
+
+    Consolidation runs are orchestration-owned but are not delegations, so they
+    intentionally carry no ``delegation_id`` and never render a delegation brief.
+    """
+
+    path = run_dir / "run_manifest.json"
+    manifest: dict[str, Any] = {}
+    if path.exists():
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = {}
+    manifest["orchestration_id"] = orchestration_id
+    manifest["consolidation"] = True
+    if target_mode is not None:
+        manifest["target_mode"] = target_mode
     write_json(path, manifest)
 
 

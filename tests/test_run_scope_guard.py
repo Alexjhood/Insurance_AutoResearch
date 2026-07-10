@@ -137,6 +137,36 @@ def test_orchestrator_denies_runs_dir_enumeration():
     assert "enumerating sibling runs" in reason
 
 
+def test_orchestrator_hydrates_consolidation_run_from_manifest(tmp_path, monkeypatch):
+    oid = "20260710T120000Z"
+    orchestration_dir = tmp_path / "artifacts" / "orchestrations" / oid
+    orchestration_dir.mkdir(parents=True)
+    (orchestration_dir / "orchestration.json").write_text(
+        json.dumps(
+            {
+                "delegations": [],
+                "consolidation": {
+                    "track": "claude",
+                    "run_id": "20260710T130000Z",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(guard, "ROOT", tmp_path)
+
+    scope = guard._hydrate_orchestrator_scope(
+        {"mode": "orchestrator", "orchestration_id": oid}
+    )
+
+    assert {"track": "claude", "run_id": "20260710T130000Z"} in scope["child_runs"]
+    command = (
+        "autoresearch --track claude --run-id 20260710T130000Z "
+        "record-decision cmp --decision reject"
+    )
+    assert guard.decide(scope, [command])[0]
+
+
 def test_orchestrator_denies_implicit_latest_when_another_campaign_is_newer():
     scope = {
         **ORCHESTRATOR,

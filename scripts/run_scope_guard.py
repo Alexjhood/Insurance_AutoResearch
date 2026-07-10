@@ -506,6 +506,14 @@ def _hydrate_orchestrator_scope(scope: dict) -> dict:
         {"track": str(item["track"]), "run_id": str(item["run_id"])}
         for item in payload.get("delegations") or ()
     ]
+    consolidation = payload.get("consolidation") or {}
+    if consolidation.get("track") and consolidation.get("run_id"):
+        hydrated["child_runs"].append(
+            {
+                "track": str(consolidation["track"]),
+                "run_id": str(consolidation["run_id"]),
+            }
+        )
     root = ROOT / "artifacts" / "orchestrations"
     known = sorted(
         candidate.name

@@ -25,7 +25,7 @@ from typing import Any
 
 from autoresearch.config import PROJECT_ROOT, load_config
 from autoresearch.orchestration.backends import Backend, get_backend
-from autoresearch.orchestration.brief import Brief, load_brief
+from autoresearch.orchestration.brief import Brief, SeedChampion, load_brief
 from autoresearch.orchestration.manifest import (
     Delegation,
     Orchestration,
@@ -224,7 +224,20 @@ def _bootstrap_child_run(
         config.artifacts_dir,
         orchestration_id=orch.orchestration_id,
         delegation_id=delegation_id,
+        target_mode=orch.target_mode,
     )
+    if brief.seed_champion is not None:
+        from autoresearch.orchestration.playoff import ReplaySource, seed_champion_from_source
+
+        seed_champion_from_source(
+            config,
+            ReplaySource(
+                track=brief.seed_champion.track,
+                run_id=brief.seed_champion.run_id,
+                experiment_id=brief.seed_champion.experiment_id,
+            ),
+            label=f"delegation_seed_{delegation_id}",
+        )
     return config
 
 
@@ -249,17 +262,6 @@ def _export_handoff_with_brief(config: Any, delegation_id: str) -> None:
         )
 
 
-def _reject_unsupported_brief(brief: Brief) -> None:
-    """Fail before anything is created, not after a child run exists."""
-
-    if brief.seed_champion is not None:
-        raise NotImplementedError(
-            "brief.seed_champion is not implemented yet: it shares the playoff's "
-            "cross-run replay path and lands with `respawn --seed-champion`. "
-            "Omit seed_champion from the brief for now."
-        )
-
-
 def spawn(
     orchestration_id: str,
     *,
@@ -269,6 +271,7 @@ def spawn(
     dry_run: bool = False,
     memory_access: str | None = None,
     respawn_of: str | None = None,
+    seed_champion_override: SeedChampion | None = None,
 ) -> dict[str, Any]:
     """Pre-bootstrap a child run and launch the sub-agent against it.
 
@@ -279,8 +282,13 @@ def spawn(
 
     orch = load_orchestration(orchestration_id)
     brief = load_brief(brief_path)
+    if seed_champion_override is not None:
+        if brief.seed_champion is not None:
+            raise ValueError(
+                "Seed champion was supplied both in the brief and via --seed-champion"
+            )
+        brief = replace(brief, seed_champion=seed_champion_override)
     backend = get_backend(backend_name)
-    _reject_unsupported_brief(brief)
     _check_budget(orch, brief)
 
     if dry_run:
@@ -515,6 +523,7 @@ def respawn(
     wait: bool = True,
     dry_run: bool = False,
     memory_access: str | None = None,
+    seed_champion: str | None = None,
 ) -> dict[str, Any]:
     """Spawn a revised brief, optionally continuing the source child run."""
 
@@ -529,6 +538,24 @@ def respawn(
             f"Cannot respawn {delegation_id}: status is {source.status!r} and its "
             "process has not stopped. Wait for completion or kill it first."
         )
+    brief: Brief | None = None
+    seed_override: SeedChampion | None = None
+    if seed_champion is not None:
+        brief = load_brief(brief_path)
+        if continue_run:
+            raise ValueError("--seed-champion cannot be combined with --continue-run")
+        if not seed_champion.startswith("from:"):
+            raise ValueError("--seed-champion must use the form from:<delegation-id>")
+        seed_delegation_id = seed_champion.removeprefix("from:").strip()
+        if not seed_delegation_id:
+            raise ValueError("--seed-champion must name a delegation after 'from:'")
+        from autoresearch.orchestration.playoff import replay_source_for_delegation
+
+        replay_source = replay_source_for_delegation(orch, seed_delegation_id)
+        seed_override = SeedChampion(
+            from_run=replay_source.run_ref,
+            experiment_id=replay_source.experiment_id,
+        )
     if not continue_run:
         return spawn(
             orchestration_id,
@@ -538,10 +565,15 @@ def respawn(
             dry_run=dry_run,
             memory_access=memory_access,
             respawn_of=delegation_id,
+            seed_champion_override=seed_override,
         )
 
-    brief = load_brief(brief_path)
-    _reject_unsupported_brief(brief)
+    brief = brief or load_brief(brief_path)
+    if brief.seed_champion is not None:
+        raise ValueError(
+            "A brief with seed_champion cannot be used with --continue-run; "
+            "the continued run already retains its champion"
+        )
     backend = get_backend(selected_backend)
     if backend.track != source.track:
         raise ValueError(
@@ -609,6 +641,7 @@ def respawn(
             child_config.artifacts_dir,
             orchestration_id=orchestration_id,
             delegation_id=new_delegation_id,
+            target_mode=orch.target_mode,
         )
         _export_handoff_with_brief(child_config, new_delegation_id)
         process = _launch(plan, delegation)

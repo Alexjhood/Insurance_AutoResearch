@@ -200,13 +200,35 @@ def test_run_backpointer_round_trip(tmp_path):
 
 def test_run_backpointer_preserves_existing_manifest_keys(tmp_path):
     write_json(tmp_path / "run_manifest.json", {"dataset": "porto_seguro", "default_max_cycles": 4})
-    write_run_backpointer(tmp_path, orchestration_id="20260712T090000Z", delegation_id="d02")
+    write_run_backpointer(
+        tmp_path,
+        orchestration_id="20260712T090000Z",
+        delegation_id="d02",
+        target_mode="burning_cost",
+    )
     import json
 
     manifest = json.loads((tmp_path / "run_manifest.json").read_text())
     assert manifest["dataset"] == "porto_seguro"
     assert manifest["default_max_cycles"] == 4
     assert manifest["delegation_id"] == "d02"
+    assert manifest["target_mode"] == "burning_cost"
+
+
+def test_target_mode_manifest_read_is_gated_on_orchestration(tmp_path):
+    from autoresearch.config import _read_orchestration_target_mode
+
+    path = tmp_path / "run_manifest.json"
+    write_json(path, {"target_mode": "claim_frequency"})
+    assert _read_orchestration_target_mode(path) is None
+    write_json(
+        path,
+        {
+            "orchestration_id": "20260712T090000Z",
+            "target_mode": "claim_frequency",
+        },
+    )
+    assert _read_orchestration_target_mode(path) == "claim_frequency"
 
 
 # ── briefs ──────────────────────────────────────────────────────────────────
@@ -685,7 +707,9 @@ def test_spawn_refuses_to_exceed_total_cycle_budget(orchestrations_root, tmp_pat
         )
 
 
-def test_spawn_rejects_seed_champion_before_creating_anything(orchestrations_root, tmp_path):
+def test_spawn_dry_run_accepts_seed_champion_without_creating_anything(
+    orchestrations_root, tmp_path
+):
     orch = create_orchestration(
         dataset="porto_seguro", target_mode="claim_incidence", total_cycle_budget=8
     )
@@ -698,10 +722,10 @@ def test_spawn_rejects_seed_champion_before_creating_anything(orchestrations_roo
             "seed_champion": {"from_run": "claude/20260712T091500Z", "experiment_id": "e"},
         },
     )
-    with pytest.raises(NotImplementedError, match="seed_champion"):
-        spawner_mod.spawn(
-            orch.orchestration_id, brief_path=brief_file, backend_name="stub", dry_run=True
-        )
+    result = spawner_mod.spawn(
+        orch.orchestration_id, brief_path=brief_file, backend_name="stub", dry_run=True
+    )
+    assert result["status"] == "dry_run"
     assert load_orchestration(orch.orchestration_id).delegations == ()
 
 
@@ -950,6 +974,50 @@ def test_respawn_new_run_passes_lineage_to_spawn(
 
     assert captured["backend_name"] == "stub"
     assert captured["respawn_of"] == "d01"
+
+
+def test_respawn_seed_champion_resolves_campaign_delegation(
+    orchestrations_root, tmp_path, monkeypatch
+):
+    from autoresearch.orchestration import playoff as playoff_mod
+
+    orch = create_orchestration(
+        dataset="porto_seguro", target_mode="claim_incidence", total_cycle_budget=4
+    )
+    source = _running_delegation(status="completed", pid=None)
+    save_orchestration(add_delegation(orch, source))
+    brief_path = tmp_path / "brief.json"
+    write_json(brief_path, {"direction": "Continue the winner.", "cycle_budget": 1})
+    monkeypatch.setattr(
+        playoff_mod,
+        "replay_source_for_delegation",
+        lambda current, delegation_id: playoff_mod.ReplaySource(
+            track="claude",
+            run_id="20260710T120100Z",
+            experiment_id="winner",
+            delegation_id=delegation_id,
+            orchestration_id=current.orchestration_id,
+        ),
+    )
+    captured = {}
+
+    def fake_spawn(orchestration_id, **kwargs):
+        captured.update(kwargs)
+        return {"status": "running", "delegation_id": "d02"}
+
+    monkeypatch.setattr(spawner_mod, "spawn", fake_spawn)
+
+    spawner_mod.respawn(
+        orch.orchestration_id,
+        delegation_id="d01",
+        brief_path=brief_path,
+        seed_champion="from:d01",
+        wait=False,
+    )
+
+    seed = captured["seed_champion_override"]
+    assert seed.from_run == "claude/20260710T120100Z"
+    assert seed.experiment_id == "winner"
 
 
 def test_respawn_requires_timed_out_process_to_be_killed(

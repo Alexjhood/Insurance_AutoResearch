@@ -17,6 +17,7 @@ __all__ = [
     "backends",
     "manifest",
     "monitor",
+    "playoff",
     "report",
     "spawner",
 ]

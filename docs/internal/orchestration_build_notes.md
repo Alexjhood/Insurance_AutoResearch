@@ -1,8 +1,8 @@
 # Orchestration Build Notes
 
 **Branch:** `orchestration` (from `MultiDataset`)
-**Status:** Phases 1–3 complete. Full suite green (528 passed, 2 skipped);
-`generate_agent_contract.py --check` passes. Phases 4–5 not started.
+**Status:** Phases 1–4 complete. Full suite green (final Phase 4 count recorded
+below); `generate_agent_contract.py --check` passes. Phase 5 not started.
 
 This is the review entry point for the implementation of
 `docs/internal/orchestration_design.md`, per the execution constraints in
@@ -46,11 +46,11 @@ Baseline before any work: **433 passed, 2 skipped**.
 
 | # | Criterion | Status |
 |---|---|---|
-| 1 | Full pytest green; `generate_agent_contract.py --check` passes | ✅ 528 passed / 2 skipped; check in sync |
+| 1 | Full pytest green; `generate_agent_contract.py --check` passes | ✅ 539 passed / 2 skipped; check in sync |
 | 2 | Stub end-to-end campaign: `new` → 2 × `spawn --wait` → `collect`; correct cycle counts, champion facts from child registry, ≥1 provoked distress flag | ✅ (`no_finish_delegation` provoked via `stub-no-finish`) |
 | 3 | Parallel: 2 detached stub delegations, `status` shows both, manifest lock prevents bootstrap races | ✅ 3 detached stubs live concurrently; lock unit test + concurrent smoke |
 | 4 | Guard: orchestrator allow/deny cases; existing guard tests unchanged | ✅ all five required cases; pre-existing tests unchanged |
-| 5 | Playoff fixture passes; consolidation promotion fires the holdout-eval hook | ⬜ Phase 4 |
+| 5 | Playoff fixture passes; consolidation promotion fires the holdout-eval hook | ✅ Three eligible finalists + one baseline exclusion; protected hook stub called exactly once for the clean final promotion |
 | 6 | `list-backends` prints registry + metadata; `backend-stats` aggregates a fixture manifest | 🟡 `list-backends` ✅ (scorecard column renders "—"); `backend-stats` is Phase 5 |
 | 7 | Single-agent smoke test proves no Orchestration-brief block and no behaviour change | ✅ `test_single_agent_handoff_has_no_orchestration_brief` |
 | 8 | Build notes exist | ✅ this file |
@@ -180,6 +180,53 @@ public entry points. **No protected file was touched.**
   stdin prompt transport through the detached wrapper, clean/incomplete/nonzero
   exits, nested multi-turn usage aggregation, manifest round-trip, detached
   monitor propagation, report exposure, and contract parity.
+
+### Phase 4 — playoff and consolidation
+
+- **`playoff.py`** — finalist collection from delegation reports, mechanical
+  baseline exclusion, ascending `gini_weighted` ordering, fresh consolidation
+  bootstrap, weakest-finalist seeding, and resumable challenger replay through
+  the public `compare_experiments` / `record_decision` path. Interactive mode
+  writes a partial report and stops at every `pending_llm`; `--auto-decide`
+  promotes only when the advisory decision is `promote`, every standard check
+  is literally true, and hard guardrails pass.
+- **One privileged replay implementation** — `ReplaySource`,
+  `replay_experiment`, and `seed_champion_from_source` are shared by playoff,
+  `brief.seed_champion`, and `respawn --seed-champion from:dNN`. Recipes are
+  reconstructed from the source config snapshot. Script finalists require and
+  copy both the exact run-local script and originating proposal into the
+  destination's `orchestration_replay/<label>/` folder. SHA-256s, source run,
+  source experiment, source delegation, destination experiment, and copied
+  paths are recorded in `replay_manifest.json`; the artifact registry links the
+  audit files to the replayed experiment. Completed imports are idempotently
+  recoverable after interruption and lineage insertion is deduplicated.
+- **Lineage** — every replay appends `orchestration_replay/lineage.json`; the
+  final report resolves the consolidation champion back to its originating
+  orchestration delegation/run/experiment. Seed installation is recorded as a
+  champion-history `seeded` action, distinct from a statistical promotion.
+- **Reports and manifest** — partial and final
+  `playoff/playoff_report.json` / `.md` contain ordered finalists, exclusions,
+  every pairing's comparison summary, gate table, decision/rationale, and final
+  champion lineage. The campaign transitions `active -> consolidating ->
+  completed`; the existing consolidation `track`, `run_id`, and
+  `playoff_report` fields are populated at initialization.
+- **Target and guard continuity** — orchestration child/consolidation run
+  manifests now persist the campaign target mode. `load_config` reads that field
+  only when an `orchestration_id` is present, so a fresh CLI process making an
+  interactive decision cannot silently fall back to the dataset default and
+  single-agent loading is unchanged. Orchestrator scope hydration adds the
+  manifest-listed consolidation run, allowing the printed `record-decision`
+  takeover command while retaining all foreign-run denials.
+- **Fixed preprocessing** — replay refuses a source snapshot whose effective
+  claim-capping enablement or threshold conflicts with the destination dataset's
+  fixed policy.
+- **Tests** — new `tests/test_orchestration_playoff.py` uses registry/report
+  fixtures and deterministic comparison substitutes. It covers recipe replay,
+  script + proposal copy-in, replay recovery, brief seeding, three known-order
+  eligible finalists, a fourth `champion_is_baseline` exclusion, `--include`,
+  ascending gauntlet order, interactive stops/resume, strict auto decisions,
+  final lineage, both reports, manifest transitions, CLI modes, and invocation
+  of the existing protected promotion hook. No child process or model runs.
 
 ---
 
@@ -312,6 +359,30 @@ Worth recording, because they are the argument for the stub existing.
     the plain stub with `track = "codex"` would prove track selection but would
     bypass the new adapter. The shaped stub tests prompt, lifecycle, and usage
     parsing at zero cost and stays in the registry as a permanent smoke surface.
+20. **Consolidation uses the lowest-ranked finalist's track.** Design §4.6 says
+    the consolidation run is on the orchestrator's chosen track, but its designed
+    CLI exposes only `--include`, `--interactive`, and `--auto-decide`; adding a
+    new `--track` interface would contradict the Phase 4 request. Deterministically
+    using the seed finalist's track creates a normal allowed tracked run without
+    inventing an unreviewed flag. The choice is recorded in the manifest/report.
+21. **Auto decisions still serialize `decided_by="llm"` in the protected
+    comparison registry.** The existing public `record_decision` API owns the
+    only complete promotion transaction (champion, history, report, recipe hooks,
+    protected evaluation hook) and hard-codes that attribution. Phase 4 does not
+    edit the protected comparison runner merely to rename it. The playoff report
+    unambiguously records `decision_mode="auto"`, strict gate evidence, and the
+    mechanical rationale.
+22. **The source proposal is copied as an audit artifact, not enqueued into the
+    consolidation proposal queue.** Enqueuing would add ordinary research-tree,
+    screening, and reflection semantics that are not part of design §4.6 and can
+    auto-reject before the required fresh comparison. `run_experiment` creates a
+    native destination experiment; `compare_experiments` then executes the full
+    standard comparison gauntlet. Both are existing public paths.
+23. **Orchestration target mode is persisted and recovered from run manifests.**
+    This additive shared-path change is gated on `orchestration_id`; manifests
+    from single-agent runs ignore the new reader and retain prior behaviour. It
+    is required because interactive playoff decisions happen in later CLI
+    processes, after the in-memory target override used during bootstrap is gone.
 
 ---
 
@@ -342,6 +413,17 @@ Worth recording, because they are the argument for the stub existing.
   so it is not eligible until killed. This prevents two agents from writing the
   same continued run and prevents unnoticed spend from an old process while a
   replacement starts.
+- **Script replay requires a source proposal.** A script without its proposal is
+  not auditable enough for privileged copy-in; recipe replay can proceed from its
+  portable config snapshot alone.
+- **One eligible finalist is valid.** The playoff creates a consolidation run,
+  seeds it from that finalist, writes final lineage, and completes with no pairings.
+- **Missing or incomplete delegation reports are explicit exclusions.** They are
+  written into the playoff report (`report_missing` or
+  `champion_or_gini_missing`) rather than guessed from child claims.
+- **Auto promotion is fail-closed.** A non-empty check map, all checks exactly
+  true, advisory `promote`, and hard-guardrail `passed=true` are all required;
+  absent evidence rejects.
 
 ---
 
@@ -593,6 +675,53 @@ usage remains empty. **No real `claude -p` or `codex exec` process was launched.
 
 ---
 
+## Exact commands run (Phase 4 milestone)
+
+Phase 4's milestone is intentionally fixture-only. It creates no research
+track, starts no subprocess, uses no model endpoint, and does not need
+`AUTORESEARCH_SKIP_PYTEST_GATE`.
+
+```bash
+.venv/bin/python -m pytest \
+  tests/test_orchestration.py \
+  tests/test_orchestration_playoff.py \
+  tests/test_run_scope_guard.py -q
+# 143 passed
+
+.venv/bin/python -m pytest \
+  tests/test_orchestration_playoff.py::test_auto_playoff_orders_finalists_reports_lineage_and_calls_promotion_hook -q
+# 1 passed
+
+.venv/bin/python -m pytest
+# 539 passed, 2 skipped, 1 warning in 48.87s
+
+.venv/bin/python scripts/generate_agent_contract.py --check
+# AGENT.md (and harness mirrors) in sync.
+```
+
+The deterministic milestone fixture has three eligible finalists with Gini
+`d01=0.10`, `d02=0.20`, `d03=0.30`, plus `d04` carrying
+`champion_is_baseline`. Key asserted terminal state:
+
+```text
+excluded: d04 (champion_is_baseline)
+order: seed:d01 -> challenger:d02 -> challenger:d03
+d02: standard gates fail -> auto reject
+d03: all standard gates + hard guardrails pass -> auto promote
+protected promotion hook calls: [(replayed_d03, cmp_replayed_d03)]
+final lineage: consolidation/replayed_d03 -> d03/strong
+manifest: completed; consolidation=claude/20260710T150000Z
+reports: playoff_report.json + playoff_report.md
+```
+
+The interactive fixture separately proves the first call stops on `d02`, an
+external normal `record-decision` is observed on resume, and only then is `d03`
+replayed. The script fixture copies and hashes `model_replay.py` and
+`source_proposal.json`; the recipe fixture replays the portable model object and
+proves an interrupted completed import recovers without a second fit.
+
+---
+
 ## Open questions for later phases (raise with Alex; do not improvise)
 
 1. **`--permission-mode acceptEdits` sufficiency** — the last `TODO(pin)`; needs
@@ -652,7 +781,5 @@ usage shape still require the deliberately deferred paid validation campaign.
 - **Whether `--permission-mode acceptEdits` suffices for a headless sub-agent's
   Bash calls** — the one remaining `TODO(pin)`; see "CLI flag pinning". Needs one
   real spawn to settle.
-- **`seed_champion` replay + `respawn --seed-champion`** — deliberately deferred
-  together to Phase 4; deviations 2 and 11 above.
-- **Phases 4–5**: `playoff.py`, `ORCHESTRATOR.md`,
+- **Phase 5**: `ORCHESTRATOR.md`,
   `docs/RUN_ORCHESTRATED.md`, `orchestrate note`/`report`/`backend-stats`.

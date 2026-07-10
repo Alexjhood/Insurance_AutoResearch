@@ -866,6 +866,8 @@ def _cmd_orchestrate(config, args) -> int:
         return _orchestrate_spawn(args)
     if subcommand == "respawn":
         return _orchestrate_respawn(args)
+    if subcommand == "playoff":
+        return _orchestrate_playoff(args)
     if subcommand == "status":
         return _orchestrate_status(args)
     if subcommand == "kill":
@@ -941,6 +943,43 @@ def _orchestrate_spawn(args) -> int:
     return 0
 
 
+def _orchestrate_playoff(args) -> int:
+    from autoresearch.orchestration.manifest import resolve_orchestration_id
+    from autoresearch.orchestration.playoff import run_playoff
+
+    parser = build_parser()
+    include = None
+    if args.include:
+        include = [item.strip() for item in args.include.split(",") if item.strip()]
+        if not include:
+            parser.error("--include must name at least one delegation")
+    try:
+        result = run_playoff(
+            resolve_orchestration_id(args.orchestration_id),
+            include=include,
+            auto_decide=args.auto_decide,
+        )
+    except (ValueError, KeyError, FileNotFoundError, RuntimeError) as exc:
+        parser.error(str(exc))
+        return 2
+
+    print(json.dumps(result, indent=2, sort_keys=True))
+    pending = next(
+        (pair for pair in result.get("pairings", ()) if not pair.get("decision")),
+        None,
+    )
+    if pending is not None:
+        consolidation = result["consolidation"]
+        print(
+            "\nPlayoff paused for an interactive verdict. Next command:\n"
+            f"autoresearch --track {consolidation['track']} --run-id "
+            f"{consolidation['run_id']} record-decision {pending['comparison_id']} "
+            '--decision promote|reject --rationale "..." --reason-code <code> '
+            '--interpretation "..." --next "..."'
+        )
+    return 0
+
+
 def _orchestrate_respawn(args) -> int:
     from autoresearch.orchestration.manifest import resolve_orchestration_id
     from autoresearch.orchestration.spawner import respawn
@@ -956,6 +995,7 @@ def _orchestrate_respawn(args) -> int:
             wait=args.wait,
             dry_run=args.dry_run,
             memory_access=args.memory_access,
+            seed_champion=args.seed_champion,
         )
     except (ValueError, KeyError, FileNotFoundError, NotImplementedError) as exc:
         parser.error(str(exc))
@@ -1406,6 +1446,37 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrate_respawn.add_argument(
         "--memory-access", dest="memory_access", default=None, choices=("own", "all"),
     )
+    orchestrate_respawn.add_argument(
+        "--seed-champion",
+        default=None,
+        help="Seed the new respawn run from a campaign delegation (form: from:d01).",
+    )
+
+    orchestrate_playoff = orchestrate_subs.add_parser(
+        "playoff", help="Consolidate delegation finalists through an ascending gauntlet."
+    )
+    orchestrate_playoff.add_argument(
+        "--orchestration-id", dest="orchestration_id", default=None
+    )
+    orchestrate_playoff.add_argument(
+        "--include",
+        default=None,
+        help="Comma-separated delegation ids to include (defaults to all).",
+    )
+    playoff_mode = orchestrate_playoff.add_mutually_exclusive_group()
+    playoff_mode.add_argument(
+        "--interactive",
+        dest="auto_decide",
+        action="store_false",
+        help="Pause at each pending decision for an orchestrator verdict (default).",
+    )
+    playoff_mode.add_argument(
+        "--auto-decide",
+        dest="auto_decide",
+        action="store_true",
+        help="Promote only when every standard gate passes; reject otherwise.",
+    )
+    orchestrate_playoff.set_defaults(auto_decide=False)
 
     orchestrate_status = orchestrate_subs.add_parser(
         "status", help="Refresh and display detached delegation progress."

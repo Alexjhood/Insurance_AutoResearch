@@ -157,6 +157,21 @@ def _read_manifest_dataset(manifest_path: Path) -> str | None:
     return str(value) if value else None
 
 
+def _read_orchestration_target_mode(manifest_path: Path) -> str | None:
+    """Return an orchestration-pinned target mode, else preserve legacy loading."""
+
+    if not manifest_path.exists():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not payload.get("orchestration_id"):
+        return None
+    value = payload.get("target_mode")
+    return str(value) if value else None
+
+
 def load_config(
     config_path: str | Path | None = None,
     track_id: str | None = None,
@@ -226,9 +241,12 @@ def load_config(
         handoff_proposal_processed_dir = run_base / "proposal_processed"
         handoff_results_dir = run_base / "results"
         handoff_handoffs_dir = run_base / "handoffs"
-        manifest_dataset = _read_manifest_dataset(run_base / "run_manifest.json")
+        run_manifest_path = run_base / "run_manifest.json"
+        manifest_dataset = _read_manifest_dataset(run_manifest_path)
+        manifest_target_mode = _read_orchestration_target_mode(run_manifest_path)
     else:
         manifest_dataset = None
+        manifest_target_mode = None
         artifacts_dir = base_artifacts
         registry_path = _resolve(PROJECT_ROOT, paths["registry_path"])
         research_log_path = PROJECT_ROOT / "docs" / "RESEARCH_LOG.md"
@@ -315,7 +333,9 @@ def load_config(
         split_ratios={key: float(value) for key, value in splits.items()},
         ordinary_train_split=str(evaluation["ordinary_train_split"]),
         ordinary_eval_splits=tuple(str(value) for value in evaluation["ordinary_eval_splits"]),
-        target_mode=normalise_target_mode(dataset_spec.default_target_mode, dataset_spec),
+        target_mode=normalise_target_mode(
+            manifest_target_mode or dataset_spec.default_target_mode, dataset_spec
+        ),
         primary_metric=str(evaluation.get("primary_metric", "tweedie_deviance_p15")),
         tweedie_power=float(evaluation.get("tweedie_power", 1.5)),
         use_cv=bool(evaluation.get("use_cv", False)),
