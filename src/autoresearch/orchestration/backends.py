@@ -34,7 +34,23 @@ STATUSES = frozenset({"default", "trial", "deprecated"})
 PROMPT_CHANNELS = frozenset({"stdin", "argv"})
 
 #: Placeholders the spawner substitutes into a command template.
-_TEMPLATE_KEYS = frozenset({"prompt", "max_turns"})
+_TEMPLATE_KEYS = frozenset({"prompt", "max_turns", "max_budget_usd"})
+
+#: Enumerated flag values we validate ourselves, per tool, because the tool does
+#: not. Claude Code 2.1.206 accepts ``--effort bogus`` with a *warning* and then
+#: silently uses the default effort — which would quietly collapse a "low" and a
+#: "medium" backend into the same configuration while the scorecard compared them
+#: as rivals. A registry that lies about what it spawned is worse than no
+#: registry, so a bad value fails at load time instead.
+_TOOL_FLAG_ENUMS: dict[str, dict[str, frozenset[str]]] = {
+    "claude": {
+        "--effort": frozenset({"low", "medium", "high", "xhigh", "max"}),
+        "--output-format": frozenset({"text", "json", "stream-json"}),
+        "--permission-mode": frozenset(
+            {"acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"}
+        ),
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -54,6 +70,7 @@ class Backend:
     good_for: tuple[str, ...] = ()
     avoid_for: tuple[str, ...] = ()
     max_turns: int | None = None
+    max_budget_usd: float | None = None
     notes: str = ""
 
     def __post_init__(self) -> None:
@@ -93,11 +110,36 @@ class Backend:
                 f"backend {self.name!r}: unknown command placeholder(s) "
                 f"{sorted(unknown)}; known: {sorted(_TEMPLATE_KEYS)}"
             )
-        if "{max_turns}" in self.command and self.max_turns is None:
-            raise ValueError(
-                f"backend {self.name!r}: command uses '{{max_turns}}' but no "
-                "max_turns is configured"
-            )
+        for placeholder, value in (
+            ("max_turns", self.max_turns),
+            ("max_budget_usd", self.max_budget_usd),
+        ):
+            if any(f"{{{placeholder}}}" in token for token in self.command) and value is None:
+                raise ValueError(
+                    f"backend {self.name!r}: command uses '{{{placeholder}}}' but no "
+                    f"{placeholder} is configured"
+                )
+        self._validate_enumerated_flags()
+
+    def _validate_enumerated_flags(self) -> None:
+        enums = _TOOL_FLAG_ENUMS.get(self.tool)
+        if not enums:
+            return
+        for index, token in enumerate(self.command):
+            allowed = enums.get(token)
+            if allowed is None:
+                continue
+            if index + 1 >= len(self.command):
+                raise ValueError(
+                    f"backend {self.name!r}: {token} is the last token and carries no value"
+                )
+            value = self.command[index + 1]
+            if value not in allowed:
+                raise ValueError(
+                    f"backend {self.name!r}: {token}={value!r} is not accepted by "
+                    f"{self.tool!r}; valid values: {sorted(allowed)}. "
+                    f"({self.tool} would warn and silently fall back to its default.)"
+                )
 
     @property
     def is_spawnable(self) -> bool:
@@ -109,6 +151,9 @@ class Backend:
         substitutions = {
             "{prompt}": prompt,
             "{max_turns}": str(self.max_turns) if self.max_turns is not None else "",
+            "{max_budget_usd}": (
+                f"{self.max_budget_usd:g}" if self.max_budget_usd is not None else ""
+            ),
         }
         rendered: list[str] = []
         for token in self.command:
@@ -132,6 +177,7 @@ class Backend:
             "good_for": list(self.good_for),
             "avoid_for": list(self.avoid_for),
             "max_turns": self.max_turns,
+            "max_budget_usd": self.max_budget_usd,
             "notes": self.notes,
         }
 
@@ -191,6 +237,9 @@ def _parse_backend(name: str, entry: dict[str, Any], config_path: Path) -> Backe
         good_for=tuple(str(g) for g in entry.get("good_for", [])),
         avoid_for=tuple(str(a) for a in entry.get("avoid_for", [])),
         max_turns=(int(entry["max_turns"]) if entry.get("max_turns") is not None else None),
+        max_budget_usd=(
+            float(entry["max_budget_usd"]) if entry.get("max_budget_usd") is not None else None
+        ),
         notes=str(entry.get("notes", "")),
     )
 

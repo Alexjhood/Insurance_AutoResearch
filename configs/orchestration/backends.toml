@@ -12,58 +12,71 @@
 # `track` must be one of claude/codex/opencode: the run-scope guard only binds a
 # research session to those, and the child inherits it via AUTORESEARCH_TRACK.
 #
-# Command placeholders: {prompt} (argv channel only), {max_turns}.
+# Command placeholders: {prompt} (argv channel only), {max_turns}, {max_budget_usd}.
 
 # ── Claude Code ──────────────────────────────────────────────────────────────
-# TODO(pin): the `claude` binary is not installed on this machine, so none of
-# the flags below could be verified against `claude --help` during the build.
-# Verify `-p`, `--output-format`, `--permission-mode`, `--max-turns`, and pin a
-# real thinking-effort flag before the first real-model campaign. Until then the
-# two entries differ only in `model_name` attribution, NOT in actual effort.
-# `orchestrate spawn --dry-run` prints the exact argv + env for verification.
+# Flags verified against `claude --help` on Claude Code 2.1.206 (2026-07-10):
+#   -p/--print                 non-interactive
+#   --model <full-name|alias>
+#   --effort  low|medium|high|xhigh|max   ← the real thinking-effort flag
+#   --output-format text|json|stream-json (requires --print)
+#   --verbose                  needed for stream-json event output
+#   --permission-mode acceptEdits|auto|bypassPermissions|manual|dontAsk|plan
+#   --max-budget-usd <amount>  hard spend ceiling (requires --print)
+# There is NO `--max-turns` flag in this version; `--max-budget-usd` bounds a
+# sub-agent's spend instead, which is the guarantee we actually wanted.
+#
+# TODO(pin): `--permission-mode acceptEdits` is a valid value, but whether it is
+# *sufficient* for a headless sub-agent's Bash tool calls (the `autoresearch`
+# commands) is unverified — confirming it needs one real spawn, which the build
+# was not allowed to make. If a sub-agent stalls on a permission prompt, the
+# candidates are `--permission-mode bypassPermissions` or an explicit
+# `--allowed-tools "Bash Edit Read Write"`.
 
 [backends.claude-sonnet-low]
 tool = "claude"
 command = [
     "claude", "-p",
     "--model", "claude-sonnet-5",
+    "--effort", "low",
     "--output-format", "stream-json",
     "--verbose",
     "--permission-mode", "acceptEdits",
-    "--max-turns", "{max_turns}",
+    "--max-budget-usd", "{max_budget_usd}",
 ]
 prompt_via = "stdin"
 track = "claude"
 model_provider = "anthropic"
 model_name = "claude-sonnet-5-low"
-max_turns = 120
+max_budget_usd = 5.0
 tier = "cheap"
 status = "trial"
 cost_hint = "$"
 good_for = ["recipe_tuning", "structured_sweeps"]
 avoid_for = ["novel_scripts"]
-notes = "Reliable on recipe-only briefs; escalate effort for repair-heavy estimators. Effort flag unpinned."
+notes = "Reliable on recipe-only briefs; escalate effort for repair-heavy estimators."
 
 [backends.claude-sonnet-medium]
 tool = "claude"
 command = [
     "claude", "-p",
     "--model", "claude-sonnet-5",
+    "--effort", "medium",
     "--output-format", "stream-json",
     "--verbose",
     "--permission-mode", "acceptEdits",
-    "--max-turns", "{max_turns}",
+    "--max-budget-usd", "{max_budget_usd}",
 ]
 prompt_via = "stdin"
 track = "claude"
 model_provider = "anthropic"
 model_name = "claude-sonnet-5-medium"
-max_turns = 160
+max_budget_usd = 10.0
 tier = "mid"
 status = "trial"
 cost_hint = "$$"
 good_for = ["novel_scripts", "diagnostic_probes", "repair_prone"]
-notes = "Default escalation rung above claude-sonnet-low. Effort flag unpinned."
+notes = "Default escalation rung above claude-sonnet-low (--effort medium)."
 
 # ── Test backend ─────────────────────────────────────────────────────────────
 # Drives a scripted delegation through the real CLI with zero LLM calls. This is

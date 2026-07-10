@@ -280,6 +280,106 @@ def test_repo_backend_registry_loads_and_validates():
         assert backend.track in backends_mod.ALLOWED_TRACKS
 
 
+def test_distinct_backends_render_distinct_commands():
+    """Two named backends that produce identical argv are the same backend twice.
+
+    Regression: `claude-sonnet-low` and `claude-sonnet-medium` once differed only
+    in `model_name` attribution, because no `--effort` flag was pinned — so the
+    scorecard would have compared a backend against itself.
+    """
+    registry = load_backends()
+    rendered = {
+        name: backend.render_command(prompt="P")
+        for name, backend in registry.items()
+        if backend.is_spawnable
+    }
+    collisions = [
+        (a, b)
+        for a in rendered
+        for b in rendered
+        if a < b and rendered[a] == rendered[b]
+    ]
+    assert not collisions, f"backends render identical commands: {collisions}"
+
+
+def test_claude_backends_pin_a_real_effort_level():
+    registry = load_backends()
+    low = registry["claude-sonnet-low"].command
+    medium = registry["claude-sonnet-medium"].command
+    assert "--effort" in low and low[low.index("--effort") + 1] == "low"
+    assert "--effort" in medium and medium[medium.index("--effort") + 1] == "medium"
+    # `--max-turns` does not exist in the Claude CLI; it must not reappear.
+    assert "--max-turns" not in low and "--max-turns" not in medium
+
+
+def test_bad_effort_value_fails_at_load_time():
+    """Claude only *warns* on a bad --effort and uses the default; we must not."""
+    with pytest.raises(ValueError, match="--effort='bogus' is not accepted"):
+        Backend(
+            name="bad",
+            tool="claude",
+            command=("claude", "-p", "--effort", "bogus"),
+            prompt_via="stdin",
+            track="claude",
+            model_provider="anthropic",
+            model_name="m",
+        )
+
+
+def test_bad_permission_mode_fails_at_load_time():
+    with pytest.raises(ValueError, match="--permission-mode"):
+        Backend(
+            name="bad",
+            tool="claude",
+            command=("claude", "-p", "--permission-mode", "yolo"),
+            prompt_via="stdin",
+            track="claude",
+            model_provider="anthropic",
+            model_name="m",
+        )
+
+
+def test_enumerated_flag_validation_is_scoped_to_the_tool():
+    """A non-claude tool may legitimately use `--effort` with its own vocabulary."""
+    backend = Backend(
+        name="ok",
+        tool="opencode",
+        command=("opencode", "--effort", "ludicrous", "{prompt}"),
+        prompt_via="argv",
+        track="opencode",
+        model_provider="x",
+        model_name="y",
+    )
+    assert backend.render_command(prompt="P")[2] == "ludicrous"
+
+
+def test_max_budget_usd_placeholder_requires_a_value():
+    with pytest.raises(ValueError, match="max_budget_usd is configured"):
+        Backend(
+            name="bad",
+            tool="claude",
+            command=("claude", "-p", "--max-budget-usd", "{max_budget_usd}"),
+            prompt_via="stdin",
+            track="claude",
+            model_provider="anthropic",
+            model_name="m",
+        )
+
+
+def test_max_budget_usd_renders_without_trailing_zeros():
+    backend = Backend(
+        name="b",
+        tool="claude",
+        command=("claude", "-p", "--max-budget-usd", "{max_budget_usd}"),
+        prompt_via="stdin",
+        track="claude",
+        model_provider="anthropic",
+        model_name="m",
+        max_budget_usd=5.0,
+    )
+    assert backend.render_command(prompt="P") == ("claude", "-p", "--max-budget-usd", "5")
+
+
 def test_backend_rejects_track_the_guard_would_refuse():
     with pytest.raises(ValueError, match="run-scope guard"):
         Backend(

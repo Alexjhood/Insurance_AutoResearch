@@ -1,7 +1,7 @@
 # Orchestration Build Notes
 
 **Branch:** `orchestration` (from `MultiDataset`)
-**Status:** Phase 1 complete. Full suite green (490 passed, 2 skipped);
+**Status:** Phase 1 complete. Full suite green (497 passed, 2 skipped);
 `generate_agent_contract.py --check` passes. Phases 2–5 not started.
 
 This is the review entry point for the implementation of
@@ -46,7 +46,7 @@ Baseline before any work: **433 passed, 2 skipped**.
 
 | # | Criterion | Status |
 |---|---|---|
-| 1 | Full pytest green; `generate_agent_contract.py --check` passes | ✅ 490 passed / 2 skipped; check in sync |
+| 1 | Full pytest green; `generate_agent_contract.py --check` passes | ✅ 497 passed / 2 skipped; check in sync |
 | 2 | Stub end-to-end campaign: `new` → 2 × `spawn --wait` → `collect`; correct cycle counts, champion facts from child registry, ≥1 provoked distress flag | ✅ (`no_finish_delegation` provoked via `stub-no-finish`) |
 | 3 | Parallel: 2 detached stub delegations, `status` shows both, manifest lock prevents bootstrap races | ⬜ Phase 2 (lock built + unit-tested now; `--no-wait` wired but `status`/`monitor.py` are Phase 2) |
 | 4 | Guard: orchestrator allow/deny cases; existing guard tests unchanged | ⬜ Phase 2 |
@@ -106,7 +106,7 @@ public entry points. **No protected file was touched.**
   (design §4.4). Hand-edited into the *generator*, never the outputs.
 - **`scripts/stub_subagent.py`** + two `backends.toml` entries (`stub`,
   `stub-no-finish`) — the permanent zero-LLM smoke test (build-prompt rule 5).
-- **`tests/test_orchestration.py`** — 57 tests.
+- **`tests/test_orchestration.py`** — 64 tests.
 
 ---
 
@@ -181,6 +181,15 @@ Worth recording, because they are the argument for the stub existing.
    is `{claude, codex, opencode}`; a `stub` track would be refused. Stub runs
    therefore land in the real `claude` track (under their own run ids, isolated as
    any run is).
+9. **`max_budget_usd` added as a registry field + command placeholder.** The design's
+   §4.2 template shows only `{prompt}` and `{max_turns}`; the real Claude CLI has
+   no `--max-turns` but does have `--max-budget-usd`. Both placeholders are now
+   supported so the registry stays tool-agnostic. See "CLI flag pinning".
+10. **`_TOOL_FLAG_ENUMS` validates enumerated flag values in `backends.py`.** Not in
+    the design. Justified because Claude *warns and silently defaults* on a bad
+    `--effort`, which would re-create the exact defect (two "different" backends
+    that are secretly the same) that the scorecard cannot detect. Fails at load
+    time; scoped per `tool`.
 
 ---
 
@@ -207,23 +216,65 @@ Worth recording, because they are the argument for the stub existing.
 
 ---
 
-## Unpinned CLI flags (build-prompt Phase 1 note)
+## CLI flag pinning
 
-- **`claude` is not installed on this machine** (`which claude` → not found; no
-  npm global). **Every flag in both `claude-*` backend entries is unverified.**
-  `backends.toml` carries a `TODO(pin)` block naming them: `-p`,
-  `--output-format`, `--verbose`, `--permission-mode`, `--max-turns`, and — most
-  importantly — **no thinking-effort flag is pinned at all**, so
-  `claude-sonnet-low` and `claude-sonnet-medium` currently differ *only* in
-  `model_name` attribution, **not in actual effort**. Both are `status = "trial"`.
-  Verify with `orchestrate spawn --dry-run` before any real-model campaign.
-- **`codex` is installed** (`/opt/homebrew/bin/codex`). Verified from
-  `codex exec --help`: `-m/--model`, `-s/--sandbox {read-only,workspace-write,
-  danger-full-access}`, `--json`, `-C/--cd`, `--skip-git-repo-check`,
-  `-o/--output-last-message`, prompt via argv or stdin. **There is no
-  `--reasoning-effort` and no `--max-turns` on `codex exec`**; effort must go
-  through the generic `-c model_reasoning_effort=…` config override, whose key
-  name I could not verify locally. Codex entries land in Phase 3.
+Initially the `claude` binary was **not installed** (only `/Applications/Claude.app`;
+this session runs Claude Code via the desktop app's local agent mode). Every
+Claude flag was therefore an unverified guess, and no thinking-effort flag was
+pinned at all — `claude-sonnet-low` and `claude-sonnet-medium` differed only in
+`model_name` attribution. Alex asked for it to be installed
+(`npm install -g @anthropic-ai/claude-code` → **2.1.206**), and the flags are now
+pinned against real `claude --help` output. **No real sub-agent was ever launched
+(build-prompt rule 5): only `--help` and argument-parsing probes.**
+
+**Claude Code 2.1.206 — verified:**
+
+| Flag | Status |
+|---|---|
+| `-p` / `--print` | ✅ exists |
+| `--model <full-name\|alias>` | ✅ exists (aliases `opus`/`sonnet`/`fable`) |
+| `--effort low\|medium\|high\|xhigh\|max` | ✅ **exists** — the real effort flag |
+| `--output-format text\|json\|stream-json` | ✅ exists (requires `--print`) |
+| `--verbose` | ✅ exists |
+| `--permission-mode acceptEdits\|auto\|bypassPermissions\|manual\|dontAsk\|plan` | ✅ exists |
+| `--max-budget-usd <amount>` | ✅ exists (requires `--print`) — hard spend ceiling |
+| `--max-turns` | ❌ **does not exist**; my guess. Removed. |
+
+Consequences, all applied:
+
+1. `--max-turns` removed from both Claude entries. `--max-budget-usd` (5 USD for
+   `low`, 10 for `medium`) replaces it — a spend ceiling is the guarantee we
+   actually wanted from a turn cap. `max_budget_usd` is now a first-class
+   registry field and command placeholder alongside `max_turns` (which stays for
+   tools that do have it).
+2. `--effort low` / `--effort medium` pinned, so the two backends now differ in
+   substance, not just in name. New test
+   `test_distinct_backends_render_distinct_commands` fails if any two spawnable
+   backends ever render identical argv again — that is the invariant the original
+   defect broke.
+3. **Claude only *warns* on an invalid `--effort` and silently falls back to the
+   default effort** (verified: `claude --effort bogus --version` →
+   `Warning: Unknown --effort value 'bogus' — ignoring it…`). That would quietly
+   re-collapse two backends into one while the scorecard compared them as rivals.
+   So `backends.py` now validates enumerated flag values itself, per tool
+   (`_TOOL_FLAG_ENUMS`), and a bad value fails at **load** time. Scoped to
+   `tool == "claude"`; another tool may use `--effort` with its own vocabulary.
+
+Remaining `TODO(pin)` — one, and it needs a real spawn:
+`--permission-mode acceptEdits` is a *valid value*, but whether it *suffices* for
+a headless sub-agent's Bash tool calls (the `autoresearch` commands) is unverified;
+confirming it costs one real API call, which the build was not allowed to make. If
+a sub-agent stalls on a permission prompt, the candidates are
+`--permission-mode bypassPermissions` or an explicit
+`--allowed-tools "Bash Edit Read Write"`.
+
+**Codex** (`/opt/homebrew/bin/codex`, installed). Verified from
+`codex exec --help`: `-m/--model`, `-s/--sandbox {read-only,workspace-write,
+danger-full-access}`, `--json`, `-C/--cd`, `--skip-git-repo-check`,
+`-o/--output-last-message`; prompt via argv or stdin. **There is no
+`--reasoning-effort` and no `--max-turns` on `codex exec`**; effort must go
+through the generic `-c model_reasoning_effort=…` config override, whose key name
+is not verifiable from `--help`. Codex entries land in Phase 3.
 
 ---
 
@@ -299,8 +350,9 @@ that the block renders comes from the stub's own warning check (0 hits) and from
 - **Real-model campaigns (Phase 1 and Phase 3 milestones).** No `claude -p` /
   `codex exec` sub-agent was ever launched (build-prompt rule 5). Deferred to
   Alex's post-review validation.
-- **Claude effort flags** — see "Unpinned CLI flags". `claude` is not installed
-  here; guessing silently was explicitly forbidden.
+- **Whether `--permission-mode acceptEdits` suffices for a headless sub-agent's
+  Bash calls** — the one remaining `TODO(pin)`; see "CLI flag pinning". Needs one
+  real spawn to settle.
 - **`seed_champion`** — deviation 2 above.
 - **Phases 2–5**: orchestrator guard scope, `monitor.py`/`status`/`kill`/timeout
   enforcement, `respawn`, the Codex backend, `playoff.py`, `ORCHESTRATOR.md`,
