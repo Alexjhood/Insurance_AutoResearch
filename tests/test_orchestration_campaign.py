@@ -192,6 +192,42 @@ def test_note_rejects_unknown_kind_empty_text_and_unknown_delegation(orchestrati
     assert load_notes(orch.orchestration_id) == []
 
 
+def test_takeover_note_marks_delegation_and_reattributes_run(
+    orchestrations_root, tmp_path, monkeypatch
+):
+    orch = _campaign(delegations=(_delegation("d01", status="failed"),))
+    delegation = orch.delegation("d01")
+    run_dir = tmp_path / "artifacts" / "tracks" / delegation.track / "runs" / delegation.run_id
+    run_dir.mkdir(parents=True)
+    write_json(
+        run_dir / "run_manifest.json",
+        {"model_identity": {"provider": "stub", "name": "stub-scripted-agent", "harness": "stub"}},
+    )
+    monkeypatch.setattr(manifest_mod, "PROJECT_ROOT", tmp_path)
+
+    append_note(
+        orch.orchestration_id,
+        text="Backend dead; driving d01 directly.",
+        kind="takeover",
+        delegation_id="d01",
+        timestamp="2026-07-12T12:00:00Z",
+    )
+
+    updated = load_orchestration(orch.orchestration_id).delegation("d01")
+    assert updated.taken_over is True
+    identity = read_json(run_dir / "run_manifest.json")["model_identity"]
+    # The orchestrator's own model now owns this run's results.
+    assert identity == {
+        "provider": "anthropic",
+        "name": "claude-opus-4-8",
+        "harness": "orchestrator-takeover",
+    }
+    # A non-takeover note (or one without a delegation) changes nothing.
+    append_note(orch.orchestration_id, text="just a thought", kind="takeover")
+    append_note(orch.orchestration_id, text="reflecting", kind="reflection", delegation_id="d01")
+    assert load_orchestration(orch.orchestration_id).delegation("d01").taken_over is True
+
+
 def test_campaign_log_renders_before_any_note_exists(orchestrations_root):
     orch = _campaign()
     markdown = render_campaign_log(orch).read_text()

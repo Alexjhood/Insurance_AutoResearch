@@ -31,14 +31,29 @@ cd <repo>
 AUTORESEARCH_SCOPE=orchestrator claude
 ```
 
+The orchestrator session **spawns other CLIs as child processes**, so it needs
+real process privileges: the spawned `claude`/`codex` must be able to write
+their own home state (`~/.claude`, `~/.codex`). From a sandboxed harness that
+means relaunching with the sandbox relaxed — e.g. Codex
+`--sandbox danger-full-access` — or orchestrating from Claude Code. The spawn
+preflight refuses with a clear message when this is not the case. Authenticate
+the sub-agent CLIs once beforehand (`claude /login`; preflight cannot check
+auth without a paid call).
+
 Then, as the first prompt:
 
 ```
-Read ORCHESTRATOR.md. Run an orchestrated campaign on <dataset>
-(target mode <mode>) with a total budget of <N> cycles. Bootstrap it with
-`orchestrate new --model-provider anthropic --model-name claude-opus-4-8`.
-<any modelling guidance>
+Read ORCHESTRATOR.md before running any command — you are an orchestrator,
+not a research agent, so never run `bootstrap-track`. Run an orchestrated
+campaign on <dataset> (target mode <mode>) with a total budget of <N> cycles.
+Bootstrap it with `orchestrate new --model-provider <p> --model-name <m>`
+(your own model identity). <any modelling guidance>
 ```
+
+The "before running any command" phrasing matters: the auto-loaded research
+contract tells an agent to bootstrap first, and an orchestrator that obeys it
+creates an orphan run — and, once the guard binds it as research, loses access
+to every `orchestrate` command.
 
 `AUTORESEARCH_SCOPE=orchestrator` is optional: a session also auto-binds to a
 campaign the first time it successfully runs `orchestrate new` or

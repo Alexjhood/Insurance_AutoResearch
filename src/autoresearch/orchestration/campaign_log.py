@@ -121,8 +121,45 @@ def append_note(
         notes = load_notes(orchestration_id)
         notes.append(note)
         save_notes(orchestration_id, notes)
+        if kind == "takeover" and delegation_id is not None:
+            _mark_taken_over(orchestration_id, delegation_id)
         render_campaign_log(load_orchestration(orchestration_id), notes)
     return note
+
+
+def _mark_taken_over(orchestration_id: str, delegation_id: str) -> None:
+    """Record that the orchestrator now drives this delegation's run itself.
+
+    Sets ``taken_over`` on the delegation and re-attributes the child run's
+    model identity to the orchestrator's model, so the memory aggregator does
+    not credit the backend for cycles the orchestrator ran. Caller holds the
+    manifest lock.
+    """
+
+    from dataclasses import replace
+
+    from autoresearch.orchestration.manifest import (
+        save_orchestration,
+        update_delegation,
+    )
+
+    orch = load_orchestration(orchestration_id)
+    delegation = orch.delegation(delegation_id)
+    save_orchestration(update_delegation(orch, replace(delegation, taken_over=True)))
+
+    manifest_path = delegation.run_dir() / "run_manifest.json"
+    if not manifest_path.exists():
+        return
+    try:
+        payload = read_json(manifest_path)
+        identity = dict(payload.get("model_identity") or {})
+        identity["provider"] = orch.model_provider or identity.get("provider")
+        identity["name"] = orch.model_name or identity.get("name")
+        identity["harness"] = "orchestrator-takeover"
+        payload["model_identity"] = identity
+        write_json(manifest_path, payload)
+    except (OSError, ValueError, TypeError):
+        pass  # attribution is best-effort; the takeover note itself is the record
 
 
 # ── rendering (derived; safe to regenerate at any time) ──────────────────────

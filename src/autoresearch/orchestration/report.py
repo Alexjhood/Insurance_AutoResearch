@@ -311,6 +311,7 @@ def build_report(orch: Orchestration, delegation: Delegation) -> dict[str, Any]:
         "backend": delegation.backend,
         "respawn_of": delegation.respawn_of,
         "continue_run": delegation.continue_run,
+        "taken_over": delegation.taken_over,
         "status": delegation.status,
         "cycles": {"budget": delegation.cycle_budget, "used": cycles_used},
         "champion": champion,
@@ -323,6 +324,31 @@ def build_report(orch: Orchestration, delegation: Delegation) -> dict[str, Any]:
         "distress": distress.to_dict(),
         "cost": _cost(delegation, config),
     }
+
+
+def should_refund_budget(payload: dict[str, Any]) -> bool:
+    """A delegation that crashed before doing any work costs the campaign nothing.
+
+    Refund iff the delegation ended in a non-completed terminal state, ran zero
+    cycles, and made zero recorded LLM calls — i.e. the failure was environmental
+    (auth, sandbox, missing binary), not scientific. A ``completed`` delegation
+    that chose to do nothing is not refunded; the distress flags cover that.
+    """
+
+    if payload.get("status") not in {"failed", "killed", "timed_out"}:
+        return False
+    if payload.get("taken_over"):
+        return False  # the orchestrator is spending this budget in the run itself
+    if int((payload.get("cycles") or {}).get("used") or 0) != 0:
+        return False
+    llm_usage = (payload.get("cost") or {}).get("llm_usage") or {}
+    if int(llm_usage.get("calls") or 0) != 0:
+        return False
+    backend_usage = llm_usage.get("backend") or {}
+    tokens = int(backend_usage.get("input_tokens") or 0) + int(
+        backend_usage.get("output_tokens") or 0
+    )
+    return tokens == 0
 
 
 def collect_report(orch: Orchestration, delegation: Delegation) -> Path:

@@ -1129,7 +1129,8 @@ def _orchestrate_collect(args) -> int:
         update_delegation,
     )
     from autoresearch.orchestration.monitor import refresh_orchestration
-    from autoresearch.orchestration.report import collect_report
+    from autoresearch.orchestration.report import collect_report, should_refund_budget
+    from autoresearch.utils.io import read_json
 
     parser = build_parser()
     try:
@@ -1147,6 +1148,7 @@ def _orchestrate_collect(args) -> int:
         return 0
     for delegation in targets:
         path = collect_report(orch, delegation)
+        refunded = should_refund_budget(read_json(path))
         try:
             stored_path = str(path.relative_to(PROJECT_ROOT))
         except ValueError:
@@ -1157,10 +1159,15 @@ def _orchestrate_collect(args) -> int:
             save_orchestration(
                 update_delegation(
                     current,
-                    replace(current_delegation, report_path=stored_path),
+                    replace(
+                        current_delegation,
+                        report_path=stored_path,
+                        budget_refunded=refunded,
+                    ),
                 )
             )
-        print(f"{delegation.delegation_id}: {path}")
+        suffix = "  (budget refunded: crashed with zero work)" if refunded else ""
+        print(f"{delegation.delegation_id}: {path}{suffix}")
     return 0
 
 

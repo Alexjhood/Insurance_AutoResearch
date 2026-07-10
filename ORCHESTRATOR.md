@@ -22,6 +22,8 @@ layer. `docs/RUN_ORCHESTRATED.md` is the user-facing quick start;
 
 Cycles are the scarce unit. The framework refuses a spawn that exceeds the
 remaining total, so spend adaptively — do not pre-plan a slate of delegations.
+A delegation that crashes on the environment before any cycle or LLM call is
+**refunded** at `collect`; one that did any work is not.
 
 ## 2. Workflow
 
@@ -160,9 +162,11 @@ unmeasured campaign is not a free campaign.
 
 ## 9. Takeover
 
-Declare it in the log first (`--kind takeover`), then drive the child run
-directly with the ordinary run-scoped commands — the guard permits `--run-id`
-against any run in your manifest.
+Declare it in the log first (`--kind takeover --delegation <dNN>`) — besides
+recording the decision, this marks the delegation `taken_over` and re-attributes
+its run to **your** model, so the backend is not credited for cycles you ran.
+Then drive the child run directly with the ordinary run-scoped commands — the
+guard permits `--run-id` against any run in your manifest.
 
 Prefer **takeover for diagnosis** and **respawn for continuation**. A takeover
 that turns into you running many cycles means the delegation grain was wrong;

@@ -332,6 +332,52 @@ def get_backend(name: str, *, path: Path | None = None) -> Backend:
     return backend
 
 
+#: Home-state directory each tool must be able to write. The 2026-07-10 Sol
+#: campaign lost 8/10 budget cycles to exactly these two failures: an
+#: unauthenticated `claude` and a `codex` child that could not write ~/.codex
+#: under the orchestrator harness's sandbox.
+_TOOL_STATE_DIRS = {"claude": ".claude", "codex": ".codex"}
+
+
+def preflight_backend(backend: Backend) -> None:
+    """Fail a spawn fast, with a clear message, on known environment problems.
+
+    Checks the backend executable is on PATH and (for tools with local state)
+    that the tool's home-state directory is actually writable — a real write
+    probe, because a harness sandbox denies at the syscall, not the permission
+    bits. Cannot verify authentication without a paid call; an auth failure
+    still surfaces through the delegation report's ``crashed`` flag.
+    """
+
+    import os
+    import shutil
+    from pathlib import Path as _Path
+
+    executable = backend.command[0]
+    if shutil.which(executable) is None:
+        raise RuntimeError(
+            f"Backend {backend.name!r}: executable {executable!r} is not on PATH. "
+            "Install it (or fix PATH) before spawning."
+        )
+
+    state_name = _TOOL_STATE_DIRS.get(backend.tool)
+    if state_name is None:
+        return
+    state_dir = _Path.home() / state_name
+    probe = state_dir / f".autoresearch_preflight_{os.getpid()}"
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        probe.write_text("preflight\n", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        raise RuntimeError(
+            f"Backend {backend.name!r}: cannot write {state_dir} ({exc}). The "
+            f"spawned `{backend.tool}` CLI needs writable home state; if you are "
+            "orchestrating from a sandboxed harness, relaunch it with enough "
+            "process privileges (e.g. Codex `--sandbox danger-full-access`)."
+        ) from exc
+
+
 def format_backend_table(
     backends: dict[str, Backend],
     stats: dict[str, dict[str, Any]] | None = None,

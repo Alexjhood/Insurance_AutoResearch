@@ -117,6 +117,11 @@ first `bootstrap-track`, which prints the id):
 
 ### Orchestrated mode
 
+If you were asked to **orchestrate** — run a campaign, delegate experiments to
+sub-agents — you are not a research agent at all: read `ORCHESTRATOR.md` **before
+running any command** and never run `bootstrap-track` (it would bind this session
+to a research run and lock you out of every `orchestrate` command).
+
 If your launch prompt names a **pre-bootstrapped run**, you are a sub-agent under
 an orchestrator. Skip step 1: never run `bootstrap-track`, never start another
 run, and pass the given `--track`/`--run-id` to every command. Your handoff

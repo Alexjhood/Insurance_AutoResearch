@@ -679,6 +679,69 @@ def test_child_environment_grants_requested_memory_access():
     assert env["AUTORESEARCH_MEMORY_ACCESS"] == "own"
 
 
+def test_should_refund_budget_only_for_zero_work_environment_failures():
+    from autoresearch.orchestration.report import should_refund_budget
+
+    crashed_no_work = {
+        "status": "failed",
+        "cycles": {"budget": 4, "used": 0},
+        "cost": {"llm_usage": {"calls": 0}},
+    }
+    assert should_refund_budget(crashed_no_work)
+    # Any evidence of work — cycles, LLM calls, backend tokens — means no refund.
+    assert not should_refund_budget({**crashed_no_work, "cycles": {"budget": 4, "used": 1}})
+    assert not should_refund_budget({**crashed_no_work, "cost": {"llm_usage": {"calls": 3}}})
+    assert not should_refund_budget(
+        {**crashed_no_work, "cost": {"llm_usage": {"backend": {"input_tokens": 10}}}}
+    )
+    # Completed-but-idle and taken-over delegations keep their budget committed.
+    assert not should_refund_budget({**crashed_no_work, "status": "completed"})
+    assert not should_refund_budget({**crashed_no_work, "taken_over": True})
+
+
+def test_refunded_delegation_does_not_count_against_the_cycle_budget():
+    orch = Orchestration(
+        orchestration_id="20260710T160000Z",
+        dataset="porto_seguro",
+        target_mode="claim_incidence",
+        created_at="2026-07-10T16:00:00Z",
+        total_cycle_budget=10,
+        delegations=(
+            _running_delegation(status="failed", pid=None),
+            replace(
+                _running_delegation(status="failed", pid=None),
+                delegation_id="d02",
+                budget_refunded=True,
+            ),
+        ),
+    )
+    assert orch.cycles_committed == orch.delegations[0].cycle_budget
+
+
+def test_preflight_refuses_missing_executable_and_unwritable_state_dir(monkeypatch, tmp_path):
+    from autoresearch.orchestration.backends import load_backends, preflight_backend
+
+    stub = load_backends()["stub"]
+    claude = load_backends()["claude-sonnet-low"]
+
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    with pytest.raises(RuntimeError, match="not on PATH"):
+        preflight_backend(stub)
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/fake")
+    unwritable = tmp_path / "home"
+    unwritable.mkdir()
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: unwritable))
+    unwritable.chmod(0o500)
+    try:
+        with pytest.raises(RuntimeError, match="writable home state"):
+            preflight_backend(claude)
+    finally:
+        unwritable.chmod(0o700)
+    # The stub tool has no home-state requirement, so PATH is its only check.
+    preflight_backend(stub)
+
+
 def test_compute_timeout_scales_with_budget():
     assert spawner_mod.compute_timeout_minutes(1) == 20.0
     # Cycles 0-4 cost 10 min each; the 6th cycle's budget steps up to 15.

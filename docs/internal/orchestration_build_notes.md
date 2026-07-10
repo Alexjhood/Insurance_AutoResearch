@@ -1072,6 +1072,42 @@ The independent review confirmed the build sound and applied five fixes
 New tests: research-denies-orchestrate matrix + finish-delegation allowance,
 env-analyst non-demotion, child-env stripping, continue-run re-pin assertion.
 
+## Post-first-real-campaign fixes (2026-07-10, after the Sol campaign)
+
+The first real orchestrated campaign (`20260710T151715Z`, GPT-5.6 Sol in Codex)
+exposed four operational gaps — both real backends crashed environmentally
+(unauthenticated `claude`; sandboxed child `codex` unable to write `~/.codex`),
+8/10 budget cycles were consumed by zero-work failures, and the takeover run
+stayed attributed to the backend. Fixes (suite 569 passed / 2 skipped):
+
+1. **Budget refunds.** `report.should_refund_budget`: a delegation that ended
+   `failed`/`killed`/`timed_out` with zero cycles, zero LLM calls, and zero
+   backend tokens is marked `budget_refunded` when its report is collected, and
+   `cycles_committed` excludes it. Taken-over delegations are never refunded.
+2. **Takeover bookkeeping.** `orchestrate note --kind takeover --delegation dNN`
+   now sets `taken_over` on the delegation (surfaced in its report) and
+   re-attributes the child run's `model_identity` to the orchestrator's model
+   (`harness="orchestrator-takeover"`), so the aggregator does not credit the
+   backend for cycles the orchestrator ran.
+3. **Spawn preflight.** `backends.preflight_backend` (called by `spawn`/`respawn`,
+   skipped on `--dry-run`): backend executable on PATH, plus a real write probe
+   of the tool's home-state dir (`~/.claude` / `~/.codex`) — the exact failures
+   that killed d01/d02. Auth remains unverifiable without a paid call.
+4. **Contract guardrail.** The generated Orchestrated-mode section now opens
+   with: an agent asked to *orchestrate* must read ORCHESTRATOR.md before any
+   command and never bootstrap (Sol bootstrapped an orphan run first,
+   `20260710T151631Z`, because AGENTS.md's step 1 auto-loaded ahead of
+   ORCHESTRATOR.md). RUN_ORCHESTRATED.md documents the process-privilege
+   requirement (`--sandbox danger-full-access` for a Codex orchestrator) and
+   the hardened opening prompt; ORCHESTRATOR.md documents refunds and the
+   takeover side effects.
+
+Still open, per Alex: the generated-contract environment drift (tabpfn) — Sol's
+interpreter has the `[foundation]` extra and regenerates contracts *with*
+tabpfn; this repo's `.venv` regenerates *without*. The pytest gate will keep
+flip-flopping between the two environments until the extra is installed in both
+or the generator is made environment-independent.
+
 ## Deliberately left undone
 
 - **Real-model campaigns (Phase 1 and Phase 3 milestones).** No `claude -p` /

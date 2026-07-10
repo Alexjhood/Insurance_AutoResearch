@@ -296,6 +296,11 @@ def spawn(
     backend = get_backend(backend_name)
     _check_budget(orch, brief)
 
+    if not dry_run:
+        from autoresearch.orchestration.backends import preflight_backend
+
+        preflight_backend(backend)
+
     if dry_run:
         plan = plan_spawn(
             orch,
@@ -458,16 +463,23 @@ def _finalise_after_wait(
         orch = update_delegation(orch, delegation)
         save_orchestration(orch)
 
+    from autoresearch.orchestration.report import should_refund_budget
+
     orch = load_orchestration(orchestration_id)
     delegation = orch.delegation(delegation_id)
     report_file = collect_report(orch, delegation)
+    refunded = should_refund_budget(read_json(report_file))
 
     with manifest_lock(orchestration_id):
         orch = load_orchestration(orchestration_id)
         delegation = orch.delegation(delegation_id)
         orch = update_delegation(
             orch,
-            replace(delegation, report_path=str(report_file.relative_to(PROJECT_ROOT))),
+            replace(
+                delegation,
+                report_path=str(report_file.relative_to(PROJECT_ROOT)),
+                budget_refunded=refunded,
+            ),
         )
         save_orchestration(orch)
 
@@ -597,6 +609,10 @@ def respawn(
             memory_access=memory_access,
         )
         return {"status": "dry_run", "plan": plan}
+
+    from autoresearch.orchestration.backends import preflight_backend
+
+    preflight_backend(backend)
 
     with manifest_lock(orchestration_id):
         orch = load_orchestration(orchestration_id)

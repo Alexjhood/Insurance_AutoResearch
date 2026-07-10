@@ -87,6 +87,8 @@ class Delegation:
     respawn_of: str | None = None
     continue_run: bool = False
     cycles_at_start: int = 0
+    budget_refunded: bool = False
+    taken_over: bool = False
 
     def __post_init__(self) -> None:
         if not DELEGATION_ID_RE.fullmatch(self.delegation_id):
@@ -141,6 +143,8 @@ class Delegation:
             "respawn_of": self.respawn_of,
             "continue_run": self.continue_run,
             "cycles_at_start": self.cycles_at_start,
+            "budget_refunded": self.budget_refunded,
+            "taken_over": self.taken_over,
         }
         return payload
 
@@ -175,6 +179,8 @@ class Delegation:
             respawn_of=raw.get("respawn_of"),
             continue_run=bool(raw.get("continue_run", False)),
             cycles_at_start=int(raw.get("cycles_at_start") or 0),
+            budget_refunded=bool(raw.get("budget_refunded", False)),
+            taken_over=bool(raw.get("taken_over", False)),
         )
 
 
@@ -245,11 +251,12 @@ class Orchestration:
         """Cycles handed to delegations that were actually spawned.
 
         A ``failed`` delegation still consumed its budget as far as the campaign
-        is concerned — the orchestrator paid for the attempt. Only delegations
-        that never spawned are absent from this list entirely.
+        is concerned — the orchestrator paid for the attempt. The exception is a
+        ``budget_refunded`` delegation: it crashed on the environment before any
+        cycle or LLM call happened, so the campaign got nothing and pays nothing.
         """
 
-        return sum(d.cycle_budget for d in self.delegations)
+        return sum(d.cycle_budget for d in self.delegations if not d.budget_refunded)
 
     @property
     def cycles_remaining(self) -> int:
