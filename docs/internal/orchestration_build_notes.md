@@ -376,6 +376,24 @@ that the block renders comes from the stub's own warning check (0 hits) and from
   `artifacts/tracks/*/runs/*` folder — including a child's handoff. That is the
   gap Phase 2's `orchestrator` scope closes. Until then, verify child-run state
   through the stub's own log output and the delegation reports.
+- **There is no `python` on PATH.** Use `.venv/bin/python` for pytest and ad-hoc
+  scripts. The `autoresearch` console script on PATH resolves to the *system*
+  3.13 framework install, not `.venv`; both work, and the stub backend's
+  `python3 scripts/stub_subagent.py` only needs stdlib plus `autoresearch` on
+  PATH.
+- **The guard runs under all three harnesses** (`.claude/hooks`, `.codex/hooks.json`,
+  `.opencode`). Phase 2 edits `scripts/run_scope_guard.py` *while the guard is
+  policing the editing session's own tool calls*. `decide()` is fail-open on
+  exceptions, but a **logic** bug that returns `(False, …)` will block your own
+  Bash/Edit calls. Unit-test `decide()` directly rather than probing it with live
+  tool calls, and if you wedge yourself, delete the session's scope file under
+  `artifacts/tracks/.scope/`.
+- **Phase 2's orchestrator auto-bind will bind the *build* session.** Design §5
+  auto-binds on a successful `orchestrate new` / `orchestrate spawn` at
+  PostToolUse. The moment a build session runs a smoke campaign it becomes an
+  orchestrator scoped to that campaign, and the guard then denies it other
+  orchestrations' folders. Expect it; it is the feature working. Clear the scope
+  file to unbind.
 
 ---
 
