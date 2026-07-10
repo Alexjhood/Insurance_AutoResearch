@@ -127,6 +127,66 @@ def test_enable_is_noop_without_package(monkeypatch) -> None:
     assert recipe_pkg.enable_foundation_models() == []
 
 
+def test_runtime_spec_matches_static_declaration() -> None:
+    """The registered estimator is built from the static declaration, so the
+    legal obj/enc matrix in the contract cannot diverge from what runs."""
+    from autoresearch.models.recipe.foundation_specs import TABPFN_SPEC
+
+    rt = foundation._TABPFN_SPEC
+    assert rt.name == TABPFN_SPEC.name
+    assert rt.objectives == TABPFN_SPEC.objectives
+    assert rt.encodings == TABPFN_SPEC.encodings
+    assert rt.default_encoding == TABPFN_SPEC.default_encoding
+    assert rt.supports_early_stopping == TABPFN_SPEC.supports_early_stopping
+    assert rt.native_categorical == TABPFN_SPEC.native_categorical
+
+
+def _validate_tabpfn() -> list[str]:
+    return validate_recipe(
+        {"structure": "direct", "estimator": "tabpfn", "objective": "squared_error"},
+        target_mode="burning_cost",
+    )
+
+
+def test_non_opted_run_gets_specific_foundation_message(monkeypatch) -> None:
+    """Extra importable but the run did not opt in → a message naming the opt-in,
+    not the generic 'unknown estimator'. (Independent of the ambient env.)"""
+    from autoresearch.models.recipe import registry as reg
+    from autoresearch.models.recipe import schema
+
+    monkeypatch.setattr(schema, "foundation_packages_available", lambda spec: True)
+    before = dict(reg._ESTIMATORS)
+    reg._ESTIMATORS.pop("tabpfn", None)
+    try:
+        errors = _validate_tabpfn()
+    finally:
+        reg._ESTIMATORS.clear()
+        reg._ESTIMATORS.update(before)
+
+    assert any("enable-foundation-models" in e and "not enabled for this run" in e
+               for e in errors), errors
+    assert not any("Unknown estimator" in e for e in errors)
+
+
+def test_extra_missing_run_gets_specific_foundation_message(monkeypatch) -> None:
+    """Opted in (or not) but the [foundation] extra is not importable → a message
+    naming the extra, not the generic 'unknown estimator'."""
+    from autoresearch.models.recipe import registry as reg
+    from autoresearch.models.recipe import schema
+
+    monkeypatch.setattr(schema, "foundation_packages_available", lambda spec: False)
+    before = dict(reg._ESTIMATORS)
+    reg._ESTIMATORS.pop("tabpfn", None)
+    try:
+        errors = _validate_tabpfn()
+    finally:
+        reg._ESTIMATORS.clear()
+        reg._ESTIMATORS.update(before)
+
+    assert any("[foundation] extra" in e for e in errors), errors
+    assert not any("Unknown estimator" in e for e in errors)
+
+
 # ── subsampler unit tests (no package needed) ────────────────────────────────
 
 def test_subsample_noop_below_cap() -> None:

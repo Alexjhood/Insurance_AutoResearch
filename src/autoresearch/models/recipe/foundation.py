@@ -28,9 +28,7 @@ Design notes specific to this codebase:
 
 from __future__ import annotations
 
-import importlib.util
 import os
-import sys
 from typing import Any
 
 import numpy as np
@@ -41,6 +39,20 @@ from autoresearch.models.recipe.registry import (
     RecipeError,
     register_estimator,
 )
+from autoresearch.models.recipe.foundation_specs import (  # re-exported (drift fix)
+    FOUNDATION_ESTIMATOR_NAMES,
+    FOUNDATION_ESTIMATOR_SPECS,
+    TABPFN_SPEC as _TABPFN_STATIC,
+    foundation_packages_available,
+)
+
+__all__ = [
+    "FOUNDATION_ESTIMATOR_NAMES",
+    "FOUNDATION_ESTIMATOR_SPECS",
+    "register_foundation_estimators",
+    "tabpfn_available",
+    "subsample_context",
+]
 
 
 # Two backends (see docs/internal/foundation_models_integration_plan.md):
@@ -344,24 +356,18 @@ def _fit_tabpfn(ctx: FitContext) -> tuple[Any, dict[str, Any]]:
     return _BatchedRegressor(model, batch_size=batch_size), notes
 
 
+# The runtime estimator is built from the static declaration
+# (foundation_specs.TABPFN_SPEC), so the legal objective/encoding matrix shown in
+# the agent contract is exactly the one enforced here — the two cannot drift.
 _TABPFN_SPEC = EstimatorSpec(
-    name="tabpfn",
-    # TabPFN has a single regression head; advertise the honest objective only.
-    objectives=frozenset({"squared_error"}),
-    encodings=frozenset({"ordinal", "one_hot"}),
-    default_encoding="ordinal",
+    name=_TABPFN_STATIC.name,
+    objectives=_TABPFN_STATIC.objectives,
+    encodings=_TABPFN_STATIC.encodings,
+    default_encoding=_TABPFN_STATIC.default_encoding,
     fit=_fit_tabpfn,
-    supports_early_stopping=False,
-    native_categorical=False,
-    description=(
-        "TabPFN-3 foundation model (in-context learning, no gradient training). "
-        "Training context is subsampled to max_context_rows (exposure-weighted by "
-        "default) and scoring is batched; exposure enters via the subsample, not a "
-        "sample weight, with framework calibration fixing the level. backend='api' "
-        "offloads to Prior Labs' GPU (needs TABPFN_TOKEN) — the practical choice on "
-        "Apple Silicon; backend='local' runs on this machine (CPU is slow at scale). "
-        "Requires the [foundation] extra and a per-run opt-in."
-    ),
+    supports_early_stopping=_TABPFN_STATIC.supports_early_stopping,
+    native_categorical=_TABPFN_STATIC.native_categorical,
+    description=_TABPFN_STATIC.description,
     allowed_params=frozenset({
         "backend", "max_context_rows", "subsample_strategy", "random_state",
         "n_estimators", "device", "predict_batch_size",
@@ -376,19 +382,10 @@ _TABPFN_SPEC = EstimatorSpec(
 
 # ── registration ─────────────────────────────────────────────────────────────
 
-def _importable(name: str) -> bool:
-    if name in sys.modules:  # already imported (incl. test stubs)
-        return True
-    try:
-        return importlib.util.find_spec(name) is not None
-    except (ImportError, ValueError):
-        return False
-
-
 def tabpfn_available() -> bool:
     """True if either backend is usable: the local ``tabpfn`` package or the
     ``tabpfn_client`` API package."""
-    return _importable("tabpfn") or _importable("tabpfn_client")
+    return foundation_packages_available(_TABPFN_STATIC)
 
 
 def register_foundation_estimators() -> list[str]:

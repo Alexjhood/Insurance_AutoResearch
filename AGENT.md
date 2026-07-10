@@ -188,6 +188,7 @@ invalid ones are rejected before running):
 - **lightgbm** — obj ['gamma', 'poisson', 'squared_error', 'tweedie']; enc ['native_categorical', 'one_hot', 'ordinal'] (early-stop)
 - **tweedie_glm** — obj ['gamma', 'poisson', 'tweedie']; enc ['one_hot']
 - **xgboost** — obj ['gamma', 'poisson', 'squared_error', 'tweedie']; enc ['one_hot', 'ordinal'] (early-stop)
+- **tabpfn** — obj ['squared_error']; enc ['one_hot', 'ordinal'] (requires `bootstrap-track --enable-foundation-models` + the `[foundation]` extra)
 
 Target *shape* → objective (the handoff names the active target's shape):
 **has zeros** (pure premium / incidence) → tweedie/poisson/squared_error;

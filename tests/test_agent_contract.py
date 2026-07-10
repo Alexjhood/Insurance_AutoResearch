@@ -92,6 +92,41 @@ def test_no_unknown_autoresearch_command_in_contract():
     assert not unknown, f"AGENT.md references unknown commands: {unknown}"
 
 
+def test_contract_bytes_are_foundation_extra_independent():
+    """The drift-fix acceptance test: the generated contract is byte-identical
+    whether or not a foundation estimator is registered (i.e. whether or not the
+    ``[foundation]`` extra is installed and the run opted in).
+
+    The old generator derived the estimator table from the *live* registry, so a
+    machine with the extra emitted a ``tabpfn`` row and a machine without it did
+    not — and the pytest gate flip-flopped the working tree between the two. The
+    generator now reads foundation metadata from the static declaration, so the
+    registry state must not change a single byte of output.
+    """
+    from autoresearch.models.recipe import foundation
+    from autoresearch.models.recipe import registry as reg
+
+    before = dict(reg._ESTIMATORS)
+    try:
+        # (a) foundation NOT registered — the extra-less / non-opted environment.
+        reg._ESTIMATORS.pop("tabpfn", None)
+        without_foundation = gen.render()
+        # (b) foundation registered — the extra-installed, opted-in environment.
+        reg.register_estimator(foundation._TABPFN_SPEC)
+        assert "tabpfn" in reg._ESTIMATORS
+        with_foundation = gen.render()
+    finally:
+        reg._ESTIMATORS.clear()
+        reg._ESTIMATORS.update(before)
+
+    assert without_foundation == with_foundation, (
+        "Contract bytes depend on whether foundation is registered — the drift is back."
+    )
+    # And the tabpfn row is present in both, by declaration, with its caveat.
+    assert "**tabpfn**" in without_foundation
+    assert "enable-foundation-models" in without_foundation
+
+
 def test_contract_stays_compact():
     size = AGENT_MD.stat().st_size
     assert size <= SIZE_CEILING_BYTES, (

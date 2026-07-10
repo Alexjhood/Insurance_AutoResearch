@@ -39,7 +39,11 @@ from autoresearch.controller.proposal_schema import (  # noqa: E402
     DERIVED_PROPOSAL_FIELDS,
     SCIENTIFIC_PROPOSAL_FIELDS,
 )
-from autoresearch.models.recipe import enable_foundation_models, menu as recipe_menu  # noqa: E402
+from autoresearch.models.recipe import menu as recipe_menu  # noqa: E402
+from autoresearch.models.recipe.foundation_specs import (  # noqa: E402
+    FOUNDATION_ESTIMATOR_NAMES,
+    FOUNDATION_ESTIMATOR_SPECS,
+)
 from autoresearch.utils.integrity import PROTECTED_RELATIVE_PATHS  # noqa: E402
 
 AGENT_MD = REPO_ROOT / "AGENT.md"
@@ -114,23 +118,26 @@ def render() -> str:
     proposal_fields = ", ".join(f"`{f}`" for f in SCIENTIFIC_PROPOSAL_FIELDS)
     derived_fields = ", ".join(f"`{f}`" for f in DERIVED_PROPOSAL_FIELDS)
 
-    enable_foundation_models()
+    # Estimator table is built from the *always-registered* builtins plus the
+    # *static* foundation declarations (foundation_specs) — never from whichever
+    # optional extras happen to be importable in this interpreter. That is the
+    # drift fix: the contract's bytes are identical whether or not [foundation]
+    # is installed. Foundation rows are annotated with their opt-in/extra caveat.
     rmenu = recipe_menu()
-    estimator_lines = "\n".join(
+    builtin_estimator_lines = [
         f"- **{name}** — obj {sorted(info['objectives'])}; enc {sorted(info['encodings'])}"
         + (" (early-stop)" if info["supports_early_stopping"] else "")
         for name, info in rmenu["estimators"].items()
-    )
+        if name not in FOUNDATION_ESTIMATOR_NAMES
+    ]
+    foundation_estimator_lines = [
+        f"- **{spec.name}** — obj {sorted(spec.objectives)}; enc {sorted(spec.encodings)}"
+        + (" (early-stop)" if spec.supports_early_stopping else "")
+        + f" ({spec.caveat})"
+        for spec in FOUNDATION_ESTIMATOR_SPECS
+    ]
+    estimator_lines = "\n".join(builtin_estimator_lines + foundation_estimator_lines)
     structure_list = ", ".join(f"`{s}`" for s in rmenu["structures"])
-
-    # Foundation estimators (TabPFN, ...) only appear here when the run enabled
-    # them AND the [foundation] extra is installed; when present, the agent needs
-    # the extra operating notes they carry (no early stopping, subsampled context,
-    # minutes-not-seconds per fit).
-    _foundation_present = "tabpfn" in rmenu["estimators"]
-    foundation_note = ""
-    if _foundation_present:
-        foundation_note = ""
 
     return f"""\
 <!-- GENERATED FILE — DO NOT EDIT BY HAND.
@@ -305,7 +312,7 @@ Target *shape* → objective (the handoff names the active target's shape):
 **has zeros** (pure premium / incidence) → tweedie/poisson/squared_error;
 **counts** → poisson/tweedie/squared_error; **strictly positive** (severity) →
 gamma/squared_error. Features default to all eligible predictors; restrict with
-`model.feature_inclusions/exclusions` using names from the handoff.{foundation_note}
+`model.feature_inclusions/exclusions` using names from the handoff.
 
 ### Option B — run-local script (escape hatch, for novel models)
 

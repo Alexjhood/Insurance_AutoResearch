@@ -32,6 +32,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from autoresearch.models.recipe.foundation_specs import (
+    foundation_packages_available,
+    foundation_spec,
+)
 from autoresearch.models.recipe.registry import (
     RecipeError,
     get_encoding,
@@ -40,6 +44,39 @@ from autoresearch.models.recipe.registry import (
     list_structures,
 )
 from autoresearch.targets import BURNING_COST, FREQUENCY, SEVERITY, normalise_target_mode
+
+
+def _foundation_unavailable_message(name: str) -> str | None:
+    """Explain *why* a known foundation estimator is not usable right now.
+
+    Returns ``None`` when ``name`` is not a foundation estimator (so the caller
+    falls back to the generic "unknown estimator" error), otherwise a specific,
+    actionable message distinguishing the two failure causes the drift fix cares
+    about:
+
+    * the ``[foundation]`` extra is not importable in this environment, or
+    * the extra is present but the run did not opt in
+      (``bootstrap-track --enable-foundation-models``).
+
+    Foundation metadata is always declared (see ``foundation_specs``); only the
+    executable registration is gated, so this message replaces the misleading
+    "unknown estimator" that both causes used to surface as.
+    """
+    spec = foundation_spec(name)
+    if spec is None:
+        return None
+    if not foundation_packages_available(spec):
+        return (
+            f"estimator {name!r} is a foundation model and needs the optional "
+            "[foundation] extra, which is not installed in this environment. "
+            "Install it (`pip install -e '.[foundation]'`) and enable it for the "
+            "run with `bootstrap-track --enable-foundation-models`."
+        )
+    return (
+        f"estimator {name!r} is a foundation model and is not enabled for this "
+        "run. Start the run with `bootstrap-track --enable-foundation-models` "
+        "(or set AUTORESEARCH_FOUNDATION_MODELS=1) so it registers."
+    )
 
 
 STAGE_KEYS = {"estimator", "objective", "encoding", "params", "early_stopping", "target"}
@@ -137,7 +174,8 @@ def _validate_stage(
     try:
         spec = get_estimator(estimator_name)
     except RecipeError as exc:
-        errors.append(f"{where}.estimator: {exc}")
+        foundation_hint = _foundation_unavailable_message(estimator_name)
+        errors.append(f"{where}.estimator: {foundation_hint or exc}")
         return
 
     objective = stage.get("objective")
