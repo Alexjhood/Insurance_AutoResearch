@@ -1,8 +1,8 @@
 # Orchestration Build Notes
 
 **Branch:** `orchestration` (from `MultiDataset`)
-**Status:** Phases 1–4 complete. Full suite green (final Phase 4 count recorded
-below); `generate_agent_contract.py --check` passes. Phase 5 not started.
+**Status:** Phases 1–5 complete. Full suite green (561 passed, 2 skipped);
+`generate_agent_contract.py --check` passes.
 
 This is the review entry point for the implementation of
 `docs/internal/orchestration_design.md`, per the execution constraints in
@@ -46,15 +46,17 @@ Baseline before any work: **433 passed, 2 skipped**.
 
 | # | Criterion | Status |
 |---|---|---|
-| 1 | Full pytest green; `generate_agent_contract.py --check` passes | ✅ 539 passed / 2 skipped; check in sync |
+| 1 | Full pytest green; `generate_agent_contract.py --check` passes | ✅ 561 passed / 2 skipped; check in sync |
 | 2 | Stub end-to-end campaign: `new` → 2 × `spawn --wait` → `collect`; correct cycle counts, champion facts from child registry, ≥1 provoked distress flag | ✅ (`no_finish_delegation` provoked via `stub-no-finish`) |
 | 3 | Parallel: 2 detached stub delegations, `status` shows both, manifest lock prevents bootstrap races | ✅ 3 detached stubs live concurrently; lock unit test + concurrent smoke |
 | 4 | Guard: orchestrator allow/deny cases; existing guard tests unchanged | ✅ all five required cases; pre-existing tests unchanged |
 | 5 | Playoff fixture passes; consolidation promotion fires the holdout-eval hook | ✅ Three eligible finalists + one baseline exclusion; protected hook stub called exactly once for the clean final promotion |
-| 6 | `list-backends` prints registry + metadata; `backend-stats` aggregates a fixture manifest | 🟡 `list-backends` ✅ (scorecard column renders "—"); `backend-stats` is Phase 5 |
+| 6 | `list-backends` prints registry + metadata; `backend-stats` aggregates a fixture manifest | ✅ scorecard appended per entry; `backend-stats` aggregates fixture roots and live campaigns |
 | 7 | Single-agent smoke test proves no Orchestration-brief block and no behaviour change | ✅ `test_single_agent_handoff_has_no_orchestration_brief` |
 | 8 | Build notes exist | ✅ this file |
 | 9 | Phase 3 mixed Claude/Codex campaign using zero-cost substitutes | ✅ `stub` on `claude` + `stub-codex` on `codex`; both 1/1 cycles, clean exits; Codex usage parsed |
+| 10 | Phase 5: `ORCHESTRATOR.md`, `docs/RUN_ORCHESTRATED.md`, CLI/architecture/README docs | ✅ all present; `tests/test_orchestration_campaign.py` asserts contract + doc presence and key safety guidance |
+| 11 | Phase 5: `orchestrate note` / `report` / `backend-stats` | ✅ 22 fixture tests; stub campaign drove all three from the documented commands |
 
 ---
 
@@ -228,6 +230,78 @@ public entry points. **No protected file was touched.**
   final lineage, both reports, manifest transitions, CLI modes, and invocation
   of the existing protected promotion hook. No child process or model runs.
 
+### Phase 5 — contract, docs, campaign logging, telemetry rollup
+
+Design §§4.7, 6, 7, 8. Three new modules, three new CLI subcommands, one new
+contract, one new user doc, and documentation in the three existing surfaces. No
+protected file was touched; no shared single-agent path changed except two
+additive fields (below).
+
+- **`ORCHESTRATOR.md`** — the orchestrator's contract, following design §6's
+  outline: role, workflow, brief, delegation heuristics, backend choice
+  (registry → escalation ladder → trial protocol), reading reports (a
+  distress-response table covering all seven flags), campaign log, playoff and
+  final report, takeover, hard constraints. Same register as AGENT.md: imperative,
+  numbered, no filler. **Hand-authored, not generator-owned** — see deviation 24.
+- **`docs/RUN_ORCHESTRATED.md`** — the user-facing quick start: prerequisites,
+  launching an orchestrator session (`AUTORESEARCH_SCOPE=orchestrator` and the
+  auto-bind alternative), `orchestrate new`, backend selection, brief authoring,
+  `--dry-run`, sequential and parallel campaign transcripts, the distress table,
+  `kill`, respawn / `--continue-run` / `--seed-champion`, the playoff (including
+  interactive resume), takeover, the campaign log and final report, the backend
+  scorecard, where to look afterward, and a zero-cost stub smoke sequence.
+- **`campaign_log.py` — `orchestrate note`.** `notes.json` is the source of truth:
+  a list of frozen `Note` records (`timestamp`, `kind`, `text`, optional
+  `delegation_id`), with `kind` from a closed set (`plan`, `reflection`,
+  `takeover`, `decision`, `other`). `append_note` validates the delegation id
+  against the manifest, then appends and re-renders under the **manifest lock**, so
+  a note written while a detached spawner mutates the manifest cannot lose either
+  write. `ORCHESTRATION_LOG.md` is *generated* — `render_campaign_log` is a pure
+  function of (manifest, notes) with no clock in it, so regeneration is
+  byte-identical and a hand-edited log is simply overwritten. Framework-computed
+  facts (campaign header, delegation table) render in their own sections;
+  operator commentary renders in its own. They never interleave.
+- **`campaign_report.py` — `orchestrate report`.** `build_campaign_report` is a
+  pure aggregation over the manifest plus the collected delegation reports;
+  `write_campaign_report` persists `campaign_report.json` + `CAMPAIGN_REPORT.md`
+  and, in the same locked read-modify-write, stores the report path in the
+  manifest and applies `finalized_status`. The payload has exactly two top-level
+  content sections: `framework_computed` (cycle budget/committed/used/remaining,
+  per-delegation facts, experiments by decision, promotions and mean promoted
+  Gini lift, distress counts by flag, repair requests per cycle, playoff summary,
+  final champion lineage, wall clock, tokens and cost) and `agent_testimony` (the
+  verbatim `finish-delegation` summaries). A delegation whose report was never
+  collected is named in `missing_reports` and contributes to **no** aggregate.
+- **`stats.py` — `orchestrate backend-stats`.** Walks every
+  `<root>/*/orchestration.json` and every `reports/<did>.json` beneath it, keyed
+  by `delegation.backend`: campaigns, delegations, cycles, promotions, promotion
+  rate (promotions ÷ cycles), distress rate overall and per flag, repair attempts
+  per cycle, mean promoted Gini lift, and total / per-cycle / per-promotion cost.
+  `--orchestrations-root` (and the `root` parameter) makes every test run against
+  a fixture directory, so the suite never depends on the developer's local
+  campaigns. `scorecard()` feeds `list-backends`.
+- **`list-backends` integration.** `_orchestrate_list_backends` now passes
+  `scorecard()` into the existing `format_backend_table` stats slot. The curated
+  registry remains the only source of spawnable backends: the scorecard is looked
+  up *by* registry name and can neither add nor remove an entry. A backend with no
+  delegations still prints `scorecard: — (no delegations recorded yet)`, so a
+  never-used backend is visibly untested rather than silently absent.
+- **Additive schema.** `Orchestration` gains `campaign_report: str | None`;
+  the delegation report payload gains `repairs: {requests, max_attempts_in_a_cycle}`.
+  Both are backward-compatible (`None` / absent on old manifests and reports).
+- **Tests** — `tests/test_orchestration_campaign.py`, 22 tests, entirely fixture
+  based: structured note persistence and deterministic re-render (including that a
+  hand-edited log is restored byte-for-byte); note validation; campaign report
+  aggregation with testimony quarantined out of `framework_computed`; missing
+  reports excluded from aggregates; missing cost never becoming `$0`; partial cost
+  naming its covered delegations; completed-playoff lineage in the final report;
+  status/report-path persistence and `finalized_status` cases; backend stats across
+  two campaigns and two backends with hand-checked promotion-rate and distress
+  arithmetic; unknown-vs-zero rates; empty root; `list-backends` scorecard
+  integration; CLI parsing and dispatch for all three subcommands; and
+  contract/documentation presence including every distress flag and the key safety
+  rules.
+
 ---
 
 ## Two real bugs the stub backend caught
@@ -383,6 +457,69 @@ Worth recording, because they are the argument for the stub existing.
     from single-agent runs ignore the new reader and retain prior behaviour. It
     is required because interactive playoff decisions happen in later CLI
     processes, after the in-memory target override used during bootstrap is gone.
+24. **`ORCHESTRATOR.md` is hand-authored, not generator-owned.** The build prompt
+    asks for a proposal rather than a unilateral decision, so: *keep it out of the
+    generator.* `scripts/generate_agent_contract.py` exists to solve two problems
+    ORCHESTRATOR.md does not have — (a) keeping three byte-identical mirrors
+    (`AGENT.md`/`AGENTS.md`/`CLAUDE.md`) in sync for three harnesses, and (b)
+    injecting content *derived from the installed registry* (the recipe menu via
+    `enable_foundation_models()` + `recipe_menu()`). ORCHESTRATOR.md has exactly
+    one output file, is loaded on request rather than auto-loaded by a harness, and
+    contains no registry-derived content: the backend list is deliberately *not*
+    inlined, because the contract's whole point is to send the orchestrator to
+    `orchestrate list-backends` at runtime. Folding it into the generator would
+    buy nothing and would extend the generator's known environment-dependence
+    hazard (see "Pre-flight") to a second file. **Revisit if** ORCHESTRATOR.md ever
+    needs to inline the backend registry or the recipe menu, or if a second
+    orchestrator harness needs its own mirror — either would make it the
+    generator's kind of problem. The contract's presence and its safety guidance
+    are covered by
+    `test_orchestrator_contract_exists_and_carries_the_safety_guidance` instead,
+    which also fails if a distress flag is added without a documented response.
+25. **Phase 5 lands three modules, not one.** Design §4's file list predates these
+    commands and names none of them. `campaign_log.py` (operator commentary +
+    render), `campaign_report.py` (campaign aggregation), and `stats.py`
+    (cross-campaign scorecard) have different inputs, different lifetimes, and only
+    `stats.py` reads across campaigns. Module layout is the build agent's to decide.
+26. **`Orchestration.campaign_report` and the report's `repairs` block are new
+    fields.** Design §4.1's sketch has no campaign-level report pointer, but the
+    Phase 5 requirement "campaign status and report paths are updated consistently"
+    needs one. `repairs` is needed because the §4.7 scorecard asks for "repair
+    attempts per cycle", which no existing field carried: `_max_repair_attempts_seen`
+    answers a *different* question (did any one cycle burn all 3 attempts — the
+    `repair_exhausted` predicate). Both fields are additive and nullable/absent-safe.
+27. **`orchestrate report` finalizes status conservatively.** It transitions
+    `active → completed` only when every delegation is terminal. A `consolidating`
+    campaign is left alone — `playoff.py` owns that transition and a half-finished
+    gauntlet is not a finished campaign — and `completed`/`abandoned` are terminal.
+    Running `report` mid-campaign is therefore safe and non-destructive: it writes
+    an honest interim report and leaves the status as it found it. Encoded in the
+    pure `finalized_status()` and unit-tested for all four cases.
+28. **`backend-stats` gained `--orchestrations-root`.** A new flag, but on a new
+    command, and required by the Phase 5 instruction that tests never depend on
+    existing local campaigns. It is also the honest way to score an archived set of
+    campaigns. `list-backends` always uses the default root.
+29. **Design §7 splits across two commands.** §7 asks `orchestrate report` to give
+    "cycles used vs. budget, spend per promotion, distress counts per backend".
+    Cycles, spend-per-promotion, and campaign-wide distress counts are in
+    `orchestrate report`; distress **per backend** is in `orchestrate backend-stats`,
+    because a single campaign rarely has enough delegations per backend for a rate
+    to mean anything, and §4.7 already specifies exactly that table cross-campaign.
+    The campaign report names each delegation's backend, so a reader can still
+    attribute any single campaign's distress by hand.
+30. **A rate over zero observations is `None`, not `0.0`.** `promotion_rate` for a
+    backend with zero cycles, `cost_per_promotion` with zero promotions, and
+    `repair_attempts_per_cycle` with zero cycles all render `—`. The same rule
+    drives cost: `cost_usd` is `None` unless at least one delegation reported one,
+    and the campaign report names which delegations a partial total covers. The
+    alternative — printing `$0.00` for an unmeasured campaign — is the exact lie
+    the telemetry rollup exists to prevent.
+31. **Reports predating the `repairs` field contribute 0 repair requests.** They
+    are counted as delegations and cycles normally. This is a count, not a cost:
+    the older stub campaigns genuinely provoked no repairs, and any report can be
+    regenerated with `orchestrate collect`. Contrast with cost, where absent data
+    is `None` rather than 0, because a missing *measurement* and a measured *zero*
+    are different claims.
 
 ---
 
@@ -424,6 +561,27 @@ Worth recording, because they are the argument for the stub existing.
 - **Auto promotion is fail-closed.** A non-empty check map, all checks exactly
   true, advisory `promote`, and hard-guardrail `passed=true` are all required;
   absent evidence rejects.
+- **`note --kind` is a closed set** (`plan`, `reflection`, `takeover`, `decision`,
+  `other`), enforced by argparse *and* by the `Note` record. A free-text kind would
+  make the log unskimmable within one campaign.
+- **An empty note is refused.** `--text "   "` raises rather than recording an
+  entry that says nothing.
+- **The campaign log carries no metrics.** The delegation table lists id, backend,
+  track, run, budget, and status — facts that cannot go stale between renders.
+  Champion Gini lives in the delegation reports and the campaign report, which are
+  regenerated from registries; duplicating it into a narrative log would create a
+  second, silently-drifting source of truth.
+- **`mean_promoted_gini_lift` is the mean of `paired_summary.mean_lift`** over
+  experiments decided `promote` (not `local_promote`: a local promotion is
+  explicitly *not* a champion-beating result). Experiments whose comparison
+  recorded no lift are skipped rather than treated as zero lift.
+- **`backend-stats` scores every delegation that has a collected report**, not only
+  `completed` ones. A `failed` or `timed_out` delegation is precisely the evidence
+  the distress rate exists to surface. Delegations without a report are counted in
+  `skipped_missing_report` and contribute nothing.
+- **`scorecard()` swallows `OSError` and returns `{}`.** `list-backends` must keep
+  working when `artifacts/orchestrations/` is absent or unreadable — the registry
+  is the load-bearing half of that output.
 
 ---
 
@@ -722,6 +880,121 @@ proves an interrupted completed import recovers without a second fit.
 
 ---
 
+## Exact commands run (Phase 5 milestone)
+
+The design's Phase 5 milestone is "a full campaign driven purely from the
+documented orchestrator workflow by a fresh session, no folklore needed". Every
+command below is copied from `docs/RUN_ORCHESTRATED.md`; the only substitution is
+the zero-cost `stub` / `stub-no-finish` backends in place of real sub-agents
+(build-prompt rule 5). The suite and the contract check ran first.
+
+```bash
+.venv/bin/python -m pytest
+# 561 passed, 2 skipped in 48.79s
+.venv/bin/python scripts/generate_agent_contract.py --check
+# AGENT.md (and harness mirrors) in sync.
+
+.venv/bin/autoresearch orchestrate new --dataset french_motor --total-cycles 2 \
+  --model-provider anthropic --model-name claude-opus-4-8
+# orchestration_id: 20260710T134047Z
+
+AUTORESEARCH_SKIP_PYTEST_GATE=1 .venv/bin/autoresearch orchestrate spawn \
+  --orchestration-id 20260710T134047Z --brief p5_d01.json --backend stub           --wait
+AUTORESEARCH_SKIP_PYTEST_GATE=1 .venv/bin/autoresearch orchestrate spawn \
+  --orchestration-id 20260710T134047Z --brief p5_d02.json --backend stub-no-finish --wait
+
+.venv/bin/autoresearch orchestrate collect --orchestration-id 20260710T134047Z
+.venv/bin/autoresearch orchestrate note    --orchestration-id 20260710T134047Z \
+  --kind reflection --delegation d01 --text "Stub d01 behaved: one cycle, decision recorded, testimony present."
+.venv/bin/autoresearch orchestrate note    --orchestration-id 20260710T134047Z \
+  --kind decision --text "d02 exited without finish-delegation as designed. Its report still stands; only the testimony is missing."
+.venv/bin/autoresearch orchestrate report  --orchestration-id 20260710T134047Z
+.venv/bin/autoresearch orchestrate backend-stats
+.venv/bin/autoresearch orchestrate list-backends
+```
+
+`ORCHESTRATION_LOG.md` — note the two sections, and that no operator text has
+leaked into the framework-computed half:
+
+```text
+## Campaign (framework-computed)
+- Cycle budget: 2 committed of 2 (0 remaining)
+- Orchestrator model: anthropic/claude-opus-4-8
+
+## Delegations (framework-computed)
+| d01 | stub           | claude | `20260710T134055Z` | 1 | completed |
+| d02 | stub-no-finish | claude | `20260710T134129Z` | 1 | completed |
+
+## Operator log
+### 2026-07-10T13:43:10Z — reflection · d01
+### 2026-07-10T13:43:17Z — decision
+```
+
+`orchestrate report` (abridged; status went `active → completed` because both
+delegations were terminal and no playoff was in flight):
+
+```text
+### Delegations
+| d01 | stub           | 1/1 | global_mean | 0 | all_rejected, champion_is_baseline |
+| d02 | stub-no-finish | 1/1 | global_mean | 0 | no_finish_delegation, all_rejected, champion_is_baseline |
+
+### Experiments and promotions
+- Decisions: reject 2   · Promotions: 0 (local: 0)
+- Mean Gini lift of promoted experiments: —
+
+### Distress
+- `all_rejected`: 2 delegation(s) · `no_finish_delegation`: 1 · `champion_is_baseline`: 2
+
+### Wall clock and cost
+- Cost: not reported
+- No delegation reported a provider cost (d01, d02). This campaign is unmeasured, not free.
+
+## Agent testimony
+### d01  Scripted stub delegation. Every cycle proposed a constant recipe …
+### d02  _No summary: this sub-agent never called `finish-delegation`._
+```
+
+`orchestrate backend-stats` rolled up all five stub campaigns from Phases 1–5:
+
+```text
+Backend scorecard across 5 campaign(s):
+- stub            delegations=7  cycles=12  campaigns=5  distress_rate=1  cost_usd=not reported
+- stub-codex      delegations=1  cycles=1   campaigns=1  distress_rate=1  cost_usd=not reported
+- stub-no-finish  delegations=3  cycles=3   campaigns=3  distress_rate=1  cost_usd=not reported
+                  distress by flag: all_rejected 1, no_finish_delegation 1, champion_is_baseline 1
+```
+
+and `list-backends` appended it without changing the registry:
+
+```text
+- stub  [TRIAL]
+    scorecard: 7 delegations / 12 cycles; promotion_rate=0.00; distress_rate=1.00
+- claude-sonnet-low  [TRIAL]
+    scorecard: — (no delegations recorded yet)
+```
+
+**No playoff in this smoke run.** Both stub champions are `global_mean`, so both
+delegations carry `champion_is_baseline` and the playoff correctly refuses:
+"No eligible finalists". Playoff → lineage → final-report integration is proved by
+`test_campaign_report_carries_completed_playoff_lineage` against a completed
+playoff fixture, and by Phase 4's own gauntlet fixture. Making the stub beat the
+baseline would require it to do real science.
+
+**One observation, not a Phase 5 bug.** The guard's orchestrator auto-bind did not
+fire for this build session, because the smoke commands passed
+`--orchestration-id $OID` (the guard's `_flag_value` sees the literal `$OID`) and
+piped `orchestrate new`'s output through `tail`, so the fallback
+`_orchestration_id_from_post_payload` never saw the id either — and its regex is
+case-sensitive, so the human-readable `Orchestration <id> created` line would not
+have matched anyway. The documented workflow pastes literal ids and does not pipe,
+so this is a property of how the build agent typed the commands. The session was
+bound the supported way (writing the `{"mode": "orchestrator", "orchestration_id":
+…}` scope file, exactly what `AUTORESEARCH_SCOPE=orchestrator` does at
+`SessionStart`) to read the generated log. Worth a one-line fix to the
+post-payload regex later; out of scope here.
+
+---
+
 ## Open questions for later phases (raise with Alex; do not improvise)
 
 1. **`--permission-mode acceptEdits` sufficiency** — the last `TODO(pin)`; needs
@@ -781,5 +1054,25 @@ usage shape still require the deliberately deferred paid validation campaign.
 - **Whether `--permission-mode acceptEdits` suffices for a headless sub-agent's
   Bash calls** — the one remaining `TODO(pin)`; see "CLI flag pinning". Needs one
   real spawn to settle.
-- **Phase 5**: `ORCHESTRATOR.md`,
-  `docs/RUN_ORCHESTRATED.md`, `orchestrate note`/`report`/`backend-stats`.
+- **A playoff inside a *stub* campaign.** Impossible by construction (every stub
+  champion is the baseline). Covered by fixtures in Phase 4 and by
+  `test_campaign_report_carries_completed_playoff_lineage`; a real end-to-end
+  playoff belongs to Alex's post-review validation campaign.
+- **Provider cost in any campaign report.** No stub reports one, and the Codex
+  JSONL adapter surfaces tokens but no dollar cost. Every cost path therefore
+  exercises the `None` branch in practice; the summing branch is fixture-tested
+  only. The first real campaign is what will show whether `cost_per_promotion` is
+  the number Alex actually wants.
+- **The guard's orchestrator auto-bind regex** does not match `orchestrate new`'s
+  human-readable "Orchestration \<id\> created" line (case-sensitive), and cannot
+  resolve an unexpanded `--orchestration-id $VAR`. Neither affects the documented
+  workflow; see the Phase 5 milestone section. Left alone rather than touching
+  Phase 2 guard code during a docs-and-reporting phase.
+- **Memory-aggregator rollup of the scorecard.** Design §4.7 marks this optional
+  ("*optionally* rolled into the cross-run memory aggregator"), and it was not
+  built: `orchestrate backend-stats` reads orchestration manifests and delegation
+  reports directly, which is sufficient for both §4.7 consumers (`list-backends`
+  and Alex reviewing `backends.toml`). Doing the rollup would mean extending the
+  aggregator's schema to carry the distress and repair predicates, which live only
+  in delegation reports. Worth revisiting only if the scorecard needs to survive
+  deletion of `artifacts/orchestrations/`.

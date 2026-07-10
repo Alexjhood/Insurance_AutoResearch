@@ -217,6 +217,7 @@ class Orchestration:
     model_name: str | None = None
     delegations: tuple[Delegation, ...] = ()
     consolidation: Consolidation = Consolidation()
+    campaign_report: str | None = None
 
     def __post_init__(self) -> None:
         if not ORCHESTRATION_ID_RE.fullmatch(self.orchestration_id):
@@ -287,6 +288,7 @@ class Orchestration:
             "cycles_committed": self.cycles_committed,
             "delegations": [d.to_dict() for d in self.delegations],
             "consolidation": self.consolidation.to_dict(),
+            "campaign_report": self.campaign_report,
         }
 
     @classmethod
@@ -302,6 +304,7 @@ class Orchestration:
             model_name=raw.get("model_name"),
             delegations=tuple(Delegation.from_dict(d) for d in raw.get("delegations") or ()),
             consolidation=Consolidation.from_dict(raw.get("consolidation")),
+            campaign_report=raw.get("campaign_report"),
         )
 
 
@@ -344,13 +347,33 @@ def log_markdown_path(orchestration_id: str) -> Path:
     return orchestration_dir(orchestration_id) / "ORCHESTRATION_LOG.md"
 
 
-def _relative(path: Path) -> str:
-    """Store paths relative to the orchestration dir where possible (portable)."""
+def notes_path(orchestration_id: str) -> Path:
+    """Structured operator commentary — the source of truth for the campaign log."""
+
+    return orchestration_dir(orchestration_id) / "notes.json"
+
+
+def campaign_report_json_path(orchestration_id: str) -> Path:
+    return orchestration_dir(orchestration_id) / "campaign_report.json"
+
+
+def campaign_report_markdown_path(orchestration_id: str) -> Path:
+    return orchestration_dir(orchestration_id) / "CAMPAIGN_REPORT.md"
+
+
+def relative_to_project(path: Path) -> str:
+    """Store paths relative to the project root where possible (portable)."""
 
     try:
         return str(path.relative_to(PROJECT_ROOT))
     except ValueError:
         return str(path)
+
+
+def _relative(path: Path) -> str:
+    """Store paths relative to the orchestration dir where possible (portable)."""
+
+    return relative_to_project(path)
 
 
 # ── persistence ──────────────────────────────────────────────────────────────

@@ -15,9 +15,12 @@ from __future__ import annotations
 __all__ = [
     "brief",
     "backends",
+    "campaign_log",
+    "campaign_report",
     "manifest",
     "monitor",
     "playoff",
     "report",
     "spawner",
+    "stats",
 ]

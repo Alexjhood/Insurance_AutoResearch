@@ -874,6 +874,12 @@ def _cmd_orchestrate(config, args) -> int:
         return _orchestrate_kill(args)
     if subcommand == "collect":
         return _orchestrate_collect(args)
+    if subcommand == "note":
+        return _orchestrate_note(args)
+    if subcommand == "report":
+        return _orchestrate_report(args)
+    if subcommand == "backend-stats":
+        return _orchestrate_backend_stats(args)
     if subcommand == "finish-delegation":
         return _orchestrate_finish_delegation(config, args)
     build_parser().error(f"Unknown orchestrate subcommand: {subcommand}")
@@ -882,8 +888,73 @@ def _cmd_orchestrate(config, args) -> int:
 
 def _orchestrate_list_backends() -> int:
     from autoresearch.orchestration.backends import format_backend_table, load_backends
+    from autoresearch.orchestration.stats import scorecard
 
-    print(format_backend_table(load_backends()), end="")
+    # The registry stays the only source of spawnable backends; the scorecard is
+    # appended as evidence and never adds or removes an entry.
+    print(format_backend_table(load_backends(), scorecard()), end="")
+    return 0
+
+
+def _orchestrate_note(args) -> int:
+    from autoresearch.orchestration.campaign_log import append_note
+    from autoresearch.orchestration.manifest import (
+        log_markdown_path,
+        resolve_orchestration_id,
+    )
+
+    parser = build_parser()
+    try:
+        orchestration_id = resolve_orchestration_id(args.orchestration_id)
+        note = append_note(
+            orchestration_id,
+            text=args.text,
+            kind=args.kind,
+            delegation_id=args.delegation,
+        )
+    except (ValueError, KeyError, FileNotFoundError) as exc:
+        parser.error(str(exc))
+        return 2
+
+    print(json.dumps(note.to_dict(), indent=2, sort_keys=True))
+    print(f"\nCampaign log regenerated: {log_markdown_path(orchestration_id)}")
+    return 0
+
+
+def _orchestrate_report(args) -> int:
+    from autoresearch.orchestration.campaign_report import write_campaign_report
+    from autoresearch.orchestration.manifest import resolve_orchestration_id
+
+    parser = build_parser()
+    try:
+        result = write_campaign_report(resolve_orchestration_id(args.orchestration_id))
+    except (ValueError, KeyError, FileNotFoundError) as exc:
+        parser.error(str(exc))
+        return 2
+
+    if args.json:
+        print(json.dumps(result["payload"], indent=2, sort_keys=True))
+    else:
+        print(result["markdown_path"].read_text(encoding="utf-8"), end="")
+    print(f"\nWrote {result['json_path']}\n      {result['markdown_path']}")
+    return 0
+
+
+def _orchestrate_backend_stats(args) -> int:
+    from autoresearch.orchestration.stats import collect_backend_stats, format_backend_stats
+
+    parser = build_parser()
+    root = Path(args.orchestrations_root) if args.orchestrations_root else None
+    try:
+        stats = collect_backend_stats(root)
+    except OSError as exc:
+        parser.error(str(exc))
+        return 2
+
+    if args.json:
+        print(json.dumps(stats, indent=2, sort_keys=True))
+    else:
+        print(format_backend_stats(stats), end="")
     return 0
 
 
@@ -1155,6 +1226,8 @@ COMMANDS = {
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from autoresearch.orchestration.campaign_log import NOTE_KINDS
+
     parser = argparse.ArgumentParser(prog="autoresearch")
     parser.add_argument("--config", default=None, help="Path to TOML config file.")
     parser.add_argument(
@@ -1495,6 +1568,43 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrate_collect.add_argument("--orchestration-id", dest="orchestration_id", default=None)
     orchestrate_collect.add_argument(
         "--delegation", default=None, help="Only collect this delegation (e.g. d01)."
+    )
+
+    orchestrate_note = orchestrate_subs.add_parser(
+        "note",
+        help="Append a timestamped operator reflection and regenerate ORCHESTRATION_LOG.md.",
+    )
+    orchestrate_note.add_argument("--orchestration-id", dest="orchestration_id", default=None)
+    orchestrate_note.add_argument(
+        "--text", required=True, help="The reflection. Framework facts are not repeated here."
+    )
+    orchestrate_note.add_argument(
+        "--kind", default="reflection", choices=NOTE_KINDS,
+        help="Why you are writing (default: reflection).",
+    )
+    orchestrate_note.add_argument(
+        "--delegation", default=None, help="Attach the note to one delegation (e.g. d01)."
+    )
+
+    orchestrate_report = orchestrate_subs.add_parser(
+        "report",
+        help="Write the final campaign report (JSON + Markdown) and finalize status.",
+    )
+    orchestrate_report.add_argument("--orchestration-id", dest="orchestration_id", default=None)
+    orchestrate_report.add_argument(
+        "--json", action="store_true", help="Print the JSON payload instead of the Markdown."
+    )
+
+    orchestrate_backend_stats = orchestrate_subs.add_parser(
+        "backend-stats",
+        help="Aggregate collected delegation reports into a cross-campaign backend scorecard.",
+    )
+    orchestrate_backend_stats.add_argument(
+        "--orchestrations-root", dest="orchestrations_root", default=None,
+        help="Aggregate campaigns under this directory instead of artifacts/orchestrations/.",
+    )
+    orchestrate_backend_stats.add_argument(
+        "--json", action="store_true", help="Print the JSON payload instead of the table."
     )
 
     orchestrate_finish = orchestrate_subs.add_parser(

@@ -420,6 +420,195 @@ Writes: a full comparison report to `artifacts/cross_track/<timestamp>/compariso
 
 ---
 
+## Orchestration
+
+All `orchestrate` subcommands act on a **campaign** in
+`artifacts/orchestrations/<orchestration-id>/`. `--orchestration-id` resolves to
+the most recent campaign when omitted, mirroring run-id resolution. The
+orchestrator's contract is [ORCHESTRATOR.md](../ORCHESTRATOR.md); the user-facing
+walkthrough is [docs/RUN_ORCHESTRATED.md](RUN_ORCHESTRATED.md).
+
+`orchestrate finish-delegation` is the one **child-side** subcommand: it is run by
+a sub-agent inside its own run and takes the ordinary `--track`/`--run-id` global
+flags. Everything else is orchestrator-side.
+
+### `orchestrate new`
+
+Create a campaign and pin its total cycle budget. Spawns that would exceed the
+budget are refused.
+
+```bash
+autoresearch orchestrate new --dataset porto_seguro --target-mode claim_incidence \
+  --total-cycles 20 --model-provider anthropic --model-name claude-opus-4-8
+```
+
+`--model-provider`/`--model-name` attribute the **orchestrator's own** model, so
+the memory aggregator can tell it apart from its sub-agents. Prints the manifest
+and the new orchestration id.
+
+### `orchestrate list-backends`
+
+Print the spawnable backend registry (`configs/orchestration/backends.toml`) with
+its curated selection metadata, and the measured scorecard beneath each entry.
+
+```bash
+autoresearch orchestrate list-backends
+```
+
+The registry is the only source of spawnable backends; the scorecard is appended
+as evidence and never adds or removes one. A backend with no collected
+delegations renders `scorecard: —` rather than being hidden.
+
+### `orchestrate spawn`
+
+Pre-bootstrap a child run and launch a sub-agent against a brief.
+
+```bash
+autoresearch orchestrate spawn --brief briefs/freq_sev.json --backend claude-sonnet-medium --wait
+autoresearch orchestrate spawn --brief briefs/glm.json --backend codex-gpt-5-5-medium --no-wait
+autoresearch orchestrate spawn --brief briefs/probe.json --backend stub --dry-run
+```
+
+- `--wait` (default) blocks until the sub-agent exits, then builds its report.
+- `--no-wait` launches detached, for parallel delegations. Bootstrap happens under
+  a manifest lock so concurrent spawns cannot race.
+- `--dry-run` prints the exact command argv, the child's `AUTORESEARCH_*`
+  environment, and the composed prompt; it launches nothing.
+- `--memory-access own|all` grants the sub-agent aggregator-mediated cross-run
+  memory access.
+
+### `orchestrate status`
+
+Refresh detached delegation state and print a table: process liveness, cycles
+completed, current champion and `gini_weighted`, last activity, and elapsed
+wall-clock against the per-delegation timeout. A live delegation past its
+allowance is marked `timed_out`; it is never killed automatically.
+
+### `orchestrate kill`
+
+Terminate one detached delegation's process group and record `killed`.
+
+```bash
+autoresearch orchestrate kill --delegation d02
+```
+
+### `orchestrate collect`
+
+Rebuild delegation reports from child-run registry state and record each
+`report_path` in the manifest.
+
+```bash
+autoresearch orchestrate collect
+autoresearch orchestrate collect --delegation d01
+```
+
+Reports are built from the child's registry and its predictions artifact, never
+from the sub-agent's claims. The sub-agent's `finish-delegation` summary is stored
+verbatim as `agent_summary` and never feeds a computed number.
+
+### `orchestrate respawn`
+
+Launch a revised brief after a delegation stops. Defaults to the source
+delegation's backend and a fresh run.
+
+```bash
+autoresearch orchestrate respawn --delegation d02 --brief briefs/d02_revised.json
+autoresearch orchestrate respawn --delegation d02 --brief briefs/more.json --continue-run
+autoresearch orchestrate respawn --delegation d02 --brief briefs/next.json --seed-champion from:d01
+```
+
+`--continue-run` reuses the stopped child's run and champion with a fresh cycle
+budget; its report counts only the new cycles. `--seed-champion from:dNN`
+initialises the new run's champion by replaying a prior delegation's champion.
+Respawn refuses a source whose process is still alive.
+
+### `orchestrate playoff`
+
+Consolidate delegation finalists through an ascending gauntlet in a fresh
+consolidation run.
+
+```bash
+autoresearch orchestrate playoff                      # interactive (default)
+autoresearch orchestrate playoff --include d01,d02,d04
+autoresearch orchestrate playoff --auto-decide
+```
+
+Delegations flagged `champion_is_baseline` are excluded. Finalists are ordered by
+ascending search-validation `gini_weighted`; the weakest seeds the consolidation
+run, and each stronger finalist is replayed as a challenger through the standard
+`cv_bootstrap` gauntlet. `--interactive` stops at each `pending_llm` and prints
+the exact `record-decision` command; re-running `playoff` resumes. `--auto-decide`
+promotes only when every standard gate and hard guardrail passes.
+
+Writes `playoff/playoff_report.json` and `.md`. The consolidation champion is the
+orchestration champion, and its promotion fires the standard holdout evaluation.
+
+### `orchestrate note`
+
+Append a timestamped operator reflection and regenerate `ORCHESTRATION_LOG.md`.
+
+```bash
+autoresearch orchestrate note --kind reflection --delegation d02 \
+  --text "The freq-sev line is real: +0.012 gini with clean calibration."
+```
+
+`--kind` is one of `plan`, `reflection`, `takeover`, `decision`, `other`.
+Structured entries live in `notes.json` and are the source of truth;
+`ORCHESTRATION_LOG.md` is generated from them plus the manifest, and framework
+facts render in separate sections from operator commentary. Do not hand-edit the
+Markdown.
+
+### `orchestrate report`
+
+Write the final campaign report and finalize the campaign's status.
+
+```bash
+autoresearch orchestrate report
+autoresearch orchestrate report --json
+```
+
+Writes `campaign_report.json` + `CAMPAIGN_REPORT.md`, stores the report path in
+the manifest, and marks the campaign `completed` once every delegation is terminal
+and no playoff is in flight (a `consolidating` campaign stays that way — the
+playoff owns that transition). The payload separates `framework_computed` (cycle
+budget and usage, per-delegation facts, experiments by decision, promotions and
+mean promoted Gini lift, distress counts, playoff result, final champion lineage,
+wall clock, usage and cost) from `agent_testimony`. Delegations without a
+collected report are listed and excluded from every aggregate. Cost is `null` when
+no delegation reported one.
+
+### `orchestrate backend-stats`
+
+Aggregate collected delegation reports across all campaigns into the backend
+scorecard (design §4.7 Layer 3).
+
+```bash
+autoresearch orchestrate backend-stats
+autoresearch orchestrate backend-stats --json
+autoresearch orchestrate backend-stats --orchestrations-root /path/to/fixtures
+```
+
+Per backend: campaigns, delegations, cycles, promotions, promotion rate
+(promotions ÷ cycles), distress rate overall and by flag, repair attempts per
+cycle, mean promoted Gini lift, and total/per-cycle/per-promotion cost. A rate
+over zero observations prints `—`, not `0`. A delegation without a collected
+report contributes nothing and is counted as skipped.
+
+### `orchestrate finish-delegation`
+
+**Child-side.** Run by the sub-agent in its own run when its budget is exhausted
+or a brief stop-condition fires.
+
+```bash
+autoresearch --track claude --run-id 20260712T091500Z orchestrate finish-delegation \
+  --summary "3–6 sentences: what you learned, what you'd try next, anything artifactual."
+```
+
+The summary is testimony. The report is generated from the registry either way; a
+sub-agent that never calls this raises the `no_finish_delegation` distress flag.
+
+---
+
 ## Cross-Run Memory Aggregator
 
 All `memory` subcommands operate on the cross-run aggregator, which lives **outside the repo working tree** by default (`~/.autoresearch/<project>/memory/memory.sqlite`, overridable with the `AUTORESEARCH_MEMORY_DIR` environment variable). The aggregator contains **search-split metrics only** — no holdout data. None of these commands change per-run registries.

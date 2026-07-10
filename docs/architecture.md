@@ -40,6 +40,18 @@ src/autoresearch/
 │   ├── insights.py            # validate_insight(), record_insight(), list_insights()
 │   ├── query.py               # query_insights(), run_analysis() — access-gated
 │   └── playbook.py            # build_playbook() — verified insights → latest.md
+├── orchestration/
+│   ├── manifest.py            # Orchestration/Delegation records + manifest lock
+│   ├── backends.py            # Backend registry — configs/orchestration/backends.toml
+│   ├── brief.py               # Brief validation + the handoff's Orchestration block
+│   ├── spawner.py             # Pre-bootstrap child run, compose prompt, launch process
+│   ├── adapters.py            # Per-tool clean-exit detection and usage parsing
+│   ├── monitor.py             # Liveness/progress polling, wall-clock timeouts
+│   ├── report.py              # Delegation report + distress predicates (from registry)
+│   ├── playoff.py             # Consolidation: replay finalists, rank, promote
+│   ├── campaign_log.py        # orchestrate note → ORCHESTRATION_LOG.md
+│   ├── campaign_report.py     # orchestrate report → CAMPAIGN_REPORT.md
+│   └── stats.py               # orchestrate backend-stats — cross-campaign scorecard
 ├── utils/
 │   └── environment.py         # capture_environment() — git SHA, pip freeze, SHA256s
 └── dashboard/
@@ -91,6 +103,48 @@ artifacts/tracks/<track>/runs/<run-id>/registry.sqlite   (per-run, isolated, in 
 - Model identity (`--model-provider`, `--model-name`) is required at `bootstrap-track` so results are attributed to a model in the aggregator.
 - The every-5-cycle checkpoint also writes `pending_reflection.md` to prompt the agent to record evidence-bound insights, and regenerates the playbook when new verified insights land.
 
+## Orchestration
+
+A campaign splits research into taste and mechanics. An interactive
+**orchestrator** conversation plans directions and reads results; headless
+**sub-agents** spawned by `autoresearch orchestrate spawn` execute experiment
+cycles. A sub-agent run *is* a normal tracked run — same contract, same proposal
+inbox, same `run-session-cycles`/`record-decision`, same repair flow. Orchestrated
+mode adds only three things: the run is pre-bootstrapped by the spawner, its
+handoff carries an **Orchestration brief** block (rendered only when the run
+manifest has an `orchestration_id`, so single-agent runs are byte-identical to
+before), and a report is generated from its registry when it ends. That report is
+built from the child's registry and predictions artifact, never from the
+sub-agent's claims; the `finish-delegation` summary is stored verbatim as
+testimony and never feeds a computed number.
+
+Campaign state lives in `artifacts/orchestrations/<orchestration-id>/`:
+`orchestration.json` (the manifest — the single source of truth for which child
+runs belong to the campaign, which the run-scope guard reads), `briefs/`,
+`prompts/`, `logs/`, `reports/`, `playoff/`, `notes.json`, the generated
+`ORCHESTRATION_LOG.md`, and the final `campaign_report.json` +
+`CAMPAIGN_REPORT.md`. Mutations happen under a manifest lock so parallel detached
+spawns cannot race on bootstrap or on the delegation list.
+
+Parallel delegations are independent tracked runs, so nothing changes about
+sequential comparison semantics inside a run. Cross-run consolidation is a
+`playoff`: finalists are replayed into a fresh consolidation run in ascending
+`gini_weighted` order and re-tested head-to-head under the standard gates, so the
+orchestration champion is a fresh statistical result rather than a cross-run
+eyeball. Like `tracks.py`, the whole package is a *caller* of public framework
+entry points — it never touches the integrity-protected evaluation files, and the
+consolidation champion's promotion fires the ordinary protected holdout
+evaluation.
+
+Backend choice is registry-driven. `configs/orchestration/backends.toml` is the
+human-owned list of spawnable model × effort combinations, carrying selection
+metadata (`tier`, `good_for`, `cost_hint`, `status`). `orchestrate backend-stats`
+aggregates collected delegation reports across campaigns into an empirical
+scorecard — promotion rate, distress rate by flag, repair attempts per cycle,
+mean promoted Gini lift, cost per cycle and per promotion — which `list-backends`
+appends beneath each entry. The scorecard is evidence only: it never adds or
+removes a spawnable backend.
+
 ## Run-Scope Guard
 
 Within the repo working tree, runs are physically siblings under `artifacts/tracks/<track>/runs/<run-id>/`. The framework's own commands are already run-scoped, but an agent's *free-form* file access (shell `cat`/`grep`, file reads/edits) could still reach into a sibling run's folder and contaminate an otherwise independent experiment. A harness-level guard closes that channel.
@@ -106,6 +160,7 @@ Policy:
 - A session is **unbound** until it runs its first valid `autoresearch --track …` command, at which point it is automatically **bound** to exactly that run. Binding is keyed on the harness session id, so parallel runs in separate threads stay independent.
 - A **bound research** session is blocked from reading, grepping, or listing any *other* run's folder — in any track, including its own track's siblings — and from enumerating the `runs/` directory. Its own run, `src/`, data, configs, and tests stay fully accessible. The block is enforced by the harness and cannot be overridden by the model.
 - An **unbound** session may inspect source, docs, configs, data, and tests, but raw run artifacts under `artifacts/tracks/<track>/runs` are blocked until binding. Analyst mode is requested with `AUTORESEARCH_SCOPE=analyst` in the launch environment and is the supported way to run a deliberate cross-run analysis thread.
+- An **orchestrator** session (`AUTORESEARCH_SCOPE=orchestrator`, or auto-bound on a successful `orchestrate new`/`orchestrate spawn`) may read its own campaign folder, every child run listed in that campaign's manifest, and the consolidation run — and may drive those runs by explicit `--run-id` for takeover. The child list is re-read from `orchestration.json` on every hook invocation, so newly spawned children are covered immediately. Other orchestrations' folders, runs outside the manifest, implicit run selection, and `runs/` enumeration are denied. Sub-agents are unaffected: they bind as ordinary `research` sessions from the environment the spawner gives them.
 - Because run artifacts are blocked before binding, a research agent must bootstrap before inspecting its own run outputs.
 
 Cross-run knowledge therefore reaches a research agent only through the memory aggregator (when enabled), never through raw reads. Session scope files and the guard log live under `artifacts/tracks/.scope/` (gitignored). The guard **fails open**: any internal error allows the call, so a guard bug can never block legitimate research.

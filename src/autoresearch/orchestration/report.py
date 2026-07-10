@@ -159,6 +159,21 @@ def _max_repair_attempts_seen(run_dir: Path) -> int:
     return highest
 
 
+def _repair_requests_seen(run_dir: Path) -> int:
+    """How many repair requests this run's cycles provoked in total.
+
+    ``_max_repair_attempts_seen`` answers "did any one cycle burn all its
+    attempts" (the ``repair_exhausted`` predicate). The scorecard's
+    "repair attempts per cycle" wants the total instead, so both are recorded.
+    """
+
+    return sum(
+        1
+        for path in run_dir.rglob("repair_request_*.json")
+        if path.stem.rsplit("_", 1)[-1].isdigit()
+    )
+
+
 def _champion_metrics(config: ProjectConfig, experiment_id: str) -> dict[str, float]:
     """Score the champion's predictions on the search-validation split.
 
@@ -298,6 +313,10 @@ def build_report(orch: Orchestration, delegation: Delegation) -> dict[str, Any]:
         "cycles": {"budget": delegation.cycle_budget, "used": cycles_used},
         "champion": champion,
         "experiments": experiments,
+        "repairs": {
+            "requests": _repair_requests_seen(run_dir),
+            "max_attempts_in_a_cycle": _max_repair_attempts_seen(run_dir),
+        },
         "agent_summary": delegation.agent_summary,
         "distress": distress.to_dict(),
         "cost": _cost(delegation, config),
