@@ -1,8 +1,8 @@
 # Orchestration Build Notes
 
 **Branch:** `orchestration` (from `MultiDataset`)
-**Status:** Phases 1–2 complete. Full suite green (514 passed, 2 skipped);
-`generate_agent_contract.py --check` passes. Phases 3–5 not started.
+**Status:** Phases 1–3 complete. Full suite green (528 passed, 2 skipped);
+`generate_agent_contract.py --check` passes. Phases 4–5 not started.
 
 This is the review entry point for the implementation of
 `docs/internal/orchestration_design.md`, per the execution constraints in
@@ -46,7 +46,7 @@ Baseline before any work: **433 passed, 2 skipped**.
 
 | # | Criterion | Status |
 |---|---|---|
-| 1 | Full pytest green; `generate_agent_contract.py --check` passes | ✅ 514 passed / 2 skipped; check in sync |
+| 1 | Full pytest green; `generate_agent_contract.py --check` passes | ✅ 528 passed / 2 skipped; check in sync |
 | 2 | Stub end-to-end campaign: `new` → 2 × `spawn --wait` → `collect`; correct cycle counts, champion facts from child registry, ≥1 provoked distress flag | ✅ (`no_finish_delegation` provoked via `stub-no-finish`) |
 | 3 | Parallel: 2 detached stub delegations, `status` shows both, manifest lock prevents bootstrap races | ✅ 3 detached stubs live concurrently; lock unit test + concurrent smoke |
 | 4 | Guard: orchestrator allow/deny cases; existing guard tests unchanged | ✅ all five required cases; pre-existing tests unchanged |
@@ -54,6 +54,7 @@ Baseline before any work: **433 passed, 2 skipped**.
 | 6 | `list-backends` prints registry + metadata; `backend-stats` aggregates a fixture manifest | 🟡 `list-backends` ✅ (scorecard column renders "—"); `backend-stats` is Phase 5 |
 | 7 | Single-agent smoke test proves no Orchestration-brief block and no behaviour change | ✅ `test_single_agent_handoff_has_no_orchestration_brief` |
 | 8 | Build notes exist | ✅ this file |
+| 9 | Phase 3 mixed Claude/Codex campaign using zero-cost substitutes | ✅ `stub` on `claude` + `stub-codex` on `codex`; both 1/1 cycles, clean exits; Codex usage parsed |
 
 ---
 
@@ -146,6 +147,39 @@ public entry points. **No protected file was touched.**
 - **Tests** — detached wrapper output/exit capture, timeout-without-kill, explicit
   process-group kill, same-run continuation lineage, stopped-process enforcement,
   report accounting, lock concurrency, guard policy, and orchestrator auto-bind.
+
+### Phase 3 — Codex backend
+
+- **`backends.toml`** — added `codex-gpt-5-5-medium`, pinned to the locally
+  configured and locally advertised `gpt-5.5` model at medium reasoning. The
+  entry carries the full design §4.2/§4.7 selection metadata and uses
+  `codex -a never exec --json --sandbox workspace-write ... -` for a headless,
+  sandboxed, stdin-prompted run. Added `stub-codex`, a zero-cost Codex-shaped
+  backend on the `codex` track for integration testing.
+- **`adapters.py`** — tool-specific exit interpretation. Generic backends retain
+  the Phase 1/2 process-exit behaviour. Codex additionally requires a terminal
+  `turn.completed` JSONL event for a clean zero exit and aggregates numeric
+  usage leaves across completed turns, tolerating non-JSON stderr lines.
+- **Detached exit sidecar + manifest** — the wrapper now receives the backend
+  tool name, inspects the completed log, and atomically records `clean_exit` and
+  best-effort `usage` beside the exit code. `Delegation` persists those as
+  backward-compatible optional/additive `clean_exit` and `tool_usage` fields;
+  both `--wait` finalisation and detached `status` consume the same sidecar.
+- **Reports** — existing run-telemetry keys are unchanged; when backend usage is
+  available it is appended at `cost.llm_usage.backend`.
+- **Codex-shaped smoke script** — `scripts/stub_codex_subagent.py` forwards the
+  launch prompt over stdin to the existing scripted research stub, then emits
+  the documented Codex JSONL lifecycle with zero usage. It exercises the real
+  bootstrap → handoff → cycle → decision → finish → report path without an LLM.
+- **Contract parity** — no generated contract edit was needed. The existing
+  generator already emits byte-identical `AGENT.md`, `AGENTS.md`, and
+  `CLAUDE.md` files with the Orchestrated mode subsection. The existing full-file
+  parity test remains, plus a focused assertion that Codex's `AGENTS.md` carries
+  the same subsection.
+- **Tests** — exact command rendering and metadata, Codex template validation,
+  stdin prompt transport through the detached wrapper, clean/incomplete/nonzero
+  exits, nested multi-turn usage aggregation, manifest round-trip, detached
+  monitor propagation, report exposure, and contract parity.
 
 ---
 
@@ -257,6 +291,27 @@ Worth recording, because they are the argument for the stub existing.
     live and its exit status is unknowable. Generating then would create a stale
     report with `status=running`. `collect` refreshes the exit sidecar first and
     produces the authoritative report.
+16. **The configured Codex backend is `gpt-5.5` medium, not the design's
+    illustrative `codex-5.6-luna-medium`.** `codex debug models` on the installed
+    CLI advertises `gpt-5.5`, confirms medium reasoning support, and the repo's
+    `.codex/config.toml` plus console catalog both pin `gpt-5.5`. No local
+    non-executing source recognises a “5.6 Luna” identifier. Using it would make
+    the human-owned registry claim an unverified model; real endpoint validation
+    remains deliberately deferred.
+17. **Codex prompt transport uses stdin with an explicit final `-`, not the
+    design sketch's `{prompt}` argv placeholder.** `codex exec --help` explicitly
+    supports both. Stdin avoids command-line length limits and keeps the full
+    orchestration prompt out of process listings; the existing generic prompt
+    channel already supports it.
+18. **`Delegation` adds `clean_exit` and `tool_usage`.** Design §4.2/§7 requires
+    adapter clean-exit detection and tool-output usage in delegation/campaign
+    telemetry but the §4.1 JSON sketch omits their storage. Both fields are
+    additive, nullable/empty for old manifests, and populated from the detached
+    exit sidecar so `--wait` and later `status` observe identical facts.
+19. **A separate `stub-codex` backend and script simulate Codex JSONL.** Reusing
+    the plain stub with `track = "codex"` would prove track selection but would
+    bypass the new adapter. The shaped stub tests prompt, lifecycle, and usage
+    parsing at zero cost and stays in the registry as a permanent smoke surface.
 
 ---
 
@@ -342,13 +397,31 @@ a sub-agent stalls on a permission prompt, the candidates are
 `--permission-mode bypassPermissions` or an explicit
 `--allowed-tools "Bash Edit Read Write"`.
 
-**Codex** (`/opt/homebrew/bin/codex`, installed). Verified from
-`codex exec --help`: `-m/--model`, `-s/--sandbox {read-only,workspace-write,
-danger-full-access}`, `--json`, `-C/--cd`, `--skip-git-repo-check`,
-`-o/--output-last-message`; prompt via argv or stdin. **There is no
-`--reasoning-effort` and no `--max-turns` on `codex exec`**; effort must go
-through the generic `-c model_reasoning_effort=…` config override, whose key name
-is not verifiable from `--help`. Codex entries land in Phase 3.
+**Codex CLI 0.137.0 — verified without a model invocation:**
+
+| Flag / behaviour | Status |
+|---|---|
+| `exec` | ✅ non-interactive subcommand |
+| `-a/--ask-for-approval never` | ✅ global flag; prevents an impossible headless approval wait |
+| `--json` | ✅ JSONL output; local console adapter documents `turn.completed.usage` |
+| `-s/--sandbox read-only\|workspace-write\|danger-full-access` | ✅ entry pins `workspace-write` |
+| `-C/--cd <dir>` | ✅ entry pins repo working root |
+| `--skip-git-repo-check` | ✅ exists |
+| `-m/--model <model>` | ✅ exists; `codex debug models` advertises `gpt-5.5` |
+| `-c key=value` | ✅ generic TOML config override |
+| `model_reasoning_effort="medium"` | ✅ existing console adapter uses this key; model catalog confirms `gpt-5.5` supports medium |
+| `--color never` | ✅ valid enum value |
+| final prompt `-` / omitted prompt | ✅ stdin prompt transport |
+| `--max-turns` | ❌ absent |
+| dedicated `--reasoning-effort` | ❌ absent; use `-c model_reasoning_effort=…` |
+
+Argument-only probes rejected an unknown flag and an invalid sandbox value;
+the complete pinned argv parsed under `--help`/`--version`. `--version` exits
+before validating config keys, so the effort-key evidence comes from the repo's
+already-tested console adapter and the non-executing local model catalog, not a
+paid call. `backends.py` independently validates the pinned enums, forbids
+dangerous bypass flags and nonexistent `--max-turns`, requires JSONL plus the
+workspace sandbox, and rejects unsupported reasoning values at registry load.
 
 ---
 
@@ -472,6 +545,54 @@ passed (`1 passed`); no live foreign-path tool call was attempted.
 
 ---
 
+## Exact commands run (Phase 3 milestone)
+
+The full suite and contract check passed before applying the documented
+pytest-gate skip to smoke spawns:
+
+```bash
+.venv/bin/python -m pytest
+# 528 passed, 2 skipped
+.venv/bin/python scripts/generate_agent_contract.py --check
+# AGENT.md (and harness mirrors) in sync.
+
+.venv/bin/autoresearch orchestrate new --dataset french_motor --total-cycles 2 \
+  --model-provider openai --model-name gpt-5.5
+# orchestration_id: 20260710T110354Z
+
+AUTORESEARCH_SKIP_PYTEST_GATE=1 .venv/bin/autoresearch orchestrate spawn \
+  --orchestration-id 20260710T110354Z \
+  --brief /private/tmp/phase3_brief_claude.json --backend stub --wait
+
+AUTORESEARCH_SKIP_PYTEST_GATE=1 .venv/bin/autoresearch orchestrate spawn \
+  --orchestration-id 20260710T110354Z \
+  --brief /private/tmp/phase3_brief_codex.json --backend stub-codex --wait
+
+.venv/bin/autoresearch orchestrate collect \
+  --orchestration-id 20260710T110354Z
+.venv/bin/autoresearch orchestrate status \
+  --orchestration-id 20260710T110354Z
+```
+
+Key terminal state:
+
+```text
+Orchestration 20260710T110354Z: active cycles=2/2
+d01  stub        completed  false  1/1  gini=0.0000  claude/20260710T110401Z
+d02  stub-codex  completed  false  1/1  gini=0.0000  codex/20260710T110527Z
+```
+
+Both reports derive `cycles.used=1`, the `global_mean` champion and
+`gini_weighted=0.0` from their child registries, with expected distress
+`[all_rejected, champion_is_baseline]`. Both manifest records have
+`exit_code=0` and `clean_exit=true`. `d02.tool_usage` and
+`d02.cost.llm_usage.backend` are
+`{input_tokens: 0, cached_input_tokens: 0, output_tokens: 0,
+completed_turns: 1}`, proving that the Codex JSONL adapter ran. The plain stub's
+usage remains empty. **No real `claude -p` or `codex exec` process was launched.**
+
+---
+
 ## Open questions for later phases (raise with Alex; do not improvise)
 
 1. **`--permission-mode acceptEdits` sufficiency** — the last `TODO(pin)`; needs
@@ -479,6 +600,10 @@ passed (`1 passed`); no live foreign-path tool call was attempted.
 
 The seed/replay ordering question was resolved for Phase 2 after Alex said to use
 best judgement: defer the flag and replay together to Phase 4 (deviation 11).
+
+There is no open Phase 3 interface question. Real `gpt-5.5` availability,
+authentication, sandbox/approval behaviour during tool calls, and live JSONL
+usage shape still require the deliberately deferred paid validation campaign.
 
 ---
 
@@ -491,8 +616,9 @@ best judgement: defer the flag and replay together to Phase 4 (deviation 11).
   `tmp_path` by monkeypatching `manifest.ORCHESTRATIONS_DIR` (the
   `orchestrations_root` fixture). Module-global path constants are resolved at
   call time, so this works for the whole package.
-- The `stub` / `stub-no-finish` backends are the only zero-cost way to exercise
-  spawn → run → report. Reach for them before reaching for a real model.
+- The `stub` / `stub-no-finish` / `stub-codex` backends are the zero-cost ways to
+  exercise spawn → run → report. `stub-codex` additionally tests the Codex track,
+  JSONL completion event and usage parser. Reach for them before a real model.
 - **The run-scope guard will block you** (an unbound session) from reading any
   `artifacts/tracks/*/runs/*` folder — including a child's handoff. That is the
   gap Phase 2's `orchestrator` scope closes. Until then, verify child-run state
@@ -528,5 +654,5 @@ best judgement: defer the flag and replay together to Phase 4 (deviation 11).
   real spawn to settle.
 - **`seed_champion` replay + `respawn --seed-champion`** — deliberately deferred
   together to Phase 4; deviations 2 and 11 above.
-- **Phases 3–5**: the Codex backend, `playoff.py`, `ORCHESTRATOR.md`,
+- **Phases 4–5**: `playoff.py`, `ORCHESTRATOR.md`,
   `docs/RUN_ORCHESTRATED.md`, `orchestrate note`/`report`/`backend-stats`.

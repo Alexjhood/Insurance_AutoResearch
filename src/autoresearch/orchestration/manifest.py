@@ -16,7 +16,7 @@ import os
 import re
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -76,6 +76,8 @@ class Delegation:
     spawned_at: str | None = None
     ended_at: str | None = None
     exit_code: int | None = None
+    clean_exit: bool | None = None
+    tool_usage: dict[str, Any] = field(default_factory=dict)
     report_path: str | None = None
     prompt_path: str | None = None
     log_path: str | None = None
@@ -128,6 +130,8 @@ class Delegation:
             "spawned_at": self.spawned_at,
             "ended_at": self.ended_at,
             "exit_code": self.exit_code,
+            "clean_exit": self.clean_exit,
+            "tool_usage": self.tool_usage,
             "report_path": self.report_path,
             "prompt_path": self.prompt_path,
             "log_path": self.log_path,
@@ -154,6 +158,12 @@ class Delegation:
             spawned_at=raw.get("spawned_at"),
             ended_at=raw.get("ended_at"),
             exit_code=(int(raw["exit_code"]) if raw.get("exit_code") is not None else None),
+            clean_exit=(
+                bool(raw["clean_exit"]) if raw.get("clean_exit") is not None else None
+            ),
+            tool_usage=(
+                dict(raw["tool_usage"]) if isinstance(raw.get("tool_usage"), dict) else {}
+            ),
             report_path=raw.get("report_path"),
             prompt_path=raw.get("prompt_path"),
             log_path=raw.get("log_path"),

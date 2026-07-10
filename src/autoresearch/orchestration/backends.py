@@ -50,7 +50,20 @@ _TOOL_FLAG_ENUMS: dict[str, dict[str, frozenset[str]]] = {
             {"acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"}
         ),
     },
+    "codex": {
+        "-a": frozenset({"untrusted", "on-failure", "on-request", "never"}),
+        "--ask-for-approval": frozenset(
+            {"untrusted", "on-failure", "on-request", "never"}
+        ),
+        "-s": frozenset({"read-only", "workspace-write", "danger-full-access"}),
+        "--sandbox": frozenset(
+            {"read-only", "workspace-write", "danger-full-access"}
+        ),
+        "--color": frozenset({"always", "never", "auto"}),
+    },
 }
+
+_CODEX_REASONING_LEVELS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
 
 
 @dataclass(frozen=True)
@@ -120,6 +133,7 @@ class Backend:
                     f"{placeholder} is configured"
                 )
         self._validate_enumerated_flags()
+        self._validate_tool_contract()
 
     def _validate_enumerated_flags(self) -> None:
         enums = _TOOL_FLAG_ENUMS.get(self.tool)
@@ -135,11 +149,57 @@ class Backend:
                 )
             value = self.command[index + 1]
             if value not in allowed:
+                fallback = (
+                    f" ({self.tool} would warn and silently fall back to its default.)"
+                    if self.tool == "claude"
+                    else ""
+                )
                 raise ValueError(
                     f"backend {self.name!r}: {token}={value!r} is not accepted by "
-                    f"{self.tool!r}; valid values: {sorted(allowed)}. "
-                    f"({self.tool} would warn and silently fall back to its default.)"
+                    f"{self.tool!r}; valid values: {sorted(allowed)}.{fallback}"
                 )
+
+    def _validate_tool_contract(self) -> None:
+        """Fail at registry load when a real tool command is not headless-safe."""
+
+        if self.tool != "codex" or Path(self.command[0]).name != "codex":
+            return
+        if "exec" not in self.command:
+            raise ValueError(f"backend {self.name!r}: Codex backends must use `codex exec`")
+        if "--json" not in self.command:
+            raise ValueError(
+                f"backend {self.name!r}: Codex backends require --json for exit and usage parsing"
+            )
+        if "--max-turns" in self.command:
+            raise ValueError(
+                f"backend {self.name!r}: codex exec 0.137.0 has no --max-turns flag"
+            )
+        if any(token.startswith("--dangerously-bypass-") for token in self.command):
+            raise ValueError(
+                f"backend {self.name!r}: Codex backends may not bypass approvals or sandboxing"
+            )
+        if _flag_value(self.command, "-s", "--sandbox") != "workspace-write":
+            raise ValueError(
+                f"backend {self.name!r}: Codex backends must pin --sandbox workspace-write"
+            )
+        if self.prompt_via == "stdin" and self.command[-1] != "-":
+            raise ValueError(
+                f"backend {self.name!r}: stdin Codex backends must end with `-` to read the prompt"
+            )
+
+        effort_values = []
+        for index, token in enumerate(self.command[:-1]):
+            if token not in {"-c", "--config"}:
+                continue
+            value = self.command[index + 1]
+            if value.startswith("model_reasoning_effort="):
+                effort_values.append(value.partition("=")[2].strip().strip("\"'"))
+        if len(effort_values) != 1 or effort_values[0] not in _CODEX_REASONING_LEVELS:
+            raise ValueError(
+                f"backend {self.name!r}: Codex backends must pin one "
+                "model_reasoning_effort in "
+                f"{sorted(_CODEX_REASONING_LEVELS)}"
+            )
 
     @property
     def is_spawnable(self) -> bool:
@@ -189,6 +249,13 @@ def _unknown_placeholders(command: tuple[str, ...]) -> set[str]:
     for token in command:
         found.update(re.findall(r"\{([a-z_]+)\}", token))
     return found - _TEMPLATE_KEYS
+
+
+def _flag_value(command: tuple[str, ...], *flags: str) -> str | None:
+    for index, token in enumerate(command[:-1]):
+        if token in flags:
+            return command[index + 1]
+    return None
 
 
 def load_backends(path: Path | None = None) -> dict[str, Backend]:

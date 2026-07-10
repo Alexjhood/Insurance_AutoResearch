@@ -57,6 +57,15 @@ def test_harness_mirrors_match_agent_md():
         )
 
 
+def test_codex_contract_has_orchestrated_mode_parity():
+    """Codex's AGENTS.md must carry the same binding sub-agent contract."""
+    agent = AGENT_MD.read_text(encoding="utf-8")
+    codex = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    marker = "### Orchestrated mode"
+    assert marker in agent
+    assert codex[codex.index(marker) :] == agent[agent.index(marker) :]
+
+
 def test_workflow_commands_exist_in_cli():
     """Every command the contract renders must be a real CLI subcommand."""
     missing = [name for name, _ in gen.WORKFLOW_COMMANDS if name not in COMMANDS]

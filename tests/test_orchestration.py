@@ -19,6 +19,7 @@ import time
 
 import pytest
 
+from autoresearch.orchestration import adapters as adapters_mod
 from autoresearch.orchestration import backends as backends_mod
 from autoresearch.orchestration import manifest as manifest_mod
 from autoresearch.orchestration import monitor as monitor_mod
@@ -71,12 +72,16 @@ def test_manifest_round_trip(orchestrations_root):
         track="claude",
         run_id="20260712T091500Z",
         cycle_budget=4,
+        clean_exit=True,
+        tool_usage={"input_tokens": 12},
     )
     save_orchestration(add_delegation(orch, delegation))
 
     reloaded = load_orchestration(orch.orchestration_id)
     assert reloaded.to_dict() == add_delegation(orch, delegation).to_dict()
     assert reloaded.delegation("d01").backend == "stub"
+    assert reloaded.delegation("d01").clean_exit is True
+    assert reloaded.delegation("d01").tool_usage == {"input_tokens": 12}
     assert reloaded.cycles_committed == 4
     assert reloaded.cycles_remaining == 8
 
@@ -344,6 +349,106 @@ def test_claude_backends_pin_a_real_effort_level():
     assert "--max-turns" not in low and "--max-turns" not in medium
 
 
+def test_codex_backend_pins_verified_headless_flags_and_metadata():
+    backend = load_backends()["codex-gpt-5-5-medium"]
+    command = backend.render_command(prompt="the prompt travels over stdin")
+
+    assert command == (
+        "codex",
+        "-a",
+        "never",
+        "exec",
+        "--json",
+        "--sandbox",
+        "workspace-write",
+        "--skip-git-repo-check",
+        "-C",
+        ".",
+        "-m",
+        "gpt-5.5",
+        "-c",
+        'model_reasoning_effort="medium"',
+        "--color",
+        "never",
+        "-",
+    )
+    assert "the prompt travels over stdin" not in command
+    assert backend.prompt_via == "stdin"
+    assert backend.track == "codex"
+    assert backend.model_provider == "openai"
+    assert backend.model_name == "gpt-5.5-medium"
+    assert backend.tier == "mid"
+    assert backend.status == "default"
+    assert "diagnostic_probes" in backend.good_for
+
+
+def test_codex_stub_uses_codex_adapter_and_track_without_a_real_cli():
+    backend = load_backends()["stub-codex"]
+    assert backend.tool == "codex"
+    assert backend.track == "codex"
+    assert backend.command == ("python3", "scripts/stub_codex_subagent.py")
+
+
+@pytest.mark.parametrize(
+    ("command", "message"),
+    [
+        (("codex", "exec", "--sandbox", "workspace-write", "-"), "require --json"),
+        (
+            (
+                "codex",
+                "exec",
+                "--json",
+                "--sandbox",
+                "workspace-write",
+                "--max-turns",
+                "5",
+                "-c",
+                'model_reasoning_effort="medium"',
+                "-",
+            ),
+            "no --max-turns",
+        ),
+        (
+            (
+                "codex",
+                "exec",
+                "--json",
+                "--sandbox",
+                "danger-full-access",
+                "-c",
+                'model_reasoning_effort="medium"',
+                "-",
+            ),
+            "workspace-write",
+        ),
+        (
+            (
+                "codex",
+                "exec",
+                "--json",
+                "--sandbox",
+                "workspace-write",
+                "-c",
+                'model_reasoning_effort="extreme"',
+                "-",
+            ),
+            "model_reasoning_effort",
+        ),
+    ],
+)
+def test_invalid_codex_headless_contract_fails_at_load_time(command, message):
+    with pytest.raises(ValueError, match=message):
+        Backend(
+            name="bad-codex",
+            tool="codex",
+            command=command,
+            prompt_via="stdin",
+            track="codex",
+            model_provider="openai",
+            model_name="m",
+        )
+
+
 def test_bad_effort_value_fails_at_load_time():
     """Claude only *warns* on a bad --effort and uses the default; we must not."""
     with pytest.raises(ValueError, match="--effort='bogus' is not accepted"):
@@ -467,16 +572,16 @@ def test_backend_rejects_unknown_placeholder():
 def test_backend_render_command_substitutes_prompt_and_max_turns():
     backend = Backend(
         name="b",
-        tool="codex",
-        command=("codex", "exec", "--max-turns", "{max_turns}", "{prompt}"),
+        tool="opencode",
+        command=("opencode", "--max-turns", "{max_turns}", "{prompt}"),
         prompt_via="argv",
-        track="codex",
-        model_provider="openai",
+        track="opencode",
+        model_provider="opencode",
         model_name="m",
         max_turns=42,
     )
     argv = backend.render_command(prompt="do science")
-    assert argv == ("codex", "exec", "--max-turns", "42", "do science")
+    assert argv == ("opencode", "--max-turns", "42", "do science")
 
 
 def test_get_backend_refuses_deprecated(tmp_path):
@@ -648,6 +753,132 @@ def test_detached_wrapper_records_exit_code_and_output(
     assert status["exit_code"] == 0
 
 
+def test_codex_wrapper_transports_stdin_and_records_usage(
+    orchestrations_root, tmp_path
+):
+    import json
+
+    oid = "20260710T120000Z"
+    manifest_mod.orchestration_dir(oid).mkdir(parents=True)
+    prompt_file = manifest_mod.prompt_path(oid, "d01")
+    prompt_file.parent.mkdir(parents=True)
+    prompt_file.write_text("wrapper prompt", encoding="utf-8")
+    log_file = tmp_path / "codex-child.log"
+    script = (
+        "import json,sys; p=sys.stdin.read(); "
+        "print(json.dumps({'type':'item.completed','item':{'text':p}})); "
+        "print(json.dumps({'type':'turn.completed','usage':"
+        "{'input_tokens':11,'output_tokens':3}}))"
+    )
+    backend = Backend(
+        name="stub-codex-wrapper",
+        tool="codex",
+        command=(sys.executable, "-c", script),
+        prompt_via="stdin",
+        track="codex",
+        model_provider="stub",
+        model_name="stub",
+    )
+    plan = spawner_mod.SpawnPlan(
+        orchestration_id=oid,
+        delegation_id="d01",
+        backend=backend,
+        track="codex",
+        run_id="20260710T120100Z",
+        cycle_budget=1,
+        command=backend.command,
+        env=dict(spawner_mod.os.environ),
+        prompt="wrapper prompt",
+        timeout_minutes=20,
+    )
+    delegation = Delegation(
+        delegation_id="d01",
+        brief_path="briefs/d01.json",
+        backend=backend.name,
+        track="codex",
+        run_id=plan.run_id,
+        cycle_budget=1,
+        log_path=str(log_file),
+    )
+
+    process = spawner_mod._launch(plan, delegation)
+
+    assert process.wait(timeout=10) == 0
+    events = [json.loads(line) for line in log_file.read_text().splitlines()]
+    assert events[0]["item"]["text"] == "wrapper prompt"
+    status = manifest_mod.read_json(exit_status_path(oid, "d01"))
+    assert status["exit_code"] == 0
+    assert status["clean_exit"] is True
+    assert status["usage"] == {
+        "input_tokens": 11,
+        "output_tokens": 3,
+        "completed_turns": 1,
+    }
+
+
+def test_codex_usage_parser_aggregates_turns_and_tolerates_stderr(tmp_path):
+    import json
+
+    log = tmp_path / "codex.jsonl"
+    log.write_text(
+        "warning from stderr\n"
+        + json.dumps(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 2,
+                    "details": {"reasoning_tokens": 1},
+                },
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 7,
+                    "output_tokens": 3,
+                    "details": {"reasoning_tokens": 2},
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    observed = adapters_mod.inspect_backend_exit("codex", log, exit_code=0)
+
+    assert observed.clean_exit is True
+    assert observed.terminal_event == "turn.completed"
+    assert observed.malformed_lines == 1
+    assert observed.usage == {
+        "input_tokens": 17,
+        "output_tokens": 5,
+        "details": {"reasoning_tokens": 3},
+        "completed_turns": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "event", "clean"),
+    [
+        (1, '{"type":"turn.completed","usage":{}}', False),
+        (0, '{"type":"turn.failed"}', False),
+        (0, '{"type":"item.completed"}', False),
+    ],
+)
+def test_codex_clean_exit_requires_zero_code_and_completed_turn(
+    tmp_path, exit_code, event, clean
+):
+    log = tmp_path / "codex.jsonl"
+    log.write_text(event + "\n", encoding="utf-8")
+    assert (
+        adapters_mod.inspect_backend_exit("codex", log, exit_code=exit_code).clean_exit
+        is clean
+    )
+
+
 def test_respawn_continue_run_reuses_child_and_records_lineage(
     orchestrations_root, tmp_path, monkeypatch
 ):
@@ -778,6 +1009,33 @@ def test_monitor_observes_clean_detached_exit(orchestrations_root, monkeypatch):
     assert completed.status == "completed"
     assert completed.exit_code == 0
     assert completed.ended_at == "2026-07-10T12:05:00Z"
+
+
+def test_monitor_rejects_zero_exit_without_a_clean_codex_terminal_event(
+    orchestrations_root, monkeypatch
+):
+    orch = create_orchestration(
+        dataset="porto_seguro", target_mode="claim_incidence", total_cycle_budget=2
+    )
+    save_orchestration(add_delegation(orch, _running_delegation(track="codex")))
+    write_json(
+        exit_status_path(orch.orchestration_id, "d01"),
+        {
+            "exit_code": 0,
+            "clean_exit": False,
+            "usage": {"input_tokens": 9},
+            "ended_at": "2026-07-10T12:05:00Z",
+        },
+    )
+    monkeypatch.setattr(monitor_mod, "process_is_alive", lambda pid: False)
+
+    refreshed = monitor_mod.refresh_orchestration(orch.orchestration_id)
+
+    failed = refreshed.delegation("d01")
+    assert failed.status == "failed"
+    assert failed.exit_code == 0
+    assert failed.clean_exit is False
+    assert failed.tool_usage == {"input_tokens": 9}
 
 
 def test_monitor_marks_timeout_without_killing(orchestrations_root, monkeypatch):
@@ -1037,6 +1295,14 @@ def test_report_is_built_from_registry_not_agent_claims(fixture_child_run):
     # The agent's testimony is stored verbatim, and never used as a metric.
     assert report["agent_summary"] == "Constant recipes cannot beat a flat baseline."
     assert report["cost"]["wall_clock_minutes"] == pytest.approx(30.0)
+
+
+def test_report_includes_best_effort_backend_usage(fixture_child_run):
+    delegation = _fixture_delegation(
+        tool_usage={"input_tokens": 21, "output_tokens": 8, "completed_turns": 1}
+    )
+    report = build_report(_fixture_orchestration(), delegation)
+    assert report["cost"]["llm_usage"]["backend"] == delegation.tool_usage
 
 
 def test_report_flags_baseline_champion_and_all_rejected(fixture_child_run):

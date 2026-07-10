@@ -315,9 +315,12 @@ def collect_report(orch: Orchestration, delegation: Delegation) -> Path:
 
 def _cost(delegation: Delegation, config: ProjectConfig) -> dict[str, Any]:
     wall_clock = _wall_clock_minutes(delegation)
+    llm_usage = _llm_usage(config)
+    if delegation.tool_usage:
+        llm_usage["backend"] = delegation.tool_usage
     return {
         "wall_clock_minutes": wall_clock,
-        "llm_usage": _llm_usage(config),
+        "llm_usage": llm_usage,
     }
 
 

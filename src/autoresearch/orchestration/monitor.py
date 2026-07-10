@@ -73,14 +73,20 @@ def _observed_delegation(
 
     if exit_record is not None:
         exit_code = int(exit_record["exit_code"])
+        clean_exit = bool(exit_record.get("clean_exit", exit_code == 0))
         ended_at = str(exit_record.get("ended_at") or _format_time(now))
         status = delegation.status
         if status not in {"timed_out", "killed"}:
-            status = "completed" if exit_code == 0 else "failed"
+            status = "completed" if clean_exit else "failed"
+        tool_usage = exit_record.get("usage")
+        if not isinstance(tool_usage, dict):
+            tool_usage = {}
         return replace(
             delegation,
             status=status,
             exit_code=exit_code,
+            clean_exit=clean_exit,
+            tool_usage=tool_usage,
             ended_at=delegation.ended_at or ended_at,
         )
 

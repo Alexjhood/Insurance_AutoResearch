@@ -15,11 +15,22 @@ def _stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _write_status(path: Path, *, exit_code: int) -> None:
+def _write_status(
+    path: Path, *, exit_code: int, clean_exit: bool, usage: dict
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(
-        json.dumps({"exit_code": exit_code, "ended_at": _stamp()}, indent=2) + "\n",
+        json.dumps(
+            {
+                "exit_code": exit_code,
+                "clean_exit": clean_exit,
+                "usage": usage,
+                "ended_at": _stamp(),
+            },
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
     temporary.replace(path)
@@ -31,6 +42,7 @@ def main() -> int:
     parser.add_argument("--log-path", type=Path, required=True)
     parser.add_argument("--prompt-path", type=Path, required=True)
     parser.add_argument("--prompt-via", choices=("stdin", "argv"), required=True)
+    parser.add_argument("--tool", required=True)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
@@ -59,7 +71,15 @@ def main() -> int:
             log_handle.write(f"orchestration child launch failed: {exc}\n".encode("utf-8"))
         exit_code = 127
 
-    _write_status(args.status_path, exit_code=exit_code)
+    from autoresearch.orchestration.adapters import inspect_backend_exit
+
+    observation = inspect_backend_exit(args.tool, args.log_path, exit_code=exit_code)
+    _write_status(
+        args.status_path,
+        exit_code=exit_code,
+        clean_exit=observation.clean_exit,
+        usage=observation.usage,
+    )
     return exit_code
 
 

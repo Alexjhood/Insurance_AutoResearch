@@ -40,7 +40,7 @@ from autoresearch.orchestration.manifest import (
     utc_stamp,
     write_run_backpointer,
 )
-from autoresearch.utils.io import write_json
+from autoresearch.utils.io import read_json, write_json
 
 
 #: Per-cycle compute budget grows with experiment count (AGENT.md "Compute
@@ -391,6 +391,8 @@ def _launch(plan: SpawnPlan, delegation: Delegation) -> subprocess.Popen:
         str(prompt_file),
         "--prompt-via",
         plan.backend.prompt_via,
+        "--tool",
+        plan.backend.tool,
         "--",
         *plan.command,
     ]
@@ -413,14 +415,32 @@ def _finalise_after_wait(
 
     from autoresearch.orchestration.report import collect_report
 
+    exit_record: dict[str, Any] = {}
+    try:
+        payload = read_json(exit_status_path(orchestration_id, delegation_id))
+        if isinstance(payload, dict):
+            exit_record = payload
+    except (OSError, TypeError, ValueError):
+        pass
+    recorded_exit_code = int(exit_record.get("exit_code", exit_code))
+    clean_exit = bool(exit_record.get("clean_exit", recorded_exit_code == 0))
+    tool_usage = exit_record.get("usage")
+    if not isinstance(tool_usage, dict):
+        tool_usage = {}
+
     with manifest_lock(orchestration_id):
         orch = load_orchestration(orchestration_id)
         delegation = orch.delegation(delegation_id)
         # `finish-delegation` may already have marked it completed and stored the
         # summary; a non-zero exit still overrides that to `failed`.
-        status = "completed" if exit_code == 0 else "failed"
+        status = "completed" if clean_exit else "failed"
         delegation = replace(
-            delegation, status=status, exit_code=exit_code, ended_at=utc_stamp()
+            delegation,
+            status=status,
+            exit_code=recorded_exit_code,
+            clean_exit=clean_exit,
+            tool_usage=tool_usage,
+            ended_at=str(exit_record.get("ended_at") or utc_stamp()),
         )
         orch = update_delegation(orch, delegation)
         save_orchestration(orch)
@@ -443,7 +463,8 @@ def _finalise_after_wait(
         "orchestration_id": orchestration_id,
         "delegation_id": delegation_id,
         "run_id": delegation.run_id,
-        "exit_code": exit_code,
+        "exit_code": recorded_exit_code,
+        "clean_exit": clean_exit,
         "report_path": str(report_file),
     }
 
