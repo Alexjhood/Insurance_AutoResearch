@@ -1,0 +1,548 @@
+<meta charset="utf-8">
+<title>Flight Deck — Design Concept</title>
+<style>
+/* ================= Tokens (mirrors flightdeck/design/tokens.css) ============ */
+:root{
+  --bg-app:#0b0e14;--bg-raised:#11151f;--bg-raised-2:#171c29;--bg-inset:#070910;
+  --border-subtle:#1e2433;--border-strong:#2c3550;--grid-line:#1a2030;
+  --text-primary:#e8ecf4;--text-secondary:#9aa4bc;--text-faint:#5c6680;
+  --accent:#6ea8ff;--accent-strong:#8dbcff;
+  --c-promote:#3ecf8e;--c-localpromote:#35b8c4;--c-reject:#8a93a8;
+  --c-distress:#ff5d5d;--c-takeover:#ffb347;--c-orchestrator:#a78bfa;--c-baseline:#62708c;
+  --c-takeover-dim:rgba(255,179,71,.16);--c-orchestrator-dim:rgba(167,139,250,.12);
+  --c-distress-dim:rgba(255,93,93,.12);
+  --c-d1:#5b9bff;--c-d2:#f2a35c;--c-d3:#58c9b1;--c-d4:#e07be0;--c-d5:#c9d34e;--c-play:#a78bfa;
+  --tk-cached:#35507a;--tk-uncached:#6ea8ff;--tk-output:#3ecf8e;
+  --font-ui:"Inter",-apple-system,"Segoe UI",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;
+  --shadow-raised:0 1px 0 rgba(255,255,255,.03) inset,0 8px 24px rgba(0,0,0,.35);
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg-app:#f6f7fa;--bg-raised:#ffffff;--bg-raised-2:#eef1f6;--bg-inset:#f0f2f7;
+    --border-subtle:#dde2ec;--border-strong:#b9c2d4;--grid-line:#e7eaf2;
+    --text-primary:#171c29;--text-secondary:#4c5670;--text-faint:#8a93a8;
+    --accent:#2f6fdb;--accent-strong:#1f5ac2;
+    --c-promote:#199e64;--c-localpromote:#0e8b96;--c-reject:#6b7590;
+    --c-distress:#d63c3c;--c-takeover:#c47b12;--c-orchestrator:#7c5cd6;--c-baseline:#8a93a8;
+    --c-takeover-dim:rgba(196,123,18,.12);--c-orchestrator-dim:rgba(124,92,214,.10);
+    --c-distress-dim:rgba(214,60,60,.10);
+    --tk-cached:#b9cdec;--tk-uncached:#2f6fdb;--tk-output:#199e64;
+    --shadow-raised:0 1px 2px rgba(23,28,41,.06),0 6px 16px rgba(23,28,41,.06);
+  }
+}
+:root[data-theme="dark"]{
+  --bg-app:#0b0e14;--bg-raised:#11151f;--bg-raised-2:#171c29;--bg-inset:#070910;
+  --border-subtle:#1e2433;--border-strong:#2c3550;--grid-line:#1a2030;
+  --text-primary:#e8ecf4;--text-secondary:#9aa4bc;--text-faint:#5c6680;
+  --accent:#6ea8ff;--accent-strong:#8dbcff;
+  --c-promote:#3ecf8e;--c-localpromote:#35b8c4;--c-reject:#8a93a8;
+  --c-distress:#ff5d5d;--c-takeover:#ffb347;--c-orchestrator:#a78bfa;--c-baseline:#62708c;
+  --c-takeover-dim:rgba(255,179,71,.16);--c-orchestrator-dim:rgba(167,139,250,.12);
+  --c-distress-dim:rgba(255,93,93,.12);
+  --tk-cached:#35507a;--tk-uncached:#6ea8ff;--tk-output:#3ecf8e;
+  --shadow-raised:0 1px 0 rgba(255,255,255,.03) inset,0 8px 24px rgba(0,0,0,.35);
+}
+:root[data-theme="light"]{
+  --bg-app:#f6f7fa;--bg-raised:#ffffff;--bg-raised-2:#eef1f6;--bg-inset:#f0f2f7;
+  --border-subtle:#dde2ec;--border-strong:#b9c2d4;--grid-line:#e7eaf2;
+  --text-primary:#171c29;--text-secondary:#4c5670;--text-faint:#8a93a8;
+  --accent:#2f6fdb;--accent-strong:#1f5ac2;
+  --c-promote:#199e64;--c-localpromote:#0e8b96;--c-reject:#6b7590;
+  --c-distress:#d63c3c;--c-takeover:#c47b12;--c-orchestrator:#7c5cd6;--c-baseline:#8a93a8;
+  --c-takeover-dim:rgba(196,123,18,.12);--c-orchestrator-dim:rgba(124,92,214,.10);
+  --c-distress-dim:rgba(214,60,60,.10);
+  --tk-cached:#b9cdec;--tk-uncached:#2f6fdb;--tk-output:#199e64;
+  --shadow-raised:0 1px 2px rgba(23,28,41,.06),0 6px 16px rgba(23,28,41,.06);
+}
+/* ================= Base ================= */
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:var(--bg-app);color:var(--text-primary);font-family:var(--font-ui);
+  font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased}
+.mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+a{color:var(--accent);text-decoration:none}
+.wrap{max-width:1160px;margin:0 auto;padding:0 24px 80px}
+/* top bar */
+.topbar{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg-app) 88%,transparent);
+  backdrop-filter:blur(8px);border-bottom:1px solid var(--border-subtle)}
+.topbar-in{max-width:1160px;margin:0 auto;padding:10px 24px;display:flex;align-items:center;gap:16px}
+.wordmark{font-weight:650;letter-spacing:.14em;font-size:13px}
+.wordmark .dot{color:var(--c-promote)}
+.switcher{display:flex;align-items:center;gap:8px;background:var(--bg-raised);
+  border:1px solid var(--border-strong);border-radius:999px;padding:5px 14px;font-size:12.5px}
+.switcher .st{width:8px;height:8px;border-radius:50%;background:var(--c-promote);box-shadow:0 0 8px var(--c-promote)}
+.topbar .spacer{flex:1}
+.crumb{color:var(--text-faint);font-size:12px}
+/* section headers */
+.sect{margin-top:56px}
+.eyebrow{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--text-faint);
+  display:flex;align-items:center;gap:10px}
+.eyebrow::after{content:"";flex:1;height:1px;background:var(--border-subtle)}
+h1{font-size:30px;line-height:1.2;margin:14px 0 6px;font-weight:650;letter-spacing:-.01em;text-wrap:balance}
+h2{font-size:19px;margin:12px 0 4px;font-weight:600;letter-spacing:-.005em}
+.sub{color:var(--text-secondary);max-width:66ch;margin:0}
+/* stat tiles */
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:22px}
+.tile{background:var(--bg-raised);border:1px solid var(--border-subtle);border-radius:10px;
+  padding:12px 14px;box-shadow:var(--shadow-raised)}
+.tile .k{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-faint)}
+.tile .v{font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-size:21px;margin-top:4px;font-weight:500}
+.tile .d{font-size:11.5px;color:var(--text-secondary);margin-top:2px}
+.tile .v .up{color:var(--c-promote);font-size:14px}
+/* cards & panels */
+.panel{background:var(--bg-raised);border:1px solid var(--border-subtle);border-radius:12px;
+  box-shadow:var(--shadow-raised);padding:18px 20px;margin-top:18px}
+.panel-hd{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.panel-hd h3{margin:0;font-size:15px;font-weight:600}
+.panel-hd .note{color:var(--text-faint);font-size:12px}
+.panel-hd .right{margin-left:auto;display:flex;gap:8px;align-items:center}
+.chartwell{background:var(--bg-inset);border:1px solid var(--border-subtle);border-radius:8px;
+  margin-top:12px;padding:8px 4px 2px;overflow-x:auto}
+svg text{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+/* toggle */
+.tog{display:inline-flex;border:1px solid var(--border-strong);border-radius:999px;overflow:hidden}
+.tog button{appearance:none;border:0;background:transparent;color:var(--text-secondary);
+  font:inherit;font-size:12px;padding:4px 12px;cursor:pointer}
+.tog button.on{background:var(--accent);color:#fff}
+.tog button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+/* legend */
+.legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;font-size:12px;color:var(--text-secondary)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.gly{font-size:13px}
+/* tooltip */
+#tip{position:fixed;z-index:50;pointer-events:none;background:var(--bg-raised-2);
+  border:1px solid var(--border-strong);border-radius:8px;padding:9px 12px;font-size:12px;
+  max-width:300px;box-shadow:0 12px 36px rgba(0,0,0,.5);opacity:0;transition:opacity 120ms}
+#tip .t{font-weight:600;margin-bottom:3px}
+#tip .m{font-family:var(--font-mono);color:var(--text-secondary)}
+/* journey */
+.journey{display:grid;gap:14px;max-width:820px}
+.chip{display:inline-block;font-size:11.5px;border:1px solid var(--border-strong);
+  border-radius:999px;padding:2px 10px;color:var(--text-secondary);margin:2px 4px 2px 0}
+.badge{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;
+  border-radius:999px;padding:3px 10px}
+.badge.rej{background:color-mix(in srgb,var(--c-reject) 15%,transparent);color:var(--c-reject)}
+.badge.loc{background:color-mix(in srgb,var(--c-localpromote) 15%,transparent);color:var(--c-localpromote)}
+.badge.pro{background:color-mix(in srgb,var(--c-promote) 15%,transparent);color:var(--c-promote)}
+.dtag{font-family:var(--font-mono);font-size:11px;font-weight:600;border-radius:5px;padding:1px 7px}
+.card{background:var(--bg-raised);border:1px solid var(--border-subtle);border-radius:12px;padding:16px 18px}
+.card h4{margin:0 0 6px;font-size:14px}
+.card .lbl{font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-faint)}
+.orch{border-left:3px solid var(--c-orchestrator);background:var(--c-orchestrator-dim);
+  border-radius:0 10px 10px 0;padding:13px 16px;color:var(--text-secondary);font-size:13.5px}
+.orch .who{color:var(--c-orchestrator);font-weight:600;font-size:11.5px;letter-spacing:.1em;
+  text-transform:uppercase;display:block;margin-bottom:4px}
+.scene{border:1px solid color-mix(in srgb,var(--c-takeover) 45%,transparent);background:var(--c-takeover-dim);
+  border-radius:12px;padding:15px 18px}
+.scene .who{color:var(--c-takeover);font-weight:650;font-size:11.5px;letter-spacing:.1em;text-transform:uppercase}
+.metrics-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-top:10px}
+.mk{background:var(--bg-inset);border:1px solid var(--border-subtle);border-radius:8px;padding:8px 10px}
+.mk .k{font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.08em}
+.mk .v{font-family:var(--font-mono);font-size:15px;margin-top:2px}
+.neg{color:var(--c-distress)}.pos{color:var(--c-promote)}
+.flag{display:inline-flex;gap:5px;align-items:center;font-size:11.5px;color:var(--c-distress);
+  background:var(--c-distress-dim);border-radius:999px;padding:2px 10px;font-weight:600}
+/* two-col resource */
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}
+@media (max-width:900px){.cols{grid-template-columns:1fr}}
+.footer{margin-top:64px;padding-top:18px;border-top:1px solid var(--border-subtle);
+  color:var(--text-faint);font-size:12px;max-width:74ch}
+@media (prefers-reduced-motion:no-preference){
+  .sect{animation:rise .5s cubic-bezier(.16,1,.3,1) both}
+  @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+}
+</style>
+
+<div class="topbar"><div class="topbar-in">
+  <div class="wordmark">FLIGHT DECK <span class="dot">●</span></div>
+  <div class="switcher"><span class="st"></span><span class="mono">20260711T164959Z</span>
+    <span style="color:var(--text-faint)">french_motor · frequency</span> <span style="color:var(--text-faint)">▾</span></div>
+  <div class="spacer"></div>
+  <div class="crumb">Overview · Journey · Delegations · Telemetry · Files</div>
+</div></div>
+
+<div class="wrap">
+
+<!-- ============ HERO ============ -->
+<div class="sect">
+  <div class="eyebrow" style="margin-top:34px">Campaign debrief · design concept</div>
+  <h1>Ten cycles, five sub-agents, one takeover — and a playoff upset.</h1>
+  <p class="sub">Orchestrator <span class="mono">openai/gpt-5.6</span> delegated a 10-cycle budget across five
+  <span class="mono">codex-gpt-5-6-luna</span> research runs on French Motor claims frequency.
+  LightGBM led all afternoon; HistGBM took the playoff.</p>
+  <div class="tiles">
+    <div class="tile"><div class="k">Final champion</div><div class="v">0.3373</div>
+      <div class="d">HistGBM · Poisson · ordinal (d04 → d05)</div></div>
+    <div class="tile"><div class="k">vs global mean</div><div class="v"><span class="up">▲</span> +0.3361</div>
+      <div class="d">baseline gini 0.0013</div></div>
+    <div class="tile"><div class="k">Cycle budget</div><div class="v">10 / 10</div>
+      <div class="d">4 forfeited, refunds re-spent</div></div>
+    <div class="tile"><div class="k">Tokens</div><div class="v">11.62M</div>
+      <div class="d">95.0% cache hit · 33.1k out</div></div>
+    <div class="tile"><div class="k">Wall clock</div><div class="v">67m 35s</div>
+      <div class="d">16:49 → 17:57 UTC</div></div>
+    <div class="tile"><div class="k">Distress</div><div class="v" style="color:var(--c-distress)">7 ✕</div>
+      <div class="d">1 crash · 1 takeover ⚑</div></div>
+  </div>
+</div>
+
+<!-- ============ CHAMPION ASCENT ============ -->
+<div class="sect">
+  <div class="eyebrow">Exhibit 6.1</div>
+  <h2>Champion Ascent</h2>
+  <p class="sub">Every experiment the campaign ran, in order. The step line is the reigning champion;
+  bands are delegations; hover any point for its story.</p>
+  <div class="panel">
+    <div class="panel-hd"><h3>gini_weighted by experiment</h3>
+      <span class="note">13 experiments · 5 delegations · playoff</span>
+      <div class="right"><div class="tog" role="group" aria-label="y-scale">
+        <button id="zFull" class="">Full scale</button><button id="zZoom" class="on">Magnify the ascent</button>
+      </div></div></div>
+    <div class="chartwell"><svg id="ascent" viewBox="0 0 1080 380" width="100%" style="min-width:760px" aria-label="Champion ascent chart"></svg></div>
+    <div class="legend">
+      <span><span class="gly" style="color:var(--c-promote)">▲</span> promote</span>
+      <span><span class="gly" style="color:var(--c-localpromote)">◭</span> local promote</span>
+      <span><span class="gly" style="color:var(--c-reject)">○</span> reject</span>
+      <span><span class="gly" style="color:var(--c-distress)">✕</span> forfeited / undecided</span>
+      <span><span class="gly" style="color:var(--c-takeover)">⚑</span> takeover</span>
+      <span><span class="gly" style="color:var(--c-baseline)">┄</span> champion line</span>
+      <span><span class="gly" style="color:var(--c-play)">◈</span> playoff replay</span>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MISSION TIMELINE ============ -->
+<div class="sect">
+  <div class="eyebrow">Exhibit 6.2</div>
+  <h2>Mission Timeline</h2>
+  <p class="sub">The campaign as a system of agents: the orchestrator's lane on top — reflections ◆,
+  the d02 takeover ⚑, the final decision ▣ — with each delegation's lifespan and cycle outcomes below.
+  In the app this strip pins to the Journey and scrubs as you scroll.</p>
+  <div class="panel">
+    <div class="chartwell"><svg id="mission" viewBox="0 0 1080 300" width="100%" style="min-width:760px" aria-label="Mission timeline"></svg></div>
+  </div>
+</div>
+
+<!-- ============ JOURNEY SLICE ============ -->
+<div class="sect">
+  <div class="eyebrow">Journey · chapter 2 of 5</div>
+  <h2>The d02 incident</h2>
+  <p class="sub">How a crashed sub-agent becomes a readable scene: brief → crash → orchestrator takeover → recovered evidence.</p>
+  <div class="journey" style="margin-top:18px">
+
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span class="dtag" style="background:color-mix(in srgb,var(--c-d2) 18%,transparent);color:var(--c-d2)">d02</span>
+        <h4 style="margin:0">Brief — structural_family_comparison</h4>
+        <span style="color:var(--text-faint);font-size:12px" class="mono">budget 3 cycles · seed: d01 champion</span>
+      </div>
+      <p style="margin:8px 0 8px;color:var(--text-secondary)">Challenge the seeded LightGBM Poisson/native champion with
+      structurally different recipe estimator families. Start with XGBoost Poisson/ordinal; HistGradientBoosting
+      Poisson is the preferred second family.</p>
+      <div class="lbl">Constraints</div>
+      <div style="margin-top:4px">
+        <span class="chip">recipes only</span><span class="chip">no LightGBM tuning</span>
+        <span class="chip">conservative tree counts</span><span class="chip">inferior family → move on, don't tune</span>
+      </div>
+    </div>
+
+    <div class="scene">
+      <span class="who">⚑ Takeover · 17:13:08</span>
+      <p style="margin:6px 0 0;color:var(--text-primary)">Luna exited while its background cycle
+      (<span class="mono">PID 63639</span>) was still evaluating — rapid polling plus a local-time timestamp misread.
+      The orchestrator ran a <strong>diagnosis-only takeover</strong>: preserve the running XGBoost cycle, wait for a
+      terminal state, record its evidence, return continuation work to a fresh delegation.</p>
+      <div style="margin-top:9px;display:flex;gap:8px;flex-wrap:wrap">
+        <span class="flag">✕ crashed</span><span class="flag">✕ cycles_forfeited</span>
+        <span class="flag">✕ no_finish_delegation</span>
+        <span class="chip" style="border-color:var(--c-takeover);color:var(--c-takeover)">recovered → evidence kept, 2 cycles refunded</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <h4 style="margin:0" class="mono">xgb_poisson_ordinal_root</h4>
+        <span class="badge rej">○ reject · inferior</span>
+        <span style="color:var(--text-faint);font-size:12px">cycle 1 · decided post-takeover</span>
+      </div>
+      <p style="margin:8px 0 0;color:var(--text-secondary)"><span class="lbl">Hypothesis&nbsp;&nbsp;</span>
+      A structurally different booster may extract signal LightGBM's native categorical handling misses.</p>
+      <div class="metrics-row">
+        <div class="mk"><div class="k">gini_weighted</div><div class="v">0.3329</div></div>
+        <div class="mk"><div class="k">champion</div><div class="v">0.3383</div></div>
+        <div class="mk"><div class="k">CV lift</div><div class="v neg">−0.0022</div></div>
+        <div class="mk"><div class="k">fold wins</div><div class="v neg">0%</div></div>
+        <div class="mk"><div class="k">asym loss</div><div class="v">worse</div></div>
+      </div>
+      <p style="margin:10px 0 0;color:var(--text-secondary);font-size:13px"><span class="lbl">Interpretation&nbsp;&nbsp;</span>
+      Moving from native categoricals to ordinal encoding loses frequency-ranking signal despite slightly higher rank
+      gini; primary metric and pricing loss clearly favour the incumbent.</p>
+    </div>
+
+    <div class="orch"><span class="who">◆ Orchestrator · reflection · 17:13:50</span>
+      Recovered d02 via diagnosis-only takeover. XGBoost is clearly inferior — the distress came from the harness
+      exit, not the model. Next: fresh delegation for HistGradientBoosting Poisson; abandon the estimator-family
+      axis if it also loses.</div>
+  </div>
+</div>
+
+<!-- ============ RESOURCES ============ -->
+<div class="sect">
+  <div class="eyebrow">Telemetry</div>
+  <h2>What it cost</h2>
+  <div class="cols">
+    <div class="panel" style="margin-top:0">
+      <div class="panel-hd"><h3>Token burn by delegation</h3><span class="note">input, cached vs uncached</span></div>
+      <div class="chartwell"><svg id="tokens" viewBox="0 0 520 240" width="100%" aria-label="Tokens by delegation"></svg></div>
+      <div class="legend">
+        <span><span class="gly" style="color:var(--tk-cached)">■</span> cached input</span>
+        <span><span class="gly" style="color:var(--tk-uncached)">■</span> uncached input</span>
+        <span style="color:var(--text-faint)">output ≈ 0.3% of input — shown in tooltip</span>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:0">
+      <div class="panel-hd"><h3>Budget ledger</h3><span class="note">cycles committed → spent</span></div>
+      <div class="chartwell"><svg id="budget" viewBox="0 0 520 240" width="100%" aria-label="Cycle budget ledger"></svg></div>
+      <div class="legend">
+        <span><span class="gly" style="color:var(--c-promote)">■</span> decided</span>
+        <span><span class="gly" style="color:var(--c-distress)">■</span> forfeited</span>
+        <span><span class="gly" style="color:var(--text-faint)">□</span> refunded &amp; re-spent downstream</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  <strong>Design concept, not the application.</strong> Static mock of Flight Deck's Overview + Journey using real
+  data from orchestration <span class="mono">20260711T164959Z</span> (one screening value approximated).
+  Canonical tokens: <span class="mono">flightdeck/design/tokens.css</span> — the app self-hosts Inter + JetBrains Mono;
+  this mock uses system fallbacks. Full interactivity (zoom, scroll-sync, flight recorder) lands in Phase 4.
+</div>
+</div>
+
+<div id="tip" role="tooltip"></div>
+
+<script>
+(function(){
+"use strict";
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const NS = "http://www.w3.org/2000/svg";
+const el = (p,t,a)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);p.appendChild(e);return e};
+const tip = document.getElementById('tip');
+function showTip(ev,html){tip.innerHTML=html;tip.style.opacity=1;
+  const x=Math.min(ev.clientX+14,innerWidth-320),y=Math.min(ev.clientY+14,innerHeight-120);
+  tip.style.left=x+'px';tip.style.top=y+'px';}
+function hideTip(){tip.style.opacity=0}
+
+/* ---------------- data (real, from orchestration 20260711T164959Z) ------------- */
+const D = {d01:'--c-d1',d02:'--c-d2',d03:'--c-d3',d04:'--c-d4',d05:'--c-d5',play:'--c-play'};
+const exps = [
+ {s:1, g:0.00125, d:'d01', dec:'baseline', n:'global_mean_baseline', t:'Flat book-average rate — every run starts here.'},
+ {s:2, g:0.33834, d:'d01', dec:'promote',  n:'lgbm_poisson_native_baseline', t:'LightGBM Poisson, native categoricals, 63 leaves. 100% bootstrap wins. Champion.'},
+ {s:3, g:0.33100, d:'d01', dec:'reject',   n:'lgbm_tweedie_native_followup', t:'Objective swap to Tweedie — decisively inferior, 0% wins.'},
+ {s:4, g:0.33900, d:'d01', dec:'reject',   n:'lgbm_poisson_onehot', t:'One-hot encoding: small screening edge (≈, illustrative), inconclusive after escalation (CV +0.0012, 67%).'},
+ {s:5, g:0.33583, d:'d01', dec:'reject',   n:'lgbm_poisson_native_shallow', t:'31 leaves — capacity cut not reliable (CV +0.0005, 58%).'},
+ {s:6, g:0.33289, d:'d02', dec:'reject',   n:'xgb_poisson_ordinal_root', tk:1, t:'XGBoost family probe. Harness crashed mid-cycle; decided after takeover. CV −0.0022, 0% wins.'},
+ {s:7, g:0.33834, d:'d03', dec:'reject',   n:'geo_area_ablation', t:'Drop Area: exact tie with champion — rejected as noise; Area likely unused in this fit.'},
+ {s:8, g:0.33586, d:'d03', dec:'reject',   n:'geo_density_ablation', t:'Drop Density: −0.0015. Density carries real signal — retain.'},
+ {s:9, g:0.33611, d:'d03', dec:'reject',   n:'geo_region_ablation', t:'Drop Region: −0.0033. Retain full geographic set.'},
+ {s:10,g:0.34024, d:'d04', dec:'local',    n:'hist_gbm_poisson_ordinal', t:'HistGBM Poisson: best screening gini of the campaign; CV +0.0001 at 58% — plausible, not proven. Local promote.'},
+ {s:11,g:0.24758, d:'d04', dec:'forfeit',  n:'tweedie_glm_poisson_onehot', t:'Additive GLM ruled out (−0.09). Auto-rejected; no decision recorded → cycle forfeited.'},
+ {s:12,g:0.33585, d:'d05', dec:'reject',   n:'hist_gbm_63_leaves', t:'Leaf capacity 31→63 slightly worse (CV −0.0015, 25%). Finalist stays at 31.'},
+ {s:13,g:0.33732, d:'play',dec:'playoff',  n:'playoff · hist_gbm replay', t:'Controlled replay under one consolidation run: HistGBM 0.3373 takes the final over LightGBM 0.3383 seed lineage.'}
+];
+const champ = [[0.5,0.00125],[2,0.00125],[2,0.33834],[12.5,0.33834],[13,0.33732],[13.5,0.33732]];
+const bands = [
+ {d:'d01',a:0.5,b:5.5},{d:'d02',a:5.5,b:6.5},{d:'d03',a:6.5,b:9.5},
+ {d:'d04',a:9.5,b:11.5},{d:'d05',a:11.5,b:12.5},{d:'play',a:12.5,b:13.5}];
+
+/* ---------------- Champion Ascent ---------------- */
+const A = {w:1080,h:380,l:64,r:16,t:18,b:34};
+let zoom = true;
+const svgA = document.getElementById('ascent');
+function yScale(){ // zoom: [0.330,0.3415]; full: [0,0.36]
+  const dom = zoom? [0.3290,0.3415] : [0,0.36];
+  return v => {
+    const c = Math.max(dom[0], Math.min(dom[1], v));
+    return A.t + (A.h-A.t-A.b) * (1-(c-dom[0])/(dom[1]-dom[0]));
+  };
+}
+const xA = s => A.l + (A.w-A.l-A.r)*(s-0.5)/13;
+function glyph(p){return p.dec==='promote'?'▲':p.dec==='local'?'◭':p.dec==='forfeit'?'✕':p.dec==='playoff'?'◈':p.dec==='baseline'?'◇':'○'}
+function gcolor(p){return p.dec==='promote'?css('--c-promote'):p.dec==='local'?css('--c-localpromote')
+  :p.dec==='forfeit'?css('--c-distress'):p.dec==='playoff'?css('--c-play')
+  :p.dec==='baseline'?css('--c-baseline'):css('--c-reject')}
+function drawAscent(){
+  svgA.innerHTML='';
+  const y = yScale();
+  const dom = zoom? [0.3290,0.3415] : [0,0.36];
+  // bands
+  bands.forEach(b=>{
+    el(svgA,'rect',{x:xA(b.a),y:A.t,width:xA(b.b)-xA(b.a),height:A.h-A.t-A.b,
+      fill:css(D[b.d]),opacity:0.055});
+    el(svgA,'text',{x:(xA(b.a)+xA(b.b))/2,y:A.h-10,'text-anchor':'middle',
+      fill:css(D[b.d]),'font-size':11,'font-weight':600}).textContent=(b.d==='play'?'playoff':b.d);
+  });
+  // grid + y labels
+  const ticks = zoom? [0.330,0.333,0.336,0.339,0.3415] : [0,0.1,0.2,0.3,0.36];
+  ticks.forEach(v=>{
+    el(svgA,'line',{x1:A.l,x2:A.w-A.r,y1:y(v),y2:y(v),stroke:css('--grid-line')});
+    el(svgA,'text',{x:A.l-8,y:y(v)+4,'text-anchor':'end',fill:css('--text-faint'),'font-size':10.5})
+      .textContent=v.toFixed(zoom?4:2);
+  });
+  el(svgA,'text',{x:A.l-8,y:A.t-4,'text-anchor':'end',fill:css('--text-faint'),'font-size':10})
+    .textContent='gini_w';
+  // takeover rule
+  el(svgA,'line',{x1:xA(6),x2:xA(6),y1:A.t,y2:A.h-A.b,stroke:css('--c-takeover'),
+    'stroke-dasharray':'3 4',opacity:.8});
+  el(svgA,'text',{x:xA(6)+5,y:A.t+12,fill:css('--c-takeover'),'font-size':11}).textContent='⚑ takeover';
+  // champion step line
+  let dPath='';champ.forEach((p,i)=>{dPath+=(i?'L':'M')+xA(p[0])+','+y(p[1])+' '});
+  el(svgA,'path',{d:dPath,fill:'none',stroke:css('--c-baseline'),'stroke-width':1.6,'stroke-dasharray':'5 4'});
+  // clamp indicators
+  exps.forEach(p=>{
+    const clamped = zoom && p.g<dom[0];
+    const py = y(p.g);
+    if(clamped) el(svgA,'text',{x:xA(p.s),y:A.h-A.b-6,'text-anchor':'middle',
+      fill:css('--text-faint'),'font-size':9.5}).textContent='▼ '+p.g.toFixed(4);
+    const g = el(svgA,'text',{x:xA(p.s),y:py+(clamped?-8:5),'text-anchor':'middle',
+      fill:gcolor(p),'font-size':p.dec==='promote'||p.dec==='playoff'?17:14,cursor:'pointer'});
+    g.textContent=glyph(p);
+    const dd = p.d==='play'?'playoff':p.d;
+    g.addEventListener('mousemove',ev=>showTip(ev,
+      `<div class="t">${p.n}</div><div class="m">${dd} · gini ${p.g.toFixed(4)} · ${p.dec}</div><div style="margin-top:4px">${p.t}</div>`));
+    g.addEventListener('mouseleave',hideTip);
+  });
+  // final champion annotation
+  el(svgA,'text',{x:xA(13),y:y(0.33732)-14,'text-anchor':'end',fill:css('--c-play'),
+    'font-size':11,'font-weight':600}).textContent='final champion 0.3373 ';
+}
+function setZoom(z){zoom=z;
+  document.getElementById('zZoom').classList.toggle('on',z);
+  document.getElementById('zFull').classList.toggle('on',!z);
+  drawAscent();}
+document.getElementById('zZoom').onclick=()=>setZoom(true);
+document.getElementById('zFull').onclick=()=>setZoom(false);
+drawAscent();
+
+/* ---------------- Mission Timeline ---------------- */
+const M={w:1080,h:300,l:96,r:16,t:26,b:30,t0:0,t1:69}; // minutes from 16:49
+const xM=m=>M.l+(M.w-M.l-M.r)*(m-M.t0)/(M.t1-M.t0);
+const lanes=[
+ {id:'orch',label:'orchestrator',c:'--c-orchestrator',y:52},
+ {id:'d01',label:'d01 · families',c:'--c-d1',y:100,a:3.3,b:18.35,
+   cyc:[{m:4.9,o:'pro'},{m:6.4,o:'rej'},{m:9.4,o:'rej'},{m:15.4,o:'rej'}]},
+ {id:'d02',label:'d02 · xgboost',c:'--c-d2',y:134,a:21.3,b:23.4,dis:1,
+   cyc:[{m:22.9,o:'rej'}]},
+ {id:'d03',label:'d03 · geo ablations',c:'--c-d3',y:168,a:26.7,b:36.5,
+   cyc:[{m:29.2,o:'rej'},{m:32.4,o:'rej'},{m:35.9,o:'rej'}]},
+ {id:'d04',label:'d04 · histgbm',c:'--c-d4',y:202,a:38.6,b:45.4,dis:1,
+   cyc:[{m:41.5,o:'loc'},{m:44.6,o:'for'}]},
+ {id:'d05',label:'d05 · finalist',c:'--c-d5',y:236,a:47.6,b:53.1,
+   cyc:[{m:52.3,o:'rej'}]},
+ {id:'play',label:'consolidation',c:'--c-play',y:270,a:53.4,b:67.6,
+   cyc:[{m:66.5,o:'pro'}]}];
+const notes=[
+ {m:19.8,g:'◆',lane:'d01',txt:'Reflection: LightGBM Poisson champion; same-family tuning below noise floor. Seed a family comparison.'},
+ {m:24.1,g:'⚑',lane:'d02',tko:1,txt:'Takeover: Luna died mid-cycle. Diagnosis-only recovery of the running XGBoost comparison.'},
+ {m:24.9,g:'◆',lane:'d02',txt:'Reflection: XGBoost inferior; distress was process, not model. Next: HistGBM.'},
+ {m:37.0,g:'◆',lane:'d03',txt:'Reflection: retain full geographic set; spend final cycles on HistGBM line.'},
+ {m:46.0,g:'◆',lane:'d04',txt:'Reflection: HistGBM plausible (local promote); GLM ruled out. Seed finalist run.'},
+ {m:53.5,g:'◆',lane:'d05',txt:'Reflection: 31-leaf finalist retained; proceed to framework playoff.'},
+ {m:67.6,g:'▣',lane:'play',txt:'Decision: playoff complete — HistGBM finalist consolidated as final champion (0.3373).'}];
+const oc={pro:'--c-promote',loc:'--c-localpromote',rej:'--c-reject',for:'--c-distress'};
+const svgM=document.getElementById('mission');
+(function drawMission(){
+  // time axis
+  [0,10,20,30,40,50,60].forEach(m=>{
+    el(svgM,'line',{x1:xM(m),x2:xM(m),y1:M.t,y2:M.h-M.b,stroke:css('--grid-line')});
+    const hh=16*60+49+m, H=Math.floor(hh/60), Mi=hh%60;
+    el(svgM,'text',{x:xM(m),y:M.h-12,'text-anchor':'middle',fill:css('--text-faint'),'font-size':10})
+      .textContent=String(H).padStart(2,'0')+':'+String(Mi).padStart(2,'0');
+  });
+  const laneY=Object.fromEntries(lanes.map(l=>[l.id,l.y]));
+  lanes.forEach(l=>{
+    el(svgM,'text',{x:M.l-10,y:l.y+4,'text-anchor':'end',fill:css(l.c),'font-size':11,'font-weight':600})
+      .textContent=l.label;
+    el(svgM,'line',{x1:M.l,x2:M.w-M.r,y1:l.y,y2:l.y,stroke:css('--grid-line')});
+    if(l.id==='orch'){
+      el(svgM,'line',{x1:xM(0.2),x2:xM(67.6),y1:l.y,y2:l.y,stroke:css(l.c),'stroke-width':2,opacity:.55});
+      return;
+    }
+    // spawn connector from orchestrator lane
+    el(svgM,'path',{d:`M ${xM(l.a)} ${laneY.orch+3} C ${xM(l.a)} ${(laneY.orch+l.y)/2}, ${xM(l.a)} ${(laneY.orch+l.y)/2}, ${xM(l.a)} ${l.y-8}`,
+      fill:'none',stroke:css(l.c),opacity:.45,'stroke-width':1.2});
+    const bar=el(svgM,'rect',{x:xM(l.a),y:l.y-7,width:Math.max(6,xM(l.b)-xM(l.a)),height:14,rx:7,
+      fill:css(l.c),opacity:.35,stroke:css(l.c),'stroke-width':1.2,cursor:'pointer'});
+    if(l.dis) el(svgM,'text',{x:xM(l.b)+6,y:l.y+4,fill:css('--c-distress'),'font-size':11}).textContent='✕';
+    bar.addEventListener('mousemove',ev=>showTip(ev,`<div class="t">${l.label}</div><div class="m">${l.id==='play'?'playoff replay + final decision':'delegation lifespan'} · ${l.cyc.length} decided cycle${l.cyc.length>1?'s':''}${l.dis?' · distress raised':''}</div>`));
+    bar.addEventListener('mouseleave',hideTip);
+    l.cyc.forEach(cy=>el(svgM,'circle',{cx:xM(cy.m),cy:l.y,r:3.4,fill:css(oc[cy.o])}));
+  });
+  // takeover arc: d02 back up to orchestrator
+  el(svgM,'path',{d:`M ${xM(23.4)} ${laneY.d02-8} C ${xM(23.6)} ${laneY.orch+30}, ${xM(23.8)} ${laneY.orch+22}, ${xM(24.1)} ${laneY.orch+6}`,
+    fill:'none',stroke:css('--c-takeover'),'stroke-width':1.6,'stroke-dasharray':'4 3'});
+  // orchestrator notes
+  notes.forEach(n=>{
+    const g=el(svgM,'text',{x:xM(n.m),y:laneY.orch+5,'text-anchor':'middle',cursor:'pointer',
+      fill:css(n.tko?'--c-takeover':n.g==='▣'?'--c-promote':'--c-orchestrator'),'font-size':n.tko?15:13});
+    g.textContent=n.g;
+    g.addEventListener('mousemove',ev=>showTip(ev,`<div class="t">${n.tko?'Takeover':n.g==='▣'?'Final decision':'Reflection'} · re ${n.lane}</div><div>${n.txt}</div>`));
+    g.addEventListener('mouseleave',hideTip);
+  });
+})();
+
+/* ---------------- Token burn ---------------- */
+const toks=[
+ {d:'d01',inp:7801150,cach:7507456,out:13815},
+ {d:'d02',inp:575885,cach:510720,out:3461},
+ {d:'d03',inp:1546324,cach:1451264,out:6845},
+ {d:'d04',inp:913892,cach:830720,out:4972},
+ {d:'d05',inp:786899,cach:737536,out:3994}];
+(function(){
+  const s=document.getElementById('tokens'),W=520,H=240,l=54,r=14,t=14,b=30;
+  const max=8e6, x=v=>l+(W-l-r)*v/max;
+  [0,2e6,4e6,6e6,8e6].forEach(v=>{
+    el(s,'line',{x1:x(v),x2:x(v),y1:t,y2:H-b,stroke:css('--grid-line')});
+    el(s,'text',{x:x(v),y:H-12,'text-anchor':'middle',fill:css('--text-faint'),'font-size':10})
+      .textContent=(v/1e6)+'M';});
+  toks.forEach((k,i)=>{
+    const y=t+10+i*38;
+    el(s,'text',{x:l-8,y:y+13,'text-anchor':'end',fill:css(D[k.d]),'font-size':11,'font-weight':600}).textContent=k.d;
+    const g1=el(s,'rect',{x:l,y:y,width:x(k.cach)-l,height:18,rx:3,fill:css('--tk-cached'),cursor:'pointer'});
+    const g2=el(s,'rect',{x:x(k.cach),y:y,width:Math.max(1.5,x(k.inp)-x(k.cach)),height:18,rx:2,fill:css('--tk-uncached'),cursor:'pointer'});
+    const pct=(100*k.cach/k.inp).toFixed(1);
+    const tt=ev=>showTip(ev,`<div class="t">${k.d}</div><div class="m">input ${(k.inp/1e6).toFixed(2)}M · cached ${pct}%<br>uncached ${((k.inp-k.cach)/1e3).toFixed(0)}k · output ${(k.out/1e3).toFixed(1)}k</div>`);
+    [g1,g2].forEach(g=>{g.addEventListener('mousemove',tt);g.addEventListener('mouseleave',hideTip)});
+    el(s,'text',{x:x(k.inp)+6,y:y+13,fill:css('--text-faint'),'font-size':10})
+      .textContent=(k.inp/1e6).toFixed(2)+'M · '+pct+'%';
+  });
+})();
+
+/* ---------------- Budget ledger ---------------- */
+const bud=[ // committed, decided, forfeited (refund shown as hollow)
+ {d:'d01',com:4,dec:3,forf:1},
+ {d:'d02',com:3,dec:1,forf:2},
+ {d:'d03',com:3,dec:3,forf:0},
+ {d:'d04',com:3,dec:1,forf:1},
+ {d:'d05',com:1,dec:1,forf:0}];
+(function(){
+  const s=document.getElementById('budget'),W=520,H=240,l=54,r=14,t=14,b=30,max=4;
+  const x=v=>l+(W-l-r)*v/max;
+  [0,1,2,3,4].forEach(v=>{
+    el(s,'line',{x1:x(v),x2:x(v),y1:t,y2:H-b,stroke:css('--grid-line')});
+    el(s,'text',{x:x(v),y:H-12,'text-anchor':'middle',fill:css('--text-faint'),'font-size':10}).textContent=v;});
+  bud.forEach((k,i)=>{
+    const y=t+10+i*38;
+    el(s,'text',{x:l-8,y:y+13,'text-anchor':'end',fill:css(D[k.d]),'font-size':11,'font-weight':600}).textContent=k.d;
+    // committed outline
+    el(s,'rect',{x:l,y:y,width:x(k.com)-l,height:18,rx:4,fill:'none',stroke:css('--border-strong'),'stroke-dasharray':k.forf?'4 3':'0'});
+    el(s,'rect',{x:l,y:y,width:Math.max(0,x(k.dec)-l),height:18,rx:4,fill:css('--c-promote'),opacity:.75});
+    if(k.forf) el(s,'rect',{x:x(k.dec),y:y,width:x(k.forf)-l,height:18,rx:0,fill:css('--c-distress'),opacity:.55});
+    el(s,'text',{x:x(k.com)+6,y:y+13,fill:css('--text-faint'),'font-size':10})
+      .textContent=`${k.dec} decided${k.forf?' · '+k.forf+' forfeited':''}`;
+  });
+})();
+})();
+</script>

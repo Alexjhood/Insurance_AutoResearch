@@ -1,0 +1,131 @@
+/* ============================================================
+   Flight Deck — canonical design tokens (SPEC.md §4)
+   Dark (mission-control) is the default theme; light is an
+   override via [data-theme="light"]. Components consume ONLY
+   these variables — never raw colors/sizes.
+   ============================================================ */
+
+:root {
+  /* ---- Surfaces (dark) ---- */
+  --bg-app: #0b0e14;           /* app canvas — near-black, blue-tinted */
+  --bg-raised: #11151f;        /* cards, panels */
+  --bg-raised-2: #171c29;      /* nested panels, table headers, hover */
+  --bg-inset: #070910;         /* chart wells, code/log panes */
+  --bg-overlay: rgba(7, 9, 16, 0.82);   /* drawers, modals scrim */
+
+  --border-subtle: #1e2433;
+  --border-strong: #2c3550;
+  --grid-line: #161b28;        /* chart gridlines — barely-there */
+
+  /* ---- Text ---- */
+  --text-primary: #e8ecf4;
+  --text-secondary: #9aa4bc;
+  --text-faint: #5c6680;
+  --text-inverse: #0b0e14;
+
+  /* ---- Brand / interactive ---- */
+  --accent: #6ea8ff;           /* links, focus, selected states */
+  --accent-strong: #8dbcff;
+  --focus-ring: 0 0 0 2px var(--bg-app), 0 0 0 4px var(--accent);
+
+  /* ---- Semantic (fixed meanings — SPEC §4) ---- */
+  --c-promote: #3ecf8e;        /* promotions, wins, clean exits */
+  --c-localpromote: #35b8c4;   /* local_promote / line progress */
+  --c-reject: #8a93a8;         /* rejections — neutral, not red */
+  --c-distress: #ff5d5d;       /* distress flags, crashes, failures */
+  --c-takeover: #ffb347;       /* takeovers, repairs, warnings */
+  --c-orchestrator: #a78bfa;   /* orchestrator voice/lane */
+  --c-baseline: #62708c;       /* baselines & reference lines (pair w/ dashed stroke) */
+
+  /* dim companions for fills/bands (12–18% alpha of the above) */
+  --c-promote-dim: rgba(62, 207, 142, 0.14);
+  --c-localpromote-dim: rgba(53, 184, 196, 0.14);
+  --c-distress-dim: rgba(255, 93, 93, 0.14);
+  --c-takeover-dim: rgba(255, 179, 71, 0.16);
+  --c-orchestrator-dim: rgba(167, 139, 250, 0.14);
+
+  /* ---- Delegation identity palette (categorical, colorblind-safe order;
+          d01..d08 keep the SAME color on every page/exhibit) ---- */
+  --c-d1: #5b9bff;
+  --c-d2: #f2a35c;
+  --c-d3: #58c9b1;
+  --c-d4: #e07be0;
+  --c-d5: #c9d34e;
+  --c-d6: #ff8fa3;
+  --c-d7: #7fd0ff;
+  --c-d8: #b39ddb;
+
+  /* ---- Token-flow stack (cost charts; fixed meanings) ---- */
+  --tk-cached: #35507a;        /* cached input — the bulk, calm */
+  --tk-uncached: #6ea8ff;      /* uncached input — the paid-attention part */
+  --tk-output: #3ecf8e;        /* output tokens */
+  --tk-reasoning: #a78bfa;     /* reasoning tokens */
+
+  /* ---- Typography ---- */
+  --font-ui: "Inter", -apple-system, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+
+  --fs-xs: 11px;  --fs-sm: 12.5px;  --fs-md: 14px;
+  --fs-lg: 16px;  --fs-xl: 20px;    --fs-2xl: 26px;  --fs-hero: 34px;
+  --lh-tight: 1.25; --lh-body: 1.55;
+  --fw-regular: 400; --fw-medium: 500; --fw-semibold: 600;
+  /* metric values: font-mono + font-variant-numeric: tabular-nums */
+
+  /* ---- Spacing / radii / shadows ---- */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 24px; --sp-6: 32px; --sp-7: 48px; --sp-8: 64px;
+  --radius-sm: 6px; --radius-md: 8px; --radius-lg: 12px; --radius-pill: 999px;
+  --shadow-raised: 0 1px 0 rgba(255,255,255,0.03) inset, 0 8px 24px rgba(0,0,0,0.35);
+  --shadow-drawer: 0 12px 48px rgba(0,0,0,0.55);
+  --glow-status: 0 0 8px currentColor;   /* status dots only — use sparingly */
+
+  /* ---- Motion ---- */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 150ms; --dur-med: 250ms; --dur-reveal: 420ms;
+
+  /* ---- Layout ---- */
+  --content-max: 1440px;
+  --narrative-max: 760px;      /* journey narrative column */
+  --nav-w: 216px;
+  --timeline-h: 180px;         /* pinned MissionTimeline */
+}
+
+/* ---- Light theme override (secondary; also used for print/export) ---- */
+[data-theme="light"] {
+  --bg-app: #f6f7fa;
+  --bg-raised: #ffffff;
+  --bg-raised-2: #eef1f6;
+  --bg-inset: #f0f2f7;
+  --bg-overlay: rgba(23, 28, 41, 0.4);
+  --border-subtle: #dde2ec;
+  --border-strong: #b9c2d4;
+  --grid-line: #e7eaf2;
+  --text-primary: #171c29;
+  --text-secondary: #4c5670;
+  --text-faint: #8a93a8;
+  --text-inverse: #ffffff;
+  --accent: #2f6fdb;
+  --accent-strong: #1f5ac2;
+  --c-promote: #199e64;
+  --c-localpromote: #0e8b96;
+  --c-reject: #6b7590;
+  --c-distress: #d63c3c;
+  --c-takeover: #c47b12;
+  --c-orchestrator: #7c5cd6;
+  --c-baseline: #8a93a8;
+  --tk-cached: #b9cdec;
+  --tk-uncached: #2f6fdb;
+  --tk-output: #199e64;
+  --tk-reasoning: #7c5cd6;
+  --shadow-raised: 0 1px 2px rgba(23,28,41,0.06), 0 6px 16px rgba(23,28,41,0.06);
+  --shadow-drawer: 0 12px 48px rgba(23,28,41,0.18);
+}
+
+/* ---- Decision / event glyph vocabulary (SPEC §4, pair color with glyph) ----
+   promote ▲   local_promote ◭   reject ○   distress ✕   takeover ⚑
+   reflection ◆   orchestrator decision ▣   seed-transfer ⇢   baseline ┄
+--------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-fast: 0ms; --dur-med: 0ms; --dur-reveal: 0ms; }
+}
