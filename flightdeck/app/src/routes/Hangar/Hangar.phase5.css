@@ -12,6 +12,12 @@
 .spark-fill-top { stop-color: var(--accent); stop-opacity: 0.28; }
 .spark-fill-bottom { stop-color: var(--accent); stop-opacity: 0.02; }
 .spark-dot { fill: var(--accent); }
+@media (prefers-reduced-motion: no-preference) {
+  .sparkline-draw polyline { stroke-dasharray: 1; stroke-dashoffset: 1; animation: spark-draw 720ms var(--ease-out) forwards; }
+  .sparkline-draw polygon, .sparkline-draw .spark-dot { opacity: 0; animation: spark-reveal var(--dur-reveal) var(--ease-out) 420ms forwards; }
+  @keyframes spark-draw { to { stroke-dashoffset: 0; } }
+  @keyframes spark-reveal { to { opacity: 1; } }
+}
 .scatter-legend { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(--text-secondary); }
 .scatter-legend span { display: inline-flex; align-items: center; gap: var(--sp-1); }
 .scatter-legend i { width: 10px; height: 10px; border-radius: 50%; }

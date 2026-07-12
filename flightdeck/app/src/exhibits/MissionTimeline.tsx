@@ -16,7 +16,7 @@ const NOTE_VAR: Record<string, string> = { reflection: '--c-orchestrator', takeo
 
 function experimentHash(e: Experiment): string {
   if (e.delegation_id == null) return 'finale';
-  if (e.is_seed || e.is_baseline) return `chapter-${e.delegation_id}`;
+  if (e.is_seed || e.is_baseline) return e.delegation_id;
   return `${e.delegation_id}-x${e.cycle ?? e.seq}`;
 }
 
@@ -160,8 +160,8 @@ export function MissionTimeline({ delegations, experiments, notes, activeDelegat
                   style={{ fill: `var(${lane.colorVar})`, stroke: `var(${lane.colorVar})` }} role="link" tabIndex={0}
                   aria-label={`${d.delegation_id} lifespan — open journey chapter`}
                   onMouseMove={ev => show(ev, delegationTip(d))} onMouseLeave={hide}
-                  onClick={() => scrollTo(`chapter-${d.delegation_id}`)}
-                  onKeyDown={ev => ev.key === 'Enter' && scrollTo(`chapter-${d.delegation_id}`)} />
+                  onClick={() => scrollTo(d.delegation_id)}
+                  onKeyDown={ev => ev.key === 'Enter' && scrollTo(d.delegation_id)} />
                 {d.taken_over && <rect x={bx0} y={y - 7} width={Math.max(8, bx1 - bx0)} height={14} rx={7} fill="url(#fd-takeover-stripes)" pointerEvents="none" />}
                 {d.distress.active.length > 0 && <text className="distress-mark" x={bx1 + 6} y={y + 4}>✕</text>}
                 {/* cycle ticks */}
@@ -194,7 +194,7 @@ export function MissionTimeline({ delegations, experiments, notes, activeDelegat
             const glyph = NOTE_GLYPH[n.kind] ?? '◆';
             const colorVar = NOTE_VAR[n.kind] ?? '--c-orchestrator';
             const targetLane = n.delegation_id != null && laneIndex.has(n.delegation_id) ? laneIndex.get(n.delegation_id)! : null;
-            const targetId = n.kind === 'decision' ? 'finale' : n.delegation_id ? `chapter-${n.delegation_id}` : 'finale';
+            const targetId = n.kind === 'decision' ? 'finale' : n.delegation_id ?? 'finale';
             return (
               <g key={`${n.at}-${i}`}>
                 {targetLane != null && n.kind !== 'takeover' && (

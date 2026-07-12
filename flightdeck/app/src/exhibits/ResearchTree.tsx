@@ -14,7 +14,7 @@ interface TreeNode { e: Experiment; children: TreeNode[]; depth: number; x: numb
 
 function journeyHash(e: Experiment): string {
   if (e.delegation_id == null) return '#finale';
-  if (e.is_seed || e.is_baseline) return `#chapter-${e.delegation_id}`;
+  if (e.is_seed || e.is_baseline) return `#${e.delegation_id}`;
   return `#${e.delegation_id}-x${e.cycle ?? e.seq}`;
 }
 
