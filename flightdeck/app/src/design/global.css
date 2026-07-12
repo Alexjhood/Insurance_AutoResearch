@@ -1,0 +1,15 @@
+@import '../../../design/tokens.css';
+
+* { box-sizing: border-box; }
+html { background: var(--bg-app); color: var(--text-primary); font-family: var(--font-ui); font-size: var(--fs-md); }
+body { margin: 0; min-width: 768px; min-height: 100vh; background: var(--bg-app); }
+button, input, select { font: inherit; }
+button, a { -webkit-tap-highlight-color: transparent; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-strong); }
+:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.page { max-width: var(--content-max); margin: 0 auto; padding: var(--sp-6); }
+.eyebrow { color: var(--text-faint); font-size: var(--fs-xs); font-weight: var(--fw-semibold); text-transform: uppercase; }
+.panel { background: var(--bg-raised); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.error-state { padding: var(--sp-5); color: var(--c-distress); }

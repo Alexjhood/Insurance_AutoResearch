@@ -64,3 +64,16 @@ One line per decision, newest phase last.
   keeps snapshots portable and avoids coupling to `artifacts/tracks/` layout
   (the one deliberate exception is the consolidation registry, which DATA.md §2.3
   explicitly resolves from `artifacts/tracks/<track>/runs/<run_id>`).
+
+## Phase 2 — Server + app shell + Hangar + file viewer
+
+- **SSE wire format.** The rebuild endpoint emits named `progress`, `complete`,
+  and `error` events with one JSON object per event. The app consumes the POST
+  response stream directly because browser `EventSource` only supports GET.
+- **Markdown heading navigation.** Native heading anchors and browser find are
+  retained for Phase 2; a dedicated generated table of contents is deferred
+  because DATA.md has no heading metadata and `marked` renders the semantic
+  heading structure directly.
+- **Phase 2 scatter identity.** The placeholder scatter uses the first canonical
+  delegation color for every point. Dataset-specific color assignment is left
+  to the Phase 5 league polish so colors remain token-only and stable.

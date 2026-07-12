@@ -1,0 +1,2 @@
+import './primitives.css';
+export function MetricNumber({ value, kind = 'gini' }: {value: number | null; kind?: 'gini'|'lift'|'percent'}) { if (value == null) return <span className="metric-number">—</span>; const text = kind === 'percent' ? `${(value * 100).toFixed(1)}%` : kind === 'lift' ? `${value >= 0 ? '+' : '−'}${Math.abs(value).toFixed(4)}` : value.toFixed(4); return <span className={`metric-number ${kind === 'lift' ? value >= 0 ? 'positive' : 'negative' : ''}`}>{text}</span>; }

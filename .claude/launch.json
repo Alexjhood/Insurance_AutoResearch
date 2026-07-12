@@ -7,6 +7,20 @@
       "runtimeArgs": ["run", "dev"],
       "cwd": "console/frontend",
       "port": 3000
+    },
+    {
+      "name": "flightdeck-api",
+      "runtimeExecutable": ".venv/bin/uvicorn",
+      "runtimeArgs": ["flightdeck.server.main:app", "--host", "0.0.0.0", "--port", "8799", "--reload"],
+      "cwd": ".",
+      "port": 8799
+    },
+    {
+      "name": "flightdeck-app",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "cwd": "flightdeck/app",
+      "port": 5199
     }
   ]
 }

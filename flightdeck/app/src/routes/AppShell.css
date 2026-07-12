@@ -1,0 +1,13 @@
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+.topbar { height: 64px; display: flex; align-items: center; gap: var(--sp-5); padding: 0 var(--sp-5); border-bottom: 1px solid var(--border-subtle); background: var(--bg-raised); position: sticky; top: 0; z-index: 20; }
+.brand { display: flex; gap: var(--sp-3); align-items: center; color: var(--text-primary); font-size: var(--fs-lg); font-weight: var(--fw-semibold); }
+.brand-mark { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid var(--accent); border-radius: var(--radius-sm); color: var(--accent); font-family: var(--font-mono); font-size: var(--fs-xs); }
+.orch-switcher { flex: 1; max-width: 420px; }
+.orch-switcher select { width: 100%; color: var(--text-primary); background: var(--bg-raised-2); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: var(--sp-2) var(--sp-3); }
+.top-actions { margin-left: auto; display: flex; gap: var(--sp-2); }
+.icon-button, .command-button { height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-2); color: var(--text-primary); background: var(--bg-raised-2); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); cursor: pointer; }
+.icon-button { width: 36px; padding: 0; }.icon-button svg,.command-button svg { width: 16px; height: 16px; }.command-button { padding: 0 var(--sp-3); }.command-button:disabled { color: var(--text-faint); }
+.spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
+.toast { position: fixed; right: var(--sp-5); top: 76px; z-index: 30; padding: var(--sp-3) var(--sp-4); background: var(--bg-raised-2); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow-raised); }
+.workspace { display: grid; grid-template-columns: var(--nav-w) minmax(0,1fr); min-height: calc(100vh - 64px); }.side-nav { border-right: 1px solid var(--border-subtle); padding: var(--sp-5) var(--sp-3); background: var(--bg-raised); }.side-nav a { display: block; padding: var(--sp-3); color: var(--text-secondary); border-radius: var(--radius-sm); }.side-nav a.active { color: var(--text-primary); background: var(--bg-raised-2); }.workspace-content { min-width: 0; }
+@media (max-width: 900px) { .workspace { grid-template-columns: 160px minmax(0,1fr); }.brand > span:last-child { display: none; } }
