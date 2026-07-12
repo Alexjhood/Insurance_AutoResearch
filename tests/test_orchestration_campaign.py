@@ -286,6 +286,7 @@ def test_campaign_report_aggregates_framework_facts_and_keeps_testimony_apart(
     assert framework["distress"]["by_flag"]["all_rejected"] == 1
     assert framework["distress"]["by_flag"]["champion_is_baseline"] == 1
     assert framework["distress"]["by_flag"]["repair_exhausted"] == 0
+    assert framework["informational"]["by_flag"] == {"early_stop": 0, "auto_rejected": 0}
     assert framework["repairs"] == {"requests": 1, "per_cycle": pytest.approx(0.3333)}
     assert framework["cost"]["cost_usd"] == pytest.approx(2.25)
     assert framework["cost"]["cost_per_cycle_usd"] == pytest.approx(0.75)
@@ -375,6 +376,39 @@ def test_campaign_report_partial_cost_names_which_delegations_it_covers(
     assert cost["cost_usd_reported_by"] == ["d01"]
     assert cost["cost_usd_missing_for"] == ["d02"]
     assert "covers only d01" in campaign_mod.render_campaign_markdown(payload)
+
+
+def test_campaign_report_attributes_usage_by_model(orchestrations_root, tmp_path, monkeypatch):
+    from autoresearch.orchestration import backends as backends_mod
+    registry = tmp_path / "backends.toml"
+    registry.write_text('''
+[backends.stub]
+tool = "claude"
+command = ["claude", "-p"]
+prompt_via = "stdin"
+track = "claude"
+model_provider = "anthropic"
+model_name = "sonnet-medium"
+''', encoding="utf-8")
+    monkeypatch.setattr(backends_mod, "BACKENDS_CONFIG_PATH", registry)
+    d01 = _delegation("d01")
+    report = _report(d01, cost_usd=1.25)
+    report["cost"]["llm_usage"].update({"cost_estimated": True, "backend": {
+        "input_tokens": 100, "output_tokens": 20,
+        "details": {"cached_input_tokens": 80, "reasoning_tokens": 5}}})
+    orch = _campaign(delegations=(d01,), reports={"d01": report})
+    orch = manifest_mod.Orchestration.from_dict({**orch.to_dict(), "orchestrator": {
+        "provider": "anthropic", "model": "claude-opus-4-8", "effort": "high"}})
+    payload = build_campaign_report(orch, generated_at="2026-07-12T10:00:00Z")
+    cost = payload["framework_computed"]["cost"]
+    model = cost["usage_by_model"]["anthropic/sonnet-medium"]
+    assert (model["input_tokens"], model["cached_tokens"], model["output_tokens"],
+            model["reasoning_tokens"]) == (100, 80, 20, 5)
+    assert model["cost_usd"] == pytest.approx(1.25)
+    orchestrator = cost["usage_by_model"]["orchestrator:anthropic/claude-opus-4-8"]
+    assert orchestrator["unmeasured"] is True
+    assert orchestrator["effort"] == "high"
+    assert "Orchestrator model: anthropic/claude-opus-4-8 · high" in campaign_mod.render_campaign_markdown(payload)
 
 
 def test_campaign_report_carries_completed_playoff_lineage(orchestrations_root):

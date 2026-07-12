@@ -241,6 +241,7 @@ class Orchestration:
     status: str = "active"
     model_provider: str | None = None
     model_name: str | None = None
+    model_effort: str | None = None
     delegations: tuple[Delegation, ...] = ()
     consolidation: Consolidation = Consolidation()
     campaign_report: str | None = None
@@ -318,6 +319,8 @@ class Orchestration:
             "status": self.status,
             "model_provider": self.model_provider,
             "model_name": self.model_name,
+            "model_effort": self.model_effort,
+            "orchestrator": {"provider": self.model_provider, "model": self.model_name, "effort": self.model_effort},
             "total_cycle_budget": self.total_cycle_budget,
             "cycles_committed": self.cycles_committed,
             "delegations": [d.to_dict() for d in self.delegations],
@@ -334,8 +337,9 @@ class Orchestration:
             created_at=str(raw["created_at"]),
             total_cycle_budget=int(raw["total_cycle_budget"]),
             status=str(raw.get("status", "active")),
-            model_provider=raw.get("model_provider"),
-            model_name=raw.get("model_name"),
+            model_provider=(raw.get("orchestrator") or {}).get("provider") or raw.get("model_provider"),
+            model_name=(raw.get("orchestrator") or {}).get("model") or raw.get("model_name"),
+            model_effort=(raw.get("orchestrator") or {}).get("effort") or raw.get("model_effort"),
             delegations=tuple(Delegation.from_dict(d) for d in raw.get("delegations") or ()),
             consolidation=Consolidation.from_dict(raw.get("consolidation")),
             campaign_report=raw.get("campaign_report"),
@@ -432,6 +436,7 @@ def create_orchestration(
     total_cycle_budget: int,
     model_provider: str | None = None,
     model_name: str | None = None,
+    model_effort: str | None = None,
     orchestration_id: str | None = None,
 ) -> Orchestration:
     """Create the campaign folder skeleton and write the initial manifest."""
@@ -445,14 +450,18 @@ def create_orchestration(
     for sub in ("baseline", "briefs", "prompts", "logs", "reports", "runs", "playoff"):
         (base / sub).mkdir(parents=True, exist_ok=True)
 
+    provider = str(model_provider).strip().lower() if model_provider else None
+    model = str(model_name).strip().lower() if model_name else None
+    effort = str(model_effort).strip().lower() if model_effort else None
     orch = Orchestration(
         orchestration_id=oid,
         dataset=dataset,
         target_mode=target_mode,
         created_at=utc_stamp(),
         total_cycle_budget=int(total_cycle_budget),
-        model_provider=model_provider,
-        model_name=model_name,
+        model_provider=provider,
+        model_name=model,
+        model_effort=effort,
     )
     save_orchestration(orch)
     return orch

@@ -86,6 +86,9 @@ class Backend:
     max_budget_usd: float | None = None
     notes: str = ""
     min_tool_version: str | None = None
+    usd_per_mtok_input: float | None = None
+    usd_per_mtok_cached: float | None = None
+    usd_per_mtok_output: float | None = None
 
     def __post_init__(self) -> None:
         if self.track not in ALLOWED_TRACKS:
@@ -108,6 +111,10 @@ class Backend:
             )
         if not self.command:
             raise ValueError(f"backend {self.name!r}: command must not be empty")
+        for field_name in ("usd_per_mtok_input", "usd_per_mtok_cached", "usd_per_mtok_output"):
+            value = getattr(self, field_name)
+            if value is not None and value < 0:
+                raise ValueError(f"backend {self.name!r}: {field_name} must be non-negative")
         if self.prompt_via == "argv" and "{prompt}" not in self.command:
             raise ValueError(
                 f"backend {self.name!r}: prompt_via='argv' requires a '{{prompt}}' "
@@ -240,6 +247,9 @@ class Backend:
             "max_turns": self.max_turns,
             "max_budget_usd": self.max_budget_usd,
             "notes": self.notes,
+            "usd_per_mtok_input": self.usd_per_mtok_input,
+            "usd_per_mtok_cached": self.usd_per_mtok_cached,
+            "usd_per_mtok_output": self.usd_per_mtok_output,
         }
 
 
@@ -312,6 +322,9 @@ def _parse_backend(name: str, entry: dict[str, Any], config_path: Path) -> Backe
         min_tool_version=(
             str(entry["min_tool_version"]) if entry.get("min_tool_version") else None
         ),
+        usd_per_mtok_input=(float(entry["usd_per_mtok_input"]) if entry.get("usd_per_mtok_input") is not None else None),
+        usd_per_mtok_cached=(float(entry["usd_per_mtok_cached"]) if entry.get("usd_per_mtok_cached") is not None else None),
+        usd_per_mtok_output=(float(entry["usd_per_mtok_output"]) if entry.get("usd_per_mtok_output") is not None else None),
     )
 
 

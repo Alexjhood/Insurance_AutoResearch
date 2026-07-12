@@ -36,6 +36,7 @@ DISTRESS_FLAGS = (
     "calibration_anomaly",
     "cycles_forfeited",
 )
+INFORMATIONAL_FLAGS = ("early_stop", "auto_rejected")
 
 #: Model family of the flat-rate experiment every run starts from.
 BASELINE_MODEL_FAMILY = "global_mean"
@@ -56,12 +57,16 @@ class DistressAssessment:
 
     active: tuple[str, ...]
     detail: str
+    informational: tuple[str, ...] = ()
+    informational_detail: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "flags": list(DISTRESS_FLAGS),
             "active": list(self.active),
             "detail": self.detail,
+            "informational": list(self.informational),
+            "informational_detail": self.informational_detail,
         }
 
 
@@ -90,6 +95,8 @@ def assess_distress(
 
     active: list[str] = []
     details: list[str] = []
+    informational: list[str] = []
+    informational_details: list[str] = []
 
     if status == "failed" or (exit_code is not None and exit_code != 0):
         active.append("crashed")
@@ -112,10 +119,14 @@ def assess_distress(
             f"a cycle needed its {MAX_REPAIR_ATTEMPTS}rd and final model attempt"
         )
 
-    if cycles_used > 0 and not any(d in _PROMOTING_DECISIONS for d in decisions):
+    auto_rejected = sum(1 for d in decisions if d == "auto_reject")
+    if auto_rejected:
+        informational.append("auto_rejected")
+        informational_details.append(f"{auto_rejected} screening-gate decision(s) recorded by the framework")
+
+    if cycles_used > 0 and decisions and not any(d in _PROMOTING_DECISIONS for d in decisions):
         active.append("all_rejected")
-        rejected = len([d for d in decisions if d])
-        details.append(f"{rejected}/{cycles_used} decided cycles produced no promotion")
+        details.append(f"{len(decisions)}/{cycles_used} decided cycles produced no promotion")
 
     if champion_model_family == BASELINE_MODEL_FAMILY:
         active.append("champion_is_baseline")
@@ -139,6 +150,11 @@ def assess_distress(
         active.append("cycles_forfeited")
         details.append("; ".join(forfeit_details))
 
+    if (status == "completed" and cycles_used < cycle_budget and nonterminal_proposals == 0
+            and (cycles_attempted is None or cycles_attempted == decided)):
+        informational.append("early_stop")
+        informational_details.append(f"brief ended cleanly after {cycles_used}/{cycle_budget} budgeted cycles")
+
     unknown = set(active) - set(DISTRESS_FLAGS)
     if unknown:  # defensive: keeps the closed set honest as flags are added
         raise AssertionError(f"assess_distress produced unknown flags: {sorted(unknown)}")
@@ -146,6 +162,8 @@ def assess_distress(
     return DistressAssessment(
         active=tuple(active),
         detail="; ".join(details) if details else "no distress signals",
+        informational=tuple(informational),
+        informational_detail="; ".join(informational_details),
     )
 
 
@@ -174,6 +192,7 @@ def _cycle_accounting(config: ProjectConfig, delegation: Delegation) -> dict[str
         1
         for experiment in list_experiments(config.registry_path)
         if experiment.get("model_family") != BASELINE_MODEL_FAMILY
+        and "delegation_seed_" not in str(experiment.get("experiment_name") or "")
     )
     attempted = max(0, attempted - delegation.cycles_at_start)
     completed = max(0, _cycles_used(config.registry_path) - delegation.cycles_at_start)
@@ -289,6 +308,10 @@ def _experiment_rows(config: ProjectConfig) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for entry in list_research_log_entries(config.registry_path):
         comparison = comparisons.get(entry.get("comparison_id")) or {}
+        outcome = str(entry.get("outcome") or "")
+        decision = comparison.get("decision")
+        if not decision and outcome.startswith("auto_reject"):
+            decision = "auto_reject"
         paired = comparison.get("paired_summary") or {}
         experiment_name = None
         if entry.get("experiment_id"):
@@ -309,7 +332,7 @@ def _experiment_rows(config: ProjectConfig) -> list[dict[str, Any]]:
                 "cycle": int(entry.get("cycle") or 0),
                 "experiment_id": entry.get("experiment_id"),
                 "name": experiment_name or entry.get("hypothesis") or "",
-                "decision": comparison.get("decision"),
+                "decision": decision,
                 "reason_code": comparison.get("decision_reason_code"),
                 "lift_vs_champion": (
                     float(paired["mean_lift"]) if paired.get("mean_lift") is not None else None
@@ -446,10 +469,37 @@ def _cost(delegation: Delegation, config: ProjectConfig) -> dict[str, Any]:
             if backend_cost is not None:
                 llm_usage["cost_usd"] = float(backend_cost)
                 llm_usage["cost_source"] = "backend_exit"
+        if llm_usage.get("cost_usd") is None:
+            estimated = _estimated_backend_cost(delegation.backend, delegation.tool_usage)
+            if estimated is not None:
+                llm_usage["cost_usd"] = estimated
+                llm_usage["cost_source"] = "backend_pricing"
+                llm_usage["cost_estimated"] = True
     return {
         "wall_clock_minutes": wall_clock,
         "llm_usage": llm_usage,
     }
+
+
+def _estimated_backend_cost(backend_name: str, usage: dict[str, Any]) -> float | None:
+    from autoresearch.orchestration.backends import get_backend
+
+    try:
+        backend = get_backend(backend_name)
+    except (KeyError, ValueError, FileNotFoundError):
+        return None
+    rates = (backend.usd_per_mtok_input, backend.usd_per_mtok_cached, backend.usd_per_mtok_output)
+    if all(rate is None for rate in rates):
+        return None
+    details = usage.get("details") if isinstance(usage.get("details"), dict) else {}
+    cached = int(usage.get("cached_input_tokens") or usage.get("cache_read_input_tokens")
+                 or details.get("cached_input_tokens") or details.get("cache_read_input_tokens") or 0)
+    total_input = int(usage.get("input_tokens") or 0)
+    output = int(usage.get("output_tokens") or 0)
+    cost = (max(0, total_input - cached) * (backend.usd_per_mtok_input or 0.0)
+            + cached * (backend.usd_per_mtok_cached or 0.0)
+            + output * (backend.usd_per_mtok_output or 0.0)) / 1_000_000
+    return round(cost, 6)
 
 
 def _wall_clock_minutes(delegation: Delegation) -> float | None:

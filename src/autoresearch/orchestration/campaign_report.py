@@ -34,7 +34,7 @@ from autoresearch.orchestration.manifest import (
     save_orchestration,
     utc_stamp,
 )
-from autoresearch.orchestration.report import DISTRESS_FLAGS
+from autoresearch.orchestration.report import DISTRESS_FLAGS, INFORMATIONAL_FLAGS
 from autoresearch.utils.io import read_json, write_json
 
 
@@ -88,6 +88,7 @@ def build_campaign_report(
     baseline_promotion_lifts: list[float] = []
     incremental_promotion_lifts: list[float] = []
     distress_by_flag: dict[str, int] = {flag: 0 for flag in DISTRESS_FLAGS}
+    informational_by_flag: dict[str, int] = {flag: 0 for flag in INFORMATIONAL_FLAGS}
     delegations_in_distress = 0
     repair_requests = 0
 
@@ -98,6 +99,10 @@ def build_campaign_report(
     cost_missing_for: list[str] = []
     input_tokens = 0
     output_tokens = 0
+    cached_tokens = 0
+    reasoning_tokens = 0
+    usage_by_model: dict[str, dict[str, Any]] = {}
+    any_estimated_cost = False
 
     for delegation in orch.delegations:
         report = _resolve_report(orch, delegation)
@@ -146,6 +151,9 @@ def build_campaign_report(
             delegations_in_distress += 1
         for flag in active:
             distress_by_flag[flag] = distress_by_flag.get(flag, 0) + 1
+        informational = list((report.get("distress") or {}).get("informational") or ())
+        for flag in informational:
+            informational_by_flag[flag] = informational_by_flag.get(flag, 0) + 1
 
         repair_requests += int((report.get("repairs") or {}).get("requests") or 0)
 
@@ -157,9 +165,31 @@ def build_campaign_report(
         usage = cost.get("llm_usage") or {}
         input_tokens += int(usage.get("input_tokens") or 0)
         output_tokens += int(usage.get("output_tokens") or 0)
+        backend_usage = usage.get("backend") or {}
+        details = backend_usage.get("details") if isinstance(backend_usage.get("details"), dict) else {}
+        cached = int(backend_usage.get("cached_input_tokens") or backend_usage.get("cache_read_input_tokens")
+                     or details.get("cached_input_tokens") or details.get("cache_read_input_tokens") or 0)
+        reasoning = int(backend_usage.get("reasoning_tokens") or details.get("reasoning_tokens") or 0)
+        cached_tokens += cached
+        reasoning_tokens += reasoning
+        model_key, model_usage = _delegation_model_usage(delegation, backend_usage)
+        aggregate = usage_by_model.get(model_key)
+        if aggregate is None:
+            aggregate = {**model_usage, "input_tokens": 0, "cached_tokens": 0,
+                         "output_tokens": 0, "reasoning_tokens": 0}
+            usage_by_model[model_key] = aggregate
+        elif delegation.backend not in aggregate["backends"]:
+            aggregate["backends"].append(delegation.backend)
+        for token_key in ("input_tokens", "cached_tokens", "output_tokens", "reasoning_tokens"):
+            aggregate[token_key] += int(model_usage[token_key])
         if usage.get("cost_usd") is not None:
-            cost_usd += float(usage["cost_usd"])
+            delegation_cost = float(usage["cost_usd"])
+            cost_usd += delegation_cost
             cost_reported_by.append(delegation.delegation_id)
+            aggregate["cost_usd"] = round(float(aggregate.get("cost_usd") or 0) + delegation_cost, 6)
+            estimated = bool(usage.get("cost_estimated"))
+            aggregate["cost_estimated"] = bool(aggregate.get("cost_estimated")) or estimated
+            any_estimated_cost = any_estimated_cost or estimated
         else:
             cost_missing_for.append(delegation.delegation_id)
 
@@ -184,6 +214,7 @@ def build_campaign_report(
                     "beat_seed_baseline": champion.get("beat_seed_baseline"),
                 },
                 "distress": active,
+                "informational": informational,
                 "wall_clock_minutes": minutes,
                 "report": relative_to_project(
                     delegation_report_path(orch.orchestration_id, delegation.delegation_id)
@@ -240,6 +271,9 @@ def build_campaign_report(
             "by_flag": {flag: distress_by_flag[flag] for flag in DISTRESS_FLAGS},
             "delegations_in_distress": delegations_in_distress,
         },
+        "informational": {
+            "by_flag": {flag: informational_by_flag[flag] for flag in INFORMATIONAL_FLAGS},
+        },
         "repairs": {
             "requests": repair_requests,
             "per_cycle": (
@@ -256,8 +290,11 @@ def build_campaign_report(
         },
         "cost": {
             "input_tokens": input_tokens,
+            "cached_tokens": cached_tokens,
             "output_tokens": output_tokens,
+            "reasoning_tokens": reasoning_tokens,
             "cost_usd": (round(cost_usd, 6) if cost_reported_by else None),
+            "cost_estimated": any_estimated_cost,
             "cost_usd_reported_by": cost_reported_by,
             "cost_usd_missing_for": cost_missing_for,
             "cost_per_cycle_usd": (
@@ -268,6 +305,7 @@ def build_campaign_report(
             "cost_per_promotion_usd": (
                 round(cost_usd / promotions, 6) if cost_reported_by and promotions else None
             ),
+            "usage_by_model": _usage_with_orchestrator(orch, usage_by_model),
         },
     }
 
@@ -281,10 +319,45 @@ def build_campaign_report(
         "orchestrator": {
             "model_provider": orch.model_provider,
             "model_name": orch.model_name,
+            "provider": orch.model_provider,
+            "model": orch.model_name,
+            "effort": orch.model_effort,
         },
         "framework_computed": framework,
         "agent_testimony": testimony,
     }
+
+
+def _delegation_model_usage(delegation: Delegation, usage: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    from autoresearch.orchestration.backends import get_backend
+
+    try:
+        backend = get_backend(delegation.backend)
+        provider, model = backend.model_provider, backend.model_name
+    except (KeyError, ValueError, FileNotFoundError):
+        provider, model = "unknown", delegation.backend
+    details = usage.get("details") if isinstance(usage.get("details"), dict) else {}
+    cached = int(usage.get("cached_input_tokens") or usage.get("cache_read_input_tokens")
+                 or details.get("cached_input_tokens") or details.get("cache_read_input_tokens") or 0)
+    reasoning = int(usage.get("reasoning_tokens") or details.get("reasoning_tokens") or 0)
+    return f"{provider}/{model}", {
+        "provider": provider, "model": model, "backends": [delegation.backend],
+        "input_tokens": int(usage.get("input_tokens") or 0), "cached_tokens": cached,
+        "output_tokens": int(usage.get("output_tokens") or 0), "reasoning_tokens": reasoning,
+        "cost_usd": None, "cost_estimated": False, "unmeasured": False,
+    }
+
+
+def _usage_with_orchestrator(orch: Orchestration, usage_by_model: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    result = dict(sorted(usage_by_model.items()))
+    provider, model = orch.model_provider or "unknown", orch.model_name or "unknown"
+    result[f"orchestrator:{provider}/{model}"] = {
+        "role": "orchestrator", "provider": orch.model_provider, "model": orch.model_name,
+        "effort": orch.model_effort, "input_tokens": None, "cached_tokens": None,
+        "output_tokens": None, "reasoning_tokens": None, "cost_usd": None,
+        "cost_estimated": False, "unmeasured": True,
+    }
+    return result
 
 
 def _playoff_summary(orch: Orchestration) -> dict[str, Any] | None:
@@ -481,9 +554,11 @@ def render_campaign_markdown(payload: dict[str, Any]) -> str:
     ]
     orchestrator = payload.get("orchestrator") or {}
     if orchestrator.get("model_name"):
+        effort = orchestrator.get("effort")
         lines.append(
             f"- Orchestrator model: {orchestrator.get('model_provider') or 'unknown'}"
             f"/{orchestrator['model_name']}"
+            + (f" · {effort}" if effort else "")
         )
     lines.extend(
         [
@@ -515,7 +590,7 @@ def render_campaign_markdown(payload: dict[str, Any]) -> str:
     if not framework["delegations"]:
         lines.extend(["No delegations were spawned.", ""])
     else:
-        lines.append("| id | backend | run | cycles (A/C/D/B) | champion | gini | distress |")
+        lines.append("| id | backend | run | cycles (A/C/D/B) | champion | gini | signals |")
         lines.append("|---|---|---|---|---|---|---|")
         for item in framework["delegations"]:
             if item.get("report") == "missing":
@@ -525,6 +600,8 @@ def render_campaign_markdown(payload: dict[str, Any]) -> str:
                 )
                 continue
             champion = item["champion"]
+            signals = list(item["distress"])
+            signals.extend(f"info:{flag}" for flag in item.get("informational") or ())
             lines.append(
                 f"| {item['delegation_id']} | {item['backend']} | `{item['run_id']}` "
                 f"| {item.get('cycles_attempted', item['cycles_used'])}/"
@@ -533,7 +610,7 @@ def render_campaign_markdown(payload: dict[str, Any]) -> str:
                 f"{item['cycle_budget']} "
                 f"| {champion.get('model_family') or '—'} "
                 f"| {_fmt(champion.get('gini_weighted'))} "
-                f"| {', '.join(item['distress']) or '—'} |"
+                f"| {', '.join(signals) or '—'} |"
             )
         lines.append("")
 
@@ -630,8 +707,10 @@ def render_campaign_markdown(payload: dict[str, Any]) -> str:
             "",
             f"- Campaign elapsed: {_fmt(wall_clock['campaign_elapsed_minutes'])} min",
             f"- Delegation wall clock (sum): {_fmt(wall_clock['delegation_minutes_total'])} min",
-            f"- Tokens: {cost['input_tokens']} in / {cost['output_tokens']} out",
+            f"- Tokens: {cost['input_tokens']} in / {cost.get('cached_tokens', 0)} cached / "
+            f"{cost['output_tokens']} out / {cost.get('reasoning_tokens', 0)} reasoning",
             f"- Cost: {_fmt_cost(cost['cost_usd'])}"
+            + (" (estimated)" if cost.get("cost_estimated") else "")
             + (
                 f" · per cycle {_fmt_cost(cost['cost_per_cycle_usd'])}"
                 f" · per promotion {_fmt_cost(cost['cost_per_promotion_usd'])}"
@@ -653,6 +732,21 @@ def render_campaign_markdown(payload: dict[str, Any]) -> str:
                 "is unmeasured, not free."
             )
     lines.append("")
+
+    usage_by_model = cost.get("usage_by_model") or {}
+    if usage_by_model:
+        lines.extend(["### Usage by model", "", "| model | input | cached | output | reasoning | cost |",
+                      "|---|---:|---:|---:|---:|---:|"])
+        for key, usage in usage_by_model.items():
+            if usage.get("unmeasured"):
+                lines.append(f"| {key} | unmeasured | unmeasured | unmeasured | unmeasured | unmeasured |")
+                continue
+            model_cost = _fmt_cost(usage.get("cost_usd"))
+            if usage.get("cost_estimated") and usage.get("cost_usd") is not None:
+                model_cost += " (estimated)"
+            lines.append(f"| {key} | {usage.get('input_tokens', 0)} | {usage.get('cached_tokens', 0)} "
+                         f"| {usage.get('output_tokens', 0)} | {usage.get('reasoning_tokens', 0)} | {model_cost} |")
+        lines.append("")
 
     lines.extend(["## Agent testimony", ""])
     testimony = payload["agent_testimony"]

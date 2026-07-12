@@ -1022,6 +1022,7 @@ def _orchestrate_new(config, args) -> int:
             total_cycle_budget=args.total_cycles,
             model_provider=args.model_provider,
             model_name=args.model_name,
+            model_effort=args.model_effort,
         )
     except (ValueError, FileNotFoundError, FileExistsError) as exc:
         parser.error(str(exc))
@@ -1546,6 +1547,10 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrate_new.add_argument(
         "--model-name", default=None,
         help="The orchestrator's own model name, for memory attribution.",
+    )
+    orchestrate_new.add_argument(
+        "--model-effort", default=None,
+        help="The orchestrator's thinking/reasoning effort, for attribution.",
     )
 
     orchestrate_spawn = orchestrate_subs.add_parser(

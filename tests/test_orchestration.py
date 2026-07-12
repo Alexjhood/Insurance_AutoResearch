@@ -64,6 +64,7 @@ def test_manifest_round_trip(orchestrations_root):
         total_cycle_budget=12,
         model_provider="anthropic",
         model_name="claude-opus-4-8",
+        model_effort="High",
     )
     delegation = Delegation(
         delegation_id="d01",
@@ -82,8 +83,26 @@ def test_manifest_round_trip(orchestrations_root):
     assert reloaded.delegation("d01").backend == "stub"
     assert reloaded.delegation("d01").clean_exit is True
     assert reloaded.delegation("d01").tool_usage == {"input_tokens": 12}
+    assert reloaded.model_effort == "high"
+    assert reloaded.to_dict()["orchestrator"]["effort"] == "high"
     assert reloaded.cycles_committed == 4
     assert reloaded.cycles_remaining == 8
+
+
+def test_orchestrate_new_uses_dataset_default_target_mode(monkeypatch):
+    from autoresearch import cli as cli_mod
+    captured = {}
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(to_dict=lambda: kwargs, orchestration_id="20260712T090000Z",
+            total_cycle_budget=kwargs["total_cycle_budget"], dataset=kwargs["dataset"],
+            target_mode=kwargs["target_mode"])
+    monkeypatch.setattr(manifest_mod, "create_orchestration", fake_create)
+    args = SimpleNamespace(dataset="porto_seguro", target_mode=None, total_cycles=2,
+        model_provider=None, model_name=None, model_effort=None)
+    assert cli_mod._orchestrate_new(None, args) == 0
+    from autoresearch.datasets import load_dataset_spec
+    assert captured["target_mode"] == load_dataset_spec("porto_seguro").default_target_mode
 
 
 def test_delegation_run_path_can_live_inside_campaign(orchestrations_root):
@@ -699,6 +718,26 @@ status = "deprecated"
 def test_get_backend_unknown_name_lists_alternatives():
     with pytest.raises(KeyError, match="stub"):
         get_backend("no-such-backend")
+
+
+def test_backend_registry_parses_optional_pricing(tmp_path):
+    config = tmp_path / "backends.toml"
+    config.write_text('''
+[backends.priced]
+tool = "claude"
+command = ["claude", "-p"]
+prompt_via = "stdin"
+track = "claude"
+model_provider = "anthropic"
+model_name = "priced-model"
+usd_per_mtok_input = 3.0
+usd_per_mtok_cached = 0.3
+usd_per_mtok_output = 15.0
+''', encoding="utf-8")
+    backend = load_backends(config)["priced"]
+    assert backend.usd_per_mtok_input == pytest.approx(3.0)
+    assert backend.usd_per_mtok_cached == pytest.approx(0.3)
+    assert backend.usd_per_mtok_output == pytest.approx(15.0)
 
 
 # ── spawner: prompt, env, plan ──────────────────────────────────────────────
@@ -1473,6 +1512,18 @@ def test_zero_cycles_is_not_all_rejected():
     assert "all_rejected" not in _distress(cycles_used=0, decisions=[]).active
 
 
+def test_auto_reject_is_decided_and_clean_early_stop_is_informational():
+    auto = _distress(cycles_used=2, cycle_budget=2, cycles_attempted=2,
+                     decisions=["auto_reject", "auto_reject"])
+    early = _distress(status="completed", cycles_used=1, cycle_budget=3,
+                      cycles_attempted=1, decisions=["reject"])
+    assert auto.informational == ("auto_rejected",)
+    assert "cycles_forfeited" not in auto.active
+    assert auto.detail.count("2/2 decided cycles produced no promotion") == 1
+    assert early.informational == ("early_stop",)
+    assert "cycles_forfeited" not in early.active
+
+
 def test_every_active_flag_is_a_declared_flag():
     assessment = _distress(
         status="failed",
@@ -1509,6 +1560,7 @@ def fixture_child_run(tmp_path, monkeypatch):
 
     for experiment_id, name, family in (
         ("exp_baseline", "global_mean_baseline", "global_mean"),
+        ("exp_seed", "20260712T143028Z_orchestration_delegation_seed_d02", "recipe"),
         ("exp_challenger", "stub_constant_tweedie_c1", "constant"),
     ):
         record_experiment(
@@ -1651,6 +1703,30 @@ def test_report_uses_backend_reported_cost_when_telemetry_has_none(fixture_child
     assert report["cost"]["llm_usage"]["cost_source"] == "backend_exit"
 
 
+def test_report_estimates_backend_cost_from_pricing(fixture_child_run, tmp_path, monkeypatch):
+    config = tmp_path / "priced.toml"
+    config.write_text('''
+[backends.priced]
+tool = "claude"
+command = ["claude", "-p"]
+prompt_via = "stdin"
+track = "claude"
+model_provider = "anthropic"
+model_name = "priced-model"
+usd_per_mtok_input = 2.0
+usd_per_mtok_cached = 0.2
+usd_per_mtok_output = 10.0
+''', encoding="utf-8")
+    monkeypatch.setattr(backends_mod, "BACKENDS_CONFIG_PATH", config)
+    delegation = _fixture_delegation(backend="priced", tool_usage={
+        "input_tokens": 1_000_000, "output_tokens": 100_000,
+        "details": {"cached_input_tokens": 800_000},
+    })
+    usage = build_report(_fixture_orchestration(), delegation)["cost"]["llm_usage"]
+    assert usage["cost_usd"] == pytest.approx(1.56)
+    assert usage["cost_estimated"] is True
+
+
 def test_report_flags_baseline_champion_and_all_rejected(fixture_child_run):
     report = build_report(_fixture_orchestration(), _fixture_delegation())
     active = set(report["distress"]["active"])
@@ -1658,6 +1734,39 @@ def test_report_flags_baseline_champion_and_all_rejected(fixture_child_run):
     assert "all_rejected" in active
     assert "no_finish_delegation" not in active
     assert report["distress"]["flags"] == list(report_mod.DISTRESS_FLAGS)
+
+
+def test_report_counts_screening_auto_reject_as_framework_decision(fixture_child_run):
+    from autoresearch.experiment_registry.experiments import record_experiment
+    from autoresearch.experiment_registry.research_log import upsert_research_log_entry
+    from autoresearch.experiment_registry.sessions import upsert_session
+
+    delegation = _fixture_delegation(cycle_budget=2)
+    config = report_mod._child_config(delegation)
+    record_experiment(
+        config.registry_path, experiment_id="exp_screened", experiment_name="screened_out",
+        model_family="recipe", target_strategy="direct_pure_premium",
+        preprocessing_summary={}, claim_cap_threshold=None, status="completed",
+        parent_experiment_id=None, config_snapshot_path=fixture_child_run / "screened.toml",
+        metrics_path=fixture_child_run / "screened.json", artifacts={},
+    )
+    upsert_research_log_entry(
+        config.registry_path, session_id="s1", cycle=2, proposal_id="p2",
+        experiment_id="exp_screened", comparison_id=None, hypothesis="screen weak model",
+        changes="recipe", outcome="auto_reject: failed screen", metrics={},
+        interpretation="clear loser", next_step="move on",
+    )
+    upsert_session(
+        config.registry_path, session_id="s1", name="stub_delegation", state="completed",
+        current_cycle=2, max_cycles=2, stop_requested=False,
+        state_path=fixture_child_run / "state.json", summary_path=fixture_child_run / "summary.json",
+    )
+    report = build_report(_fixture_orchestration(), delegation)
+    assert report["cycles"]["attempted"] == 2
+    assert report["cycles"]["decided"] == 2
+    assert report["experiments"][1]["decision"] == "auto_reject"
+    assert report["distress"]["informational"] == ["auto_rejected"]
+    assert "cycles_forfeited" not in report["distress"]["active"]
 
 
 def test_report_flags_missing_finish_delegation(fixture_child_run):
