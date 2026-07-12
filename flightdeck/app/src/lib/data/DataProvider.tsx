@@ -24,13 +24,35 @@ export class HttpProvider implements DataProvider {
 }
 
 export class EmbeddedProvider implements DataProvider {
-  private unavailable(): never { throw new Error('Embedded snapshots are added in Phase 5'); }
-  async getIndex(): Promise<SnapshotIndex> { return this.unavailable(); }
-  async getSnapshot(_id: string): Promise<Snapshot> { return this.unavailable(); }
-  async getTelemetry(_id: string, _delegationId: string): Promise<DelegationTelemetry> { return this.unavailable(); }
-  async getFileText(_id: string, _path: string): Promise<string> { return this.unavailable(); }
-  getFileUrl(_id: string, _path: string): string { return this.unavailable(); }
+  private blobs = new Map<string, string>();
+
+  private read<T>(id: string): T {
+    const element = document.getElementById(id);
+    if (!element?.textContent) throw new Error(`Static export is missing ${id}`);
+    return JSON.parse(element.textContent) as T;
+  }
+
+  async getIndex(): Promise<SnapshotIndex> { return this.read('fd-embedded-index'); }
+  async getSnapshot(id: string): Promise<Snapshot> { return this.read(`fd-embedded-snapshot-${id}`); }
+  async getTelemetry(id: string, delegationId: string): Promise<DelegationTelemetry> { return this.read(`fd-embedded-telemetry-${id}-${delegationId}`); }
+  async getFileText(id: string, path: string): Promise<string> {
+    const files = this.read<Record<string, string>>(`fd-embedded-files-${id}`);
+    if (!(path in files)) throw new Error('This file is larger than 512 KB and was not included in the static export.');
+    return files[path];
+  }
+  getFileUrl(id: string, path: string): string {
+    const key = `${id}/${path}`;
+    const existing = this.blobs.get(key);
+    if (existing) return existing;
+    const files = this.read<Record<string, string>>(`fd-embedded-files-${id}`);
+    if (!(path in files)) throw new Error('This file was not included in the static export.');
+    const url = URL.createObjectURL(new Blob([files[path]], { type: 'text/plain;charset=utf-8' }));
+    this.blobs.set(key, url);
+    return url;
+  }
 }
+
+export function isEmbeddedExport(): boolean { return Boolean(document.getElementById('fd-embedded-meta')); }
 
 const Context = createContext<DataProvider | null>(null);
 export function DataProviderRoot({ provider, children }: PropsWithChildren<{provider: DataProvider}>) { return <Context.Provider value={provider}>{children}</Context.Provider>; }

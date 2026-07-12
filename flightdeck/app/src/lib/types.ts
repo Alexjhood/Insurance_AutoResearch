@@ -40,7 +40,7 @@ export interface TelemetryByDelegation { delegation_id: string; tokens: TokenTot
 export interface ToolMixEntry { delegation_id: string; tool: string; calls: number; failures: number; total_duration_ms: number }
 export interface TelemetryTotals extends TokenTotals { model_calls: number; tool_calls: number; tool_failures: number }
 export interface TelemetrySummary { totals: TelemetryTotals; cache_hit_rate: number | null; by_delegation: TelemetryByDelegation[]; tool_mix: ToolMixEntry[] }
-export interface FileEntry { path: string; kind: 'markdown' | 'json' | 'log' | 'text'; bytes: number; truncated: boolean; source: string }
+export interface FileEntry { path: string; kind: 'markdown' | 'json' | 'log' | 'text'; bytes: number; truncated: boolean; source: string; included_in_export?: boolean }
 export interface Snapshot { snapshot_schema_version: number; build: BuildInfo; campaign: Campaign; delegations: Delegation[]; experiments: Experiment[]; champion_timeline: ChampionEvent[]; notes: OperatorNote[]; playoff: Playoff | null; telemetry_summary: TelemetrySummary; files: FileEntry[] }
 export interface ModelCallEvent { at: string; model: string; input: number; cached_input: number; output: number; reasoning: number; duration_hint_ms: null; workflow_event_id: number | null }
 export interface ToolCallEvent { name: string; detail: string | null; started_at: string | null; completed_at: string | null; duration_ms: number | null; status: string | null; success: boolean | null; input_bytes: number | null; output_bytes: number | null; error_type: string | null; workflow_event_id: number | null }

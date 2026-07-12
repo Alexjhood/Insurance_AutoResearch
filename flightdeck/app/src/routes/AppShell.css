@@ -1,4 +1,6 @@
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+.export-ribbon { min-height: 28px; display:flex; align-items:center; justify-content:center; gap:var(--sp-2); padding:var(--sp-1) var(--sp-3); color:var(--bg-app); background:var(--c-takeover); font-size:var(--fs-xs); font-weight:var(--fw-semibold); text-transform:uppercase; letter-spacing:.04em; }
+.export-ribbon span { opacity:.72; font-family:var(--font-mono); font-weight:var(--fw-regular); }
 .topbar { height: 64px; display: flex; align-items: center; gap: var(--sp-5); padding: 0 var(--sp-5); border-bottom: 1px solid var(--border-subtle); background: var(--bg-raised); position: sticky; top: 0; z-index: 20; }
 .brand { display: flex; gap: var(--sp-3); align-items: center; color: var(--text-primary); font-size: var(--fs-lg); font-weight: var(--fw-semibold); }
 .brand-mark { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid var(--accent); border-radius: var(--radius-sm); color: var(--accent); font-family: var(--font-mono); font-size: var(--fs-xs); }

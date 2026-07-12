@@ -1,0 +1,11 @@
+.dataset-group th {
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--text-primary);
+  background: var(--bg-inset);
+  border-top: 2px solid var(--border-strong);
+  font-family: var(--font-mono);
+}
+.dataset-group th small { display: inline; margin-left: var(--sp-3); color: var(--text-faint); font-family: var(--font-ui); font-weight: var(--fw-regular); }
+.league-rank { display: inline-block; min-width: 32px; margin-right: var(--sp-2); color: var(--text-faint); }
+.empty-state { padding: var(--sp-6); color: var(--text-secondary); text-align: center; }
+.empty-state h2,.empty-state h3 { margin-top: 0; color: var(--text-primary); }

@@ -13,3 +13,8 @@ a:hover { color: var(--accent-strong); }
 .panel { background: var(--bg-raised); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
 .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .error-state { padding: var(--sp-5); color: var(--c-distress); }
+.page-state { min-height: 40vh; display: grid; place-content: center; justify-items: center; gap: var(--sp-3); color: var(--text-secondary); text-align: center; }
+.page-state h1,.page-state p { margin: 0; }
+.state-pulse { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 6px color-mix(in srgb,var(--accent) 18%,transparent); animation: state-pulse 1.4s ease-out infinite; }
+@keyframes state-pulse { 50% { opacity:.45; transform:scale(.8); } }
+@media (prefers-reduced-motion: reduce) { .state-pulse { animation:none; } }

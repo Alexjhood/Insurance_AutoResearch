@@ -3,10 +3,12 @@ import { Outlet, NavLink, useLocation, useNavigate, useParams } from 'react-rout
 import { Moon, RefreshCw, Sun } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useIndex } from '../lib/data/queries';
+import { isEmbeddedExport } from '../lib/data/DataProvider';
 import './AppShell.css';
 
 type Theme = 'dark' | 'light';
 export function AppShell() {
+  const embedded = isEmbeddedExport();
   const [theme, setTheme] = useState<Theme>(() => localStorage.getItem('flightdeck-theme') === 'light' ? 'light' : 'dark');
   const [rebuild, setRebuild] = useState<string | null>(null);
   const index = useIndex(); const queryClient = useQueryClient(); const navigate = useNavigate();
@@ -28,12 +30,13 @@ export function AppShell() {
     window.setTimeout(() => setRebuild(null), 2500);
   }
   return <div className="app-shell">
+    {embedded && <div className="export-ribbon" role="status">Static export <span>Built {document.getElementById('fd-embedded-meta')?.getAttribute('data-built-at')}</span></div>}
     <header className="topbar">
       <NavLink to="/" className="brand"><span className="brand-mark">FD</span><span>Flight Deck</span></NavLink>
       <label className="orch-switcher"><span className="sr-only">Orchestration</span><select value={selected ?? ''} onChange={e => navigate(e.target.value ? `/o/${e.target.value}` : '/')}><option value="">All orchestrations</option>{index.data?.orchestrations.map(o => <option key={o.orch_id} value={o.orch_id}>{o.alias || o.orch_id}</option>)}</select></label>
       <div className="top-actions">
         <button className="icon-button" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title={`Use ${theme === 'dark' ? 'light' : 'dark'} theme`} aria-label="Toggle theme">{theme === 'dark' ? <Sun /> : <Moon />}</button>
-        <button className="command-button" onClick={runRebuild} disabled={Boolean(rebuild)}><RefreshCw className={rebuild ? 'spin' : ''} /> Rebuild</button>
+        {!embedded && <button className="command-button" onClick={runRebuild} disabled={Boolean(rebuild)}><RefreshCw className={rebuild ? 'spin' : ''} /> Rebuild</button>}
       </div>
     </header>
     {rebuild && <div className="toast" role="status">{rebuild}</div>}
