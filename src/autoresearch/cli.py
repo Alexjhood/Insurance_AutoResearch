@@ -909,6 +909,8 @@ def _cmd_orchestrate(config, args) -> int:
     subcommand = getattr(args, "orchestrate_subcommand", None)
     if subcommand == "list-backends":
         return _orchestrate_list_backends()
+    if subcommand == "doctor":
+        return _orchestrate_doctor(args)
     if subcommand == "new":
         return _orchestrate_new(config, args)
     if subcommand == "spawn":
@@ -919,6 +921,8 @@ def _cmd_orchestrate(config, args) -> int:
         return _orchestrate_playoff(args)
     if subcommand == "status":
         return _orchestrate_status(args)
+    if subcommand == "recover":
+        return _orchestrate_recover(args)
     if subcommand == "kill":
         return _orchestrate_kill(args)
     if subcommand == "collect":
@@ -943,6 +947,26 @@ def _orchestrate_list_backends() -> int:
     # appended as evidence and never adds or removes an entry.
     print(format_backend_table(load_backends(), scorecard()), end="")
     return 0
+
+
+def _orchestrate_doctor(args) -> int:
+    from autoresearch.orchestration.backends import doctor_backends, load_backends
+
+    parser = build_parser()
+    try:
+        backends = load_backends()
+        if args.backend and args.backend not in backends:
+            raise KeyError(f"Unknown backend {args.backend!r}.")
+        results = doctor_backends(backends, backend_name=args.backend)
+    except (KeyError, ValueError, FileNotFoundError) as exc:
+        parser.error(str(exc))
+        return 2
+    for result in results:
+        if result["status"] == "pass":
+            print(f"PASS {result['backend']}: {result['executable']} ({result.get('version') or 'unknown'})")
+        else:
+            print(f"FAIL {result['backend']}: {result['fix']}")
+    return 1 if any(result["status"] == "fail" for result in results) else 0
 
 
 def _orchestrate_note(args) -> int:
@@ -1014,6 +1038,16 @@ def _orchestrate_new(config, args) -> int:
 
     parser = build_parser()
     try:
+        if not getattr(args, "skip_doctor", True):
+            from autoresearch.orchestration.backends import doctor_backends, load_backends
+
+            failed = [
+                result for result in doctor_backends(load_backends())
+                if result["status"] == "fail"
+            ]
+            if failed:
+                detail = "\n".join(f"{item['backend']}: {item['fix']}" for item in failed)
+                raise ValueError(f"Backend doctor failed:\n{detail}\nUse --skip-doctor to opt out.")
         spec = load_dataset_spec(args.dataset)
         target_mode = normalise_target_mode(args.target_mode or spec.default_target_mode, spec)
         orch = create_orchestration(
@@ -1142,12 +1176,64 @@ def _orchestrate_status(args) -> int:
     from autoresearch.orchestration.monitor import format_status_table, status_rows
 
     parser = build_parser()
+    if args.interval <= 0:
+        parser.error("--interval must be positive")
+    if args.until_terminal and not args.follow:
+        parser.error("--until-terminal requires --follow")
+    import time
+
     try:
-        orch, rows = status_rows(resolve_orchestration_id(args.orchestration_id))
+        orchestration_id = resolve_orchestration_id(args.orchestration_id)
+        previous = None
+        while True:
+            orch, rows = status_rows(orchestration_id)
+            rendered = format_status_table(orch, rows)
+            fingerprint = (
+                orch.status,
+                tuple(
+                    (row["delegation_id"], row["status"], row["cycles_completed"])
+                    for row in rows
+                ),
+            )
+            if fingerprint != previous:
+                print(rendered, end="", flush=True)
+                previous = fingerprint
+            terminal = orch.status in {"completed", "abandoned"} or (
+                bool(rows)
+                and all(
+                    row["status"] in {"completed", "failed", "killed", "timed_out"}
+                    for row in rows
+                )
+            )
+            if not args.follow or (args.until_terminal and terminal):
+                break
+            time.sleep(args.interval)
     except (ValueError, KeyError, FileNotFoundError) as exc:
         parser.error(str(exc))
         return 2
-    print(format_status_table(orch, rows), end="")
+    return 0
+
+
+def _orchestrate_recover(args) -> int:
+    from autoresearch.orchestration.manifest import resolve_orchestration_id
+    from autoresearch.orchestration.recovery import recover_delegation
+
+    parser = build_parser()
+    try:
+        result = recover_delegation(
+            resolve_orchestration_id(args.orchestration_id), args.delegation
+        )
+    except (ValueError, KeyError, FileNotFoundError, RuntimeError, OSError) as exc:
+        parser.error(str(exc))
+        return 2
+    print(json.dumps(result, indent=2, sort_keys=True))
+    pending = result["pending_decision"]
+    print(
+        "\nPending decision:\n"
+        f"autoresearch --track {result['track']} --run-id {result['run_id']} "
+        f"record-decision {pending['comparison_id']} --decision promote|local_promote|reject "
+        '--rationale "..." --reason-code <code> --interpretation "..." --next "..."'
+    )
     return 0
 
 
@@ -1527,6 +1613,10 @@ def build_parser() -> argparse.ArgumentParser:
         "list-backends",
         help="Print the spawnable backend registry with selection metadata and scorecard.",
     )
+    orchestrate_doctor = orchestrate_subs.add_parser(
+        "doctor", help="Resolve and briefly spawn-probe configured backends."
+    )
+    orchestrate_doctor.add_argument("--backend", default=None)
 
     orchestrate_new = orchestrate_subs.add_parser(
         "new", help="Create a new orchestration (campaign) with a total cycle budget."
@@ -1551,6 +1641,10 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrate_new.add_argument(
         "--model-effort", default=None,
         help="The orchestrator's thinking/reasoning effort, for attribution.",
+    )
+    orchestrate_new.add_argument(
+        "--skip-doctor", action="store_true",
+        help="Create the campaign without the automatic backend environment check.",
     )
 
     orchestrate_spawn = orchestrate_subs.add_parser(
@@ -1648,6 +1742,18 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="Refresh and display detached delegation progress."
     )
     orchestrate_status.add_argument("--orchestration-id", dest="orchestration_id", default=None)
+    orchestrate_status.add_argument("--follow", action="store_true")
+    orchestrate_status.add_argument("--interval", type=float, default=60.0)
+    orchestrate_status.add_argument(
+        "--until-terminal", action="store_true",
+        help="With --follow, stop when the campaign or all current delegations are terminal.",
+    )
+
+    orchestrate_recover = orchestrate_subs.add_parser(
+        "recover", help="Terminate a confirmed orphan evaluator and run its recovery cycle."
+    )
+    orchestrate_recover.add_argument("--orchestration-id", dest="orchestration_id", required=True)
+    orchestrate_recover.add_argument("--delegation", required=True)
 
     orchestrate_kill = orchestrate_subs.add_parser(
         "kill", help="Terminate one detached delegation process group."

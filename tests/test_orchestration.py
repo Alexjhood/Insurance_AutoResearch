@@ -857,6 +857,10 @@ def test_preflight_refuses_missing_executable_and_unwritable_state_dir(monkeypat
         preflight_backend(stub)
 
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/fake")
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="tool 1.0.0\n", stderr=""),
+    )
     unwritable = tmp_path / "home"
     unwritable.mkdir()
     monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: unwritable))
@@ -889,6 +893,114 @@ def test_preflight_enforces_backend_minimum_tool_version(monkeypatch, tmp_path):
         lambda *args, **kwargs: SimpleNamespace(stdout="codex-cli 0.144.0-alpha.4\n"),
     )
     preflight_backend(luna)
+
+
+def test_preflight_uses_first_version_compliant_executable_candidate(monkeypatch, tmp_path):
+    from autoresearch.orchestration.backends import preflight_backend
+
+    old = tmp_path / "old-codex"
+    current = tmp_path / "current-codex"
+    old.touch()
+    current.touch()
+    old.chmod(0o755)
+    current.chmod(0o755)
+    backend = replace(
+        load_backends()["codex-gpt-5-6-luna-medium"],
+        executable_candidates=(str(old), str(current)),
+    )
+    monkeypatch.setattr("shutil.which", lambda name: "/path/codex" if name == "codex" else None)
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: tmp_path))
+
+    versions = {
+        str(old): "codex-cli 0.137.0\n",
+        str(current): "codex-cli 0.144.0-alpha.4\n",
+        "/path/codex": "codex-cli 0.200.0\n",
+    }
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda command, **kwargs: SimpleNamespace(stdout=versions[command[0]], stderr=""),
+    )
+
+    resolved = preflight_backend(backend)
+    assert resolved == {"executable": str(current), "version": "0.144.0-alpha.4"}
+
+
+def test_doctor_spawn_probe_reports_pass_for_non_stub_backend():
+    from autoresearch.orchestration.backends import doctor_backends
+
+    backend = Backend(
+        name="echo-probe", tool="echo", command=("/bin/echo", "{prompt}"),
+        prompt_via="argv", track="codex", model_provider="local", model_name="echo",
+    )
+    assert doctor_backends({backend.name: backend}, probe_seconds=1.0) == [{
+        "backend": "echo-probe", "status": "pass",
+        "executable": "/bin/echo", "version": None,
+    }]
+
+
+def test_status_follow_prints_only_state_changes_until_terminal(monkeypatch, capsys):
+    from autoresearch import cli as cli_mod
+
+    rows = [
+        [{"delegation_id": "d01", "status": "running", "cycles_completed": 0}],
+        [{"delegation_id": "d01", "status": "running", "cycles_completed": 0}],
+        [{"delegation_id": "d01", "status": "completed", "cycles_completed": 1}],
+    ]
+    orch = SimpleNamespace(status="active")
+    monkeypatch.setattr(manifest_mod, "resolve_orchestration_id", lambda oid: oid)
+    monkeypatch.setattr(monitor_mod, "status_rows", lambda oid: (orch, rows.pop(0)))
+    monkeypatch.setattr(
+        monitor_mod, "format_status_table",
+        lambda orch, current: f"{current[0]['status']}\n",
+    )
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    args = SimpleNamespace(
+        orchestration_id="20260712T090000Z", follow=True,
+        interval=0.01, until_terminal=True,
+    )
+
+    assert cli_mod._orchestrate_status(args) == 0
+    assert capsys.readouterr().out == "running\ncompleted\n"
+
+
+def test_recover_delegation_terminates_confirmed_orphan_and_reports_decision(monkeypatch):
+    from autoresearch.orchestration import recovery as recovery_mod
+
+    delegation = SimpleNamespace(track="codex", run_id="run1", pid=10)
+    orch = SimpleNamespace(
+        dataset="porto_seguro", target_mode="claim_incidence",
+        delegation=lambda delegation_id: delegation,
+    )
+    config = SimpleNamespace(target_mode="claim_incidence")
+    monkeypatch.setattr(recovery_mod, "load_orchestration", lambda oid: orch)
+    monkeypatch.setattr(recovery_mod, "load_config", lambda **kwargs: config)
+    monkeypatch.setattr(recovery_mod, "replace", lambda obj, **kwargs: obj)
+    monkeypatch.setattr(
+        recovery_mod, "session_status",
+        lambda config: {"state": {"session_id": "s1"}},
+    )
+    monkeypatch.setattr(
+        recovery_mod, "inflight_cycle_status",
+        lambda config, session_id: {"pid": 99, "alive": True},
+    )
+    alive = iter([False, False, False])
+    monkeypatch.setattr(recovery_mod, "process_is_alive", lambda pid: next(alive))
+    killed = []
+    monkeypatch.setattr(recovery_mod.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(
+        recovery_mod, "run_session_cycles",
+        lambda config, count, sid: [{
+            "state": "awaiting_decision",
+            "latest_cycle_result": {"comparison_id": "cmp1"},
+        }],
+    )
+    notes = []
+    monkeypatch.setattr(recovery_mod, "append_note", lambda *args, **kwargs: notes.append(kwargs))
+
+    result = recovery_mod.recover_delegation("20260712T090000Z", "d05")
+    assert killed == [(99, recovery_mod.signal.SIGTERM)]
+    assert result["pending_decision"]["comparison_id"] == "cmp1"
+    assert notes[0]["delegation_id"] == "d05"
 
 
 def test_compute_timeout_scales_with_budget():

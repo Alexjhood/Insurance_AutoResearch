@@ -50,6 +50,8 @@ autoresearch orchestrate report  --orchestration-id <oid>
 
 `--dry-run` prints the exact argv, the child environment, and the prompt without
 launching anything. Use it whenever you are unsure what a spawn will do.
+`orchestrate new` runs `orchestrate doctor` first; use `--skip-doctor` only when
+an unavailable backend is intentionally irrelevant to the campaign.
 
 ## 3. The brief
 
@@ -139,13 +141,16 @@ Distress flags and the response each one calls for:
 | `repair_exhausted` | one cycle burned all 3 model attempts | usually an over-ambitious model spec — constrain it, respawn one rung up |
 | `all_rejected` | no promotion in any decided cycle | on a sound direction this is a **real negative learning**; record it and move on |
 | `champion_is_baseline` | never beat the flat rate | the direction *or* the sub-agent failed — determine which before spending more cycles |
-| `budget_overrun` | timed out, or used more cycles than budgeted | check `status`; `kill` if still live |
+| `budget_overrun` | timed out, or used more cycles than budgeted | check `status`; use `recover` when an orphan cycle lock remains, otherwise `kill` if still live |
 | `no_finish_delegation` | exited without a summary | the report is still valid; the testimony is missing |
 | `calibration_anomaly` | champion predicted/actual off by >10% | suspect an artifact; probe with K=1 before promoting anything downstream |
-| `cycles_forfeited` | experiments attempted without a recorded decision, or proposals left nonterminal at exit | compute was spent that never became evidence — usually a killed `run-session-cycles` (harness command timeout); check the child log, and respawn with the timeout guidance if the pattern repeats |
+| `cycles_forfeited` | experiments attempted without a recorded decision, or proposals left nonterminal at exit | compute was spent that never became evidence — usually a killed `run-session-cycles`; run `orchestrate recover --orchestration-id <oid> --delegation <dNN>` when a cycle lock remains |
 
 Repeated distress from one backend is a backend problem, not a brief problem:
 climb the ladder in §5 before escalating to takeover.
+
+Spawn with `--wait` under a generous command timeout. If the harness cuts the
+wait short, use `status --follow --until-terminal`, not repeated manual polls.
 
 ## 7. Campaign log
 

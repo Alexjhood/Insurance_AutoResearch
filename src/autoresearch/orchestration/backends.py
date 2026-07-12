@@ -86,6 +86,7 @@ class Backend:
     max_budget_usd: float | None = None
     notes: str = ""
     min_tool_version: str | None = None
+    executable_candidates: tuple[str, ...] = ()
     usd_per_mtok_input: float | None = None
     usd_per_mtok_cached: float | None = None
     usd_per_mtok_output: float | None = None
@@ -247,6 +248,8 @@ class Backend:
             "max_turns": self.max_turns,
             "max_budget_usd": self.max_budget_usd,
             "notes": self.notes,
+            "min_tool_version": self.min_tool_version,
+            "executable_candidates": list(self.executable_candidates),
             "usd_per_mtok_input": self.usd_per_mtok_input,
             "usd_per_mtok_cached": self.usd_per_mtok_cached,
             "usd_per_mtok_output": self.usd_per_mtok_output,
@@ -301,6 +304,11 @@ def _parse_backend(name: str, entry: dict[str, Any], config_path: Path) -> Backe
         raise ValueError(
             f"Backend {name!r} in {config_path} is missing required key(s): {', '.join(missing)}"
         )
+    candidates = entry.get("executable_candidates", [])
+    if not isinstance(candidates, list) or not all(isinstance(path, str) for path in candidates):
+        raise ValueError(
+            f"Backend {name!r} in {config_path}: executable_candidates must be an ordered list of paths"
+        )
     return Backend(
         name=name,
         tool=str(entry["tool"]),
@@ -322,6 +330,7 @@ def _parse_backend(name: str, entry: dict[str, Any], config_path: Path) -> Backe
         min_tool_version=(
             str(entry["min_tool_version"]) if entry.get("min_tool_version") else None
         ),
+        executable_candidates=tuple(candidates),
         usd_per_mtok_input=(float(entry["usd_per_mtok_input"]) if entry.get("usd_per_mtok_input") is not None else None),
         usd_per_mtok_cached=(float(entry["usd_per_mtok_cached"]) if entry.get("usd_per_mtok_cached") is not None else None),
         usd_per_mtok_output=(float(entry["usd_per_mtok_output"]) if entry.get("usd_per_mtok_output") is not None else None),
@@ -377,39 +386,52 @@ def preflight_backend(backend: Backend) -> dict[str, str | None]:
     from pathlib import Path as _Path
 
     executable = backend.command[0]
-    resolved_path = shutil.which(executable)
-    if resolved_path is None:
-        raise RuntimeError(
-            f"Backend {backend.name!r}: executable {executable!r} is not on PATH. "
-            "Install it (or fix PATH) before spawning."
-        )
-
-    resolved_version: str | None = None
-    try:
-        output = subprocess.run(
-            [executable, "--version"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        ).stdout
-    except (OSError, subprocess.SubprocessError) as exc:
-        if backend.min_tool_version:
-            raise RuntimeError(
-                f"Backend {backend.name!r}: could not determine {executable!r} version: {exc}"
-            ) from exc
-        output = ""
-    match = re.search(r"(\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?)", output)
-    if match is not None:
-        resolved_version = match.group(1)
-    if backend.min_tool_version:
-        if match is None or _version_key(match.group(1)) < _version_key(backend.min_tool_version):
-            found = match.group(1) if match else output.strip() or "unknown"
-            raise RuntimeError(
-                f"Backend {backend.name!r} requires {executable} >= "
-                f"{backend.min_tool_version}, but PATH resolves version {found}. "
-                "Upgrade the CLI or place a compatible binary earlier on PATH."
+    attempts: list[str] = []
+    search = [(candidate, True) for candidate in backend.executable_candidates]
+    path_executable = shutil.which(executable)
+    if path_executable:
+        search.append((path_executable, False))
+    for candidate, explicit in search:
+        resolved_path = shutil.which(candidate) if not _Path(candidate).is_absolute() else candidate
+        if not resolved_path or (explicit and not _Path(resolved_path).is_file()):
+            attempts.append(f"{candidate}: missing")
+            continue
+        try:
+            completed = subprocess.run(
+                [resolved_path, "--version"], check=True, capture_output=True,
+                text=True, timeout=10,
             )
+            output = f"{getattr(completed, 'stdout', '')}\n{getattr(completed, 'stderr', '')}"
+        except (OSError, subprocess.SubprocessError) as exc:
+            if not backend.min_tool_version:
+                resolved_version = None
+                break
+            attempts.append(f"{candidate}: version check failed ({exc})")
+            continue
+        match = re.search(r"(\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?)", output)
+        resolved_version = match.group(1) if match else None
+        if backend.min_tool_version and (
+            resolved_version is None
+            or _version_key(resolved_version) < _version_key(backend.min_tool_version)
+        ):
+            attempts.append(f"{candidate}: version {resolved_version or 'unknown'}")
+            continue
+        break
+    else:
+        detail = "; ".join(attempts) or f"{executable}: not on PATH"
+        if backend.min_tool_version and len(attempts) == 1 and "version " in attempts[0]:
+            found = attempts[0].rsplit("version ", 1)[-1]
+            prefix = (
+                f"Backend {backend.name!r} requires {executable} >= {backend.min_tool_version}, "
+                f"but PATH resolves version {found}. "
+            )
+        else:
+            minimum = f" >= {backend.min_tool_version}" if backend.min_tool_version else ""
+            prefix = f"Backend {backend.name!r}: no usable {executable}{minimum} executable. "
+        raise RuntimeError(
+            f"{prefix}Checked {detail}. Add a compatible path to executable_candidates, run "
+            "scripts/provision_codex.sh for Codex, or fix PATH."
+        )
     resolved = {"executable": resolved_path, "version": resolved_version}
 
     state_name = _TOOL_STATE_DIRS.get(backend.tool)
@@ -429,6 +451,47 @@ def preflight_backend(backend: Backend) -> dict[str, str | None]:
             "process privileges (e.g. Codex `--sandbox danger-full-access`)."
         ) from exc
     return resolved
+
+
+def doctor_backends(
+    backends: dict[str, Backend], *, backend_name: str | None = None, probe_seconds: float = 1.0
+) -> list[dict[str, Any]]:
+    """Resolve and briefly launch real backends, returning auditable results."""
+
+    import subprocess
+
+    selected = [backends[backend_name]] if backend_name else list(backends.values())
+    results: list[dict[str, Any]] = []
+    for backend in selected:
+        if backend.tool == "stub" or backend.name.startswith("stub") or not backend.is_spawnable:
+            continue
+        try:
+            resolved = preflight_backend(backend)
+            command = list(backend.render_command(prompt="Reply with OK and exit."))
+            command[0] = str(resolved["executable"])
+            process = subprocess.Popen(
+                command, cwd=PROJECT_ROOT,
+                stdin=subprocess.PIPE if backend.prompt_via == "stdin" else subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                _, stderr = process.communicate(
+                    "Reply with OK and exit.\n" if backend.prompt_via == "stdin" else None,
+                    timeout=probe_seconds,
+                )
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                process.communicate(timeout=5)
+                stderr = ""
+            if process.returncode not in (0, -15):
+                raise RuntimeError(
+                    f"spawn probe exited {process.returncode}: {stderr.strip() or 'no stderr'}; "
+                    f"ensure {backend.tool}'s home directory is writable and authentication is valid"
+                )
+            results.append({"backend": backend.name, "status": "pass", **resolved})
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            results.append({"backend": backend.name, "status": "fail", "fix": str(exc)})
+    return results
 
 
 def _version_key(value: str) -> tuple[tuple[int, ...], int, tuple[int, ...]]:

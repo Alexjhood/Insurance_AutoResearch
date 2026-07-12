@@ -615,6 +615,7 @@ def test_champion_recipe_reference_resolves_nested_overrides(tmp_path: Path) -> 
                     "structure": "direct",
                     "estimator": "lightgbm",
                     "objective": "tweedie",
+                    "encoding": "one_hot",
                     "params": {"num_leaves": 63, "learning_rate": 0.05},
                 },
                 "feature_exclusions": ["Region"],
@@ -626,7 +627,10 @@ def test_champion_recipe_reference_resolves_nested_overrides(tmp_path: Path) -> 
         "experiment_config": {
             "model": {
                 "recipe_ref": "champion",
-                "recipe_overrides": {"params": {"num_leaves": 31}},
+                "recipe_overrides": {
+                    "encoding": "ordinal",
+                    "params": {"num_leaves": 31},
+                },
                 "feature_exclusions": None,
             },
         }
@@ -648,6 +652,7 @@ def test_champion_recipe_reference_resolves_nested_overrides(tmp_path: Path) -> 
         "num_leaves": 31,
         "learning_rate": 0.05,
     }
+    assert exp["model"]["recipe"]["encoding"] == "ordinal"
     assert "feature_exclusions" not in exp["model"]
     assert "recipe_ref" not in exp["model"]
 

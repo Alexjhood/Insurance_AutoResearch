@@ -379,6 +379,11 @@ def spawn(
         )
 
         resolved_backend = preflight_backend(backend) or {}
+        if resolved_backend.get("executable"):
+            backend = replace(
+                backend,
+                command=(str(resolved_backend["executable"]), *backend.command[1:]),
+            )
         if brief.foundation_models:
             preflight_foundation_models()
 
@@ -766,6 +771,11 @@ def respawn(
     )
 
     resolved_backend = preflight_backend(backend) or {}
+    if resolved_backend.get("executable"):
+        backend = replace(
+            backend,
+            command=(str(resolved_backend["executable"]), *backend.command[1:]),
+        )
     if brief.foundation_models:
         preflight_foundation_models()
 

@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "dependencies": {
+    "@openai/codex": "0.144.0-alpha.4"
+  }
+}
