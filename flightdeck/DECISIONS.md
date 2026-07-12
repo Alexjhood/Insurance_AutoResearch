@@ -134,3 +134,7 @@ One line per decision, newest phase last.
   single-chunk build (`npm run build:export` → `dist-export/`) and inlines JS +
   CSS into `index.html`. Payload injection anchors on the LAST `</head>`
   because the inlined bundle contains that literal string (DOMPurify).
+- **Multi-campaign export.** `python -m flightdeck.export --all` embeds every
+  built snapshot (index, snapshots, files, telemetry) in one self-contained
+  `index.html` under `export/out/all/`. No frontend change was needed: the
+  EmbeddedProvider already resolves every payload by orchestration id.

@@ -44,6 +44,21 @@ def test_static_export_embeds_snapshot_telemetry_and_small_files(tmp_path: Path)
     assert html.index('id="fd-embedded-index"') > html.index("export {};")
 
 
+def test_all_orchestrations_export_embeds_full_index(tmp_path: Path) -> None:
+    make_mini_fixture(tmp_path)
+    build(tmp_path, [ORCH_ID], log=lambda *_: None)
+    _fake_dist(tmp_path)
+
+    folder, archive = build_export(None, repo_root=tmp_path, build_app=False, log=lambda *_: None)
+
+    assert folder.name == "all"
+    html = (folder / "index.html").read_text(encoding="utf-8")
+    assert 'id="fd-embedded-index"' in html
+    assert f'id="fd-embedded-snapshot-{ORCH_ID}"' in html
+    assert f'id="fd-embedded-telemetry-{ORCH_ID}-d01"' in html
+    assert archive.is_file()
+
+
 def test_large_file_is_marked_not_included(tmp_path: Path) -> None:
     make_mini_fixture(tmp_path)
     build(tmp_path, [ORCH_ID], log=lambda *_: None)

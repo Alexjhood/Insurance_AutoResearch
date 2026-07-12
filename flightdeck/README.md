@@ -60,16 +60,20 @@ The production app is written to `flightdeck/app/dist/`.
 
 ## Static export
 
-First build the requested snapshot, then run:
+First build the requested snapshot(s), then run one of:
 
 ```bash
-.venv/bin/python -m flightdeck.export 20260711T164959Z
+.venv/bin/python -m flightdeck.export 20260711T164959Z   # one campaign
+.venv/bin/python -m flightdeck.export --all              # every built snapshot
 ```
 
 This creates both:
 
-- `flightdeck/export/out/20260711T164959Z/index.html`
-- `flightdeck/export/out/20260711T164959Z-flightdeck.zip`
+- `flightdeck/export/out/<id|all>/index.html`
+- `flightdeck/export/out/<id|all>-flightdeck.zip`
+
+The `--all` form embeds the whole Hangar — every campaign, the league table,
+and all delegation telemetry — in a single file.
 
 Open `index.html` directly in a browser. It is a single self-contained file:
 the app bundle, snapshot, and delegation telemetry are all inlined (browsers
