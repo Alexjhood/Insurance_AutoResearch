@@ -5,7 +5,7 @@ import react from '@vitejs/plugin-react';
 // static export can inline the app into index.html and open from file://,
 // where module scripts and dynamic import() are blocked by CORS.
 export default defineConfig(({ mode }) => ({
-  base: './',
+  base: mode === 'export' ? './' : '/',
   plugins: [react()],
   server: { port: 5199, proxy: { '/api': 'http://127.0.0.1:8799', '/healthz': 'http://127.0.0.1:8799' } },
   build: mode === 'export'

@@ -19,7 +19,7 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-SNAPSHOT_SCHEMA_VERSION = 1
+SNAPSHOT_SCHEMA_VERSION = 2
 
 
 # --------------------------------------------------------------------------- #
@@ -46,10 +46,14 @@ class IndexEntry:
     created_at: str
     ended_at: Optional[str]
     orchestrator_model: str
+    orchestrator: "OrchestratorIdentity"
+    stale: bool
     backends: list[str]
     n_delegations: int
     cycles_committed: int
     cycles_used: int
+    cycles_attempted: int
+    seed_evals: int
     cycles_forfeited: int
     final_gini: Optional[float]
     baseline_gini: Optional[float]
@@ -59,6 +63,8 @@ class IndexEntry:
     distress_count: int
     takeover_count: int
     champion_spark: list[float]
+    cost_usd: Optional[float]
+    cost_estimated: bool
 
 
 @dataclass
@@ -85,6 +91,13 @@ class Consolidation:
 
 
 @dataclass
+class OrchestratorIdentity:
+    provider: str
+    model: str
+    effort: Optional[str]
+
+
+@dataclass
 class Campaign:
     orch_id: str
     dataset: str
@@ -94,6 +107,7 @@ class Campaign:
     ended_at: Optional[str]
     cycles_committed: int
     orchestrator_model: str
+    orchestrator: OrchestratorIdentity
     consolidation: Optional[Consolidation]
     framework_computed: Any  # campaign_report.json .framework_computed passthrough
     campaign_report_md: Optional[str]
@@ -163,6 +177,7 @@ class DelegationCost:
     cache_hit_rate: Optional[float]
     wall_clock_minutes: Optional[float]
     cost_usd: Optional[float]
+    cost_estimated: bool
 
 
 @dataclass
@@ -361,12 +376,31 @@ class PlayoffFinal:
 
 
 @dataclass
+class PlayoffPairing:
+    order: int
+    delegation_id: str
+    source_experiment_id: str
+    incumbent_experiment_id: str
+    replayed_experiment_id: Optional[str]
+    comparison_id: Optional[str]
+    decision: Optional[str]
+    decision_reason: Optional[str]
+    mean_lift: Optional[float]
+    challenger_win_rate: Optional[float]
+    gates: dict[str, bool]
+    guardrail_passed: Optional[bool]
+
+
+@dataclass
 class Playoff:
     decision_mode: str
     consolidation: Consolidation
     finalists: list[PlayoffFinalist]
     exclusions: list[PlayoffExclusion]
+    pairings: list[PlayoffPairing]
     final: Optional[PlayoffFinal]
+    status: str
+    failure_reason: Optional[str]
     report_md: Optional[str]
 
 
@@ -409,6 +443,22 @@ class TelemetrySummary:
     cache_hit_rate: Optional[float]
     by_delegation: list[TelemetryByDelegation]
     tool_mix: list[ToolMixEntry]
+    usage_by_model: list["UsageByModel"]
+    cost_usd: Optional[float]
+    cost_estimated: bool
+
+
+@dataclass
+class UsageByModel:
+    key: str
+    provider: str
+    model: str
+    effort: Optional[str]
+    role: str
+    tokens: Optional[TokenTotals]
+    unmeasured: bool
+    cost_usd: Optional[float]
+    cost_estimated: bool
 
 
 @dataclass

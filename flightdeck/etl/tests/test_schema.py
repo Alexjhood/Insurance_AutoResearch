@@ -62,10 +62,13 @@ def test_to_jsonable_round_trips():
     entry = IndexEntry(
         orch_id="x", alias=None, dataset="d", target_mode="frequency", status="completed",
         created_at="2026-01-01T00:00:00Z", ended_at=None, orchestrator_model="openai/gpt",
+        orchestrator=schema.OrchestratorIdentity("openai", "gpt", "high"), stale=False,
         backends=["codex"], n_delegations=1, cycles_committed=1, cycles_used=1,
+        cycles_attempted=1, seed_evals=0,
         cycles_forfeited=0, final_gini=0.3, baseline_gini=0.0,
         total_tokens=schema.TokenTotals(1, 1, 1, 1), cache_hit_rate=1.0,
         wall_clock_minutes=1.0, distress_count=0, takeover_count=0, champion_spark=[0.3],
+        cost_usd=0.25, cost_estimated=True,
     )
     blob = json.dumps(to_jsonable(entry))
     restored = json.loads(blob)

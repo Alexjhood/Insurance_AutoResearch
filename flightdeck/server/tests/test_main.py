@@ -59,3 +59,26 @@ def test_rebuild_sse(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> Non
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
     assert "event: complete" in response.text
+
+
+def test_campaign_scoped_rebuild(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = []
+    async def fake_stream(orch_id=None):
+        seen.append(orch_id)
+        yield main._sse("complete", {"refresh": True})
+    monkeypatch.setattr(main, "_rebuild_stream", fake_stream)
+    response = client.post("/api/etl/rebuild?orchestration_id=orch-1")
+    assert response.status_code == 200
+    assert seen == ["orch-1"]
+
+
+def test_index_marks_source_newer_than_snapshot_stale(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / "repo"
+    source = repo / "artifacts" / "orchestrations" / "orch-1" / "orchestration.json"
+    source.parent.mkdir(parents=True)
+    source.write_text("{}")
+    snapshot = main.SNAPSHOTS_DIR / "orch-1" / "snapshot.json"
+    snapshot.touch()
+    source.touch()
+    monkeypatch.setattr(main, "REPO_ROOT", repo)
+    assert client.get("/api/index").json()["orchestrations"][0]["stale"] is True

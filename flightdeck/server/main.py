@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 FLIGHTDECK_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = FLIGHTDECK_DIR.parent
 SNAPSHOTS_DIR = Path(os.environ.get("FLIGHTDECK_SNAPSHOTS_DIR", FLIGHTDECK_DIR / "snapshots"))
 APP_DIST = FLIGHTDECK_DIR / "app" / "dist"
 
@@ -53,7 +54,16 @@ def _orch_dir(orch_id: str) -> Path:
 
 @app.get("/api/index")
 def get_index() -> JSONResponse:
-    return _json_file(SNAPSHOTS_DIR / "index.json")
+    path = SNAPSHOTS_DIR / "index.json"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Snapshot resource not found")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for entry in data.get("orchestrations", []):
+        oid = entry.get("orch_id")
+        source = REPO_ROOT / "artifacts" / "orchestrations" / str(oid) / "orchestration.json"
+        snapshot = SNAPSHOTS_DIR / str(oid) / "snapshot.json"
+        entry["stale"] = bool(source.exists() and snapshot.exists() and source.stat().st_mtime > snapshot.stat().st_mtime)
+    return JSONResponse(data)
 
 
 @app.get("/api/orchestrations/{orch_id}")
@@ -90,13 +100,13 @@ def _sse(event: str, data: object) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
 
-async def _rebuild_stream() -> AsyncIterator[bytes]:
+async def _rebuild_stream(orch_id: str | None = None) -> AsyncIterator[bytes]:
     yield _sse("progress", {"message": "Starting snapshot rebuild"})
+    args = [sys.executable, "-m", "flightdeck.etl"]
+    args.extend(["--orchestration", orch_id] if orch_id else ["--all"])
+    args.append("--force")
     process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "flightdeck.etl",
-        "--all",
+        *args,
         cwd=FLIGHTDECK_DIR.parent,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
@@ -112,8 +122,11 @@ async def _rebuild_stream() -> AsyncIterator[bytes]:
 
 
 @app.post("/api/etl/rebuild")
-def rebuild() -> StreamingResponse:
-    return StreamingResponse(_rebuild_stream(), media_type="text/event-stream")
+def rebuild(orchestration_id: str | None = None) -> StreamingResponse:
+    if orchestration_id and ("/" in orchestration_id or "\\" in orchestration_id or orchestration_id in {".", ".."}):
+        raise HTTPException(status_code=400, detail="Invalid orchestration id")
+    stream = _rebuild_stream(orchestration_id) if orchestration_id else _rebuild_stream()
+    return StreamingResponse(stream, media_type="text/event-stream")
 
 
 @app.get("/healthz")

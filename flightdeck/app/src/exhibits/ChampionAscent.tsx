@@ -92,6 +92,8 @@ export function ChampionAscent({ orchId, experiments, championTimeline, delegati
   }, [experiments, championTimeline, delegations, notes, w, scaleMode]);
 
   const finalEvent = championTimeline[championTimeline.length - 1];
+  const belowDomain = experiments.filter(e => e.metrics.gini_weighted != null && e.metrics.gini_weighted < model.domain[0]);
+  const labelStride = Math.max(1, Math.ceil(belowDomain.length / Math.max(1, Math.floor(w / 120))));
 
   const tipFor = (e: Experiment) => {
     const o = outcomeOf(e);
@@ -200,7 +202,7 @@ export function ChampionAscent({ orchId, experiments, championTimeline, delegati
                 onClick={() => { hide(); navigate(`/o/${orchId}/journey${journeyHash(e)}`); }}
                 onKeyDown={ev => { if (ev.key === 'Enter') { hide(); navigate(`/o/${orchId}/journey${journeyHash(e)}`); } }}>
                 <circle cx={px} cy={py} r={12} fill="transparent" />
-                {clamped && <text className="clamp-label" x={px} y={HEIGHT - M.b - 24} textAnchor="middle">▼ {e.metrics.gini_weighted.toFixed(4)}</text>}
+                {clamped && belowDomain.indexOf(e) % labelStride === 0 && <text className="clamp-label" x={px} y={HEIGHT - M.b - 24 - (Math.floor(belowDomain.indexOf(e) / labelStride) % 2) * 13} textAnchor="middle">▼ {e.metrics.gini_weighted.toFixed(4)}</text>}
                 <text className={`point-glyph ${o === 'seed' ? 'seed' : ''}`} x={px} y={py + 5} textAnchor="middle"
                   style={{ fill: `var(${OUTCOME_VAR[o]})`, fontSize: o === 'promote' || o === 'playoff' ? 17 : 14 }}>{OUTCOME_GLYPH[o]}</text>
               </g>

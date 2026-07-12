@@ -36,6 +36,8 @@ from .schema import (
     TelemetryTotals,
     TokenTotals,
     ToolMixEntry,
+    UsageByModel,
+    OrchestratorIdentity,
     SNAPSHOT_SCHEMA_VERSION,
     to_jsonable,
 )
@@ -178,7 +180,7 @@ def _add_tokens(acc: TokenTotals, other: TokenTotals) -> None:
     acc.reasoning += other.reasoning
 
 
-def _build_telemetry_summary(delegations, per_deleg_cost) -> TelemetrySummary:
+def _build_telemetry_summary(delegations, per_deleg_cost, campaign_report) -> TelemetrySummary:
     totals = TelemetryTotals()
     by_delegation: list[TelemetryByDelegation] = []
     tool_mix: list[ToolMixEntry] = []
@@ -214,11 +216,37 @@ def _build_telemetry_summary(delegations, per_deleg_cost) -> TelemetrySummary:
                 )
             )
     cache_rate = totals.cached_input / totals.input if totals.input else None
+    cost_doc = (campaign_report.get("framework_computed") or {}).get("cost") or {}
+    usage_by_model: list[UsageByModel] = []
+    for key, row in (cost_doc.get("usage_by_model") or {}).items():
+        if not isinstance(row, dict):
+            continue
+        unmeasured = bool(row.get("unmeasured"))
+        tokens = None if unmeasured else TokenTotals(
+            input=int(row.get("input_tokens") or 0),
+            cached_input=int(row.get("cached_tokens") or 0),
+            output=int(row.get("output_tokens") or 0),
+            reasoning=int(row.get("reasoning_tokens") or 0),
+        )
+        usage_by_model.append(UsageByModel(
+            key=key,
+            provider=row.get("provider") or "",
+            model=row.get("model") or key,
+            effort=row.get("effort"),
+            role=row.get("role") or "delegation",
+            tokens=tokens,
+            unmeasured=unmeasured,
+            cost_usd=row.get("cost_usd"),
+            cost_estimated=bool(row.get("cost_estimated")),
+        ))
     return TelemetrySummary(
         totals=totals,
         cache_hit_rate=cache_rate,
         by_delegation=by_delegation,
         tool_mix=tool_mix,
+        usage_by_model=usage_by_model,
+        cost_usd=cost_doc.get("cost_usd"),
+        cost_estimated=bool(cost_doc.get("cost_estimated")),
     )
 
 
@@ -275,10 +303,14 @@ def _build_index_entry(
         created_at=campaign.created_at,
         ended_at=ended_at,
         orchestrator_model=campaign.orchestrator_model,
+        orchestrator=campaign.orchestrator,
+        stale=False,
         backends=sorted({d.backend for d in delegations if d.backend}),
         n_delegations=len(delegations),
         cycles_committed=campaign.cycles_committed,
-        cycles_used=sum(d.budget.used for d in delegations),
+        cycles_used=min(campaign.cycles_committed, sum(d.budget.decided for d in delegations)),
+        cycles_attempted=sum(d.budget.attempted for d in delegations),
+        seed_evals=sum(1 for e in champion_timeline if e.is_seed_transfer),
         cycles_forfeited=sum(d.budget.forfeited for d in delegations),
         final_gini=final_gini,
         baseline_gini=baseline_gini,
@@ -288,6 +320,8 @@ def _build_index_entry(
         distress_count=sum(len(d.distress.active) for d in delegations),
         takeover_count=len(takeover_delegations),
         champion_spark=spark,
+        cost_usd=telemetry_summary.cost_usd,
+        cost_estimated=telemetry_summary.cost_estimated,
     )
 
 
@@ -453,7 +487,7 @@ def _do_build(
         warnings,
     )
 
-    telemetry_summary = _build_telemetry_summary(delegations, per_deleg_cost)
+    telemetry_summary = _build_telemetry_summary(delegations, per_deleg_cost, campaign_report)
 
     snapshot = Snapshot(
         snapshot_schema_version=SNAPSHOT_SCHEMA_VERSION,
@@ -521,6 +555,8 @@ def _load_index(repo_root: Path) -> dict:
 
 def _index_entry_from_dict(d: dict) -> IndexEntry:
     tok = d.get("total_tokens") or {}
+    orch = d.get("orchestrator") or {}
+    legacy_model = d.get("orchestrator_model", "")
     return IndexEntry(
         orch_id=d.get("orch_id", ""),
         alias=d.get("alias"),
@@ -530,10 +566,18 @@ def _index_entry_from_dict(d: dict) -> IndexEntry:
         created_at=d.get("created_at", ""),
         ended_at=d.get("ended_at"),
         orchestrator_model=d.get("orchestrator_model", ""),
+        orchestrator=OrchestratorIdentity(
+            provider=orch.get("provider") or (legacy_model.split("/", 1)[0] if "/" in legacy_model else ""),
+            model=orch.get("model") or (legacy_model.split("/", 1)[-1]),
+            effort=orch.get("effort"),
+        ),
+        stale=bool(d.get("stale")),
         backends=list(d.get("backends") or []),
         n_delegations=d.get("n_delegations", 0),
         cycles_committed=d.get("cycles_committed", 0),
         cycles_used=d.get("cycles_used", 0),
+        cycles_attempted=d.get("cycles_attempted", d.get("cycles_used", 0)),
+        seed_evals=d.get("seed_evals", 0),
         cycles_forfeited=d.get("cycles_forfeited", 0),
         final_gini=d.get("final_gini"),
         baseline_gini=d.get("baseline_gini"),
@@ -546,6 +590,8 @@ def _index_entry_from_dict(d: dict) -> IndexEntry:
         distress_count=d.get("distress_count", 0),
         takeover_count=d.get("takeover_count", 0),
         champion_spark=list(d.get("champion_spark") or []),
+        cost_usd=d.get("cost_usd"),
+        cost_estimated=bool(d.get("cost_estimated")),
     )
 
 

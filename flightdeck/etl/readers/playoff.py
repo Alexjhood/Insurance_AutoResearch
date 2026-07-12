@@ -11,6 +11,7 @@ from ..schema import (
     PlayoffExclusion,
     PlayoffFinal,
     PlayoffFinalist,
+    PlayoffPairing,
 )
 from ..util import Warnings, load_json, to_float
 
@@ -80,11 +81,43 @@ def read_playoff(
             consolidation_experiment_id=lineage.get("consolidation_experiment_id", ""),
         )
 
+    pairings: list[PlayoffPairing] = []
+    for pairing in doc.get("pairings") or []:
+        if not isinstance(pairing, dict):
+            continue
+        finalist = pairing.get("finalist") or {}
+        source = finalist.get("source") or {}
+        summary = pairing.get("comparison_summary") or {}
+        evidence = pairing.get("gate_evidence") or {}
+        decision = pairing.get("decision") or {}
+        pairings.append(PlayoffPairing(
+            order=int(pairing.get("order") or len(pairings) + 1),
+            delegation_id=finalist.get("delegation_id") or source.get("delegation_id") or "",
+            source_experiment_id=source.get("experiment_id") or "",
+            incumbent_experiment_id=pairing.get("incumbent_experiment_id") or "",
+            replayed_experiment_id=pairing.get("replayed_experiment_id"),
+            comparison_id=pairing.get("comparison_id"),
+            decision=decision.get("decision"),
+            decision_reason=decision.get("rationale") or evidence.get("advisory_rationale"),
+            mean_lift=to_float(summary.get("mean_lift")),
+            challenger_win_rate=to_float(summary.get("challenger_win_rate")),
+            gates=dict(evidence.get("standard_checks") or {}),
+            guardrail_passed=(evidence.get("guardrail") or {}).get("passed"),
+        ))
+
+    status = doc.get("status") or ("completed" if final else "incomplete")
+    failure_reason = doc.get("failure_reason") or doc.get("error")
+    if isinstance(failure_reason, dict):
+        failure_reason = failure_reason.get("message") or str(failure_reason)
+
     return Playoff(
         decision_mode=doc.get("decision_mode", ""),
         consolidation=consolidation,
         finalists=finalists,
         exclusions=exclusions,
+        pairings=pairings,
         final=final,
+        status=status,
+        failure_reason=failure_reason,
         report_md=report_md_rel,
     )

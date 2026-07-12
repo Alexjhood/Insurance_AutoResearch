@@ -26,8 +26,9 @@ def test_index_headline_stats(mini_index):
     assert entry["orchestrator_model"] == "openai/gpt-mini"
     assert entry["n_delegations"] == 3
     assert entry["cycles_committed"] == 6
-    # d01 used 3 + d02 used 1 + d03 used 0.
-    assert entry["cycles_used"] == 4
+    # Decided cycles are the budget-compatible numerator; attempts are separate.
+    assert entry["cycles_used"] == 3
+    assert entry["cycles_attempted"] == 5
     assert entry["cycles_forfeited"] == 1
     assert entry["takeover_count"] == 1
     # final_gini follows the playoff final lineage (d01 finalist gini = 0.30).

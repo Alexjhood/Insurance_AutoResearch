@@ -25,3 +25,21 @@ export function resolveRecipe(experiments: { name: string; recipe: unknown | nul
   }
   return best?.recipe ?? null;
 }
+
+export function orchestratorLabel(value: { provider: string; model: string; effort: string | null } | undefined, legacy = ''): string {
+  if (!value?.model) return legacy;
+  return `${value.model}${value.effort ? ` · ${value.effort}` : ''}`;
+}
+
+export function championDescriptor(experiments: { name: string; model_family: string; recipe: unknown | null }[], exp: { name: string; model_family: string; recipe: unknown | null } | undefined, fallback = 'Campaign champion'): string {
+  const recipe = recipeSummary(resolveRecipe(experiments, exp));
+  if (recipe) return recipe;
+  if (!exp) return fallback;
+  const raw = exp.name
+    .replace(/^\d{8}T\d{6}Z_/, '')
+    .replace(/^orchestration_(?:challenger_\d+_[^_]+_|seed_[^_]+_)/, '')
+    .replace(/^orchestration_delegation_seed_[^_]+_/, '');
+  const blend = raw.match(/(.+)_blend_(\d+)_(\d+)$/);
+  if (blend) return `${blend[1].replace(/_/g, ' + ')} · ${blend[2]}/${blend[3]} blend`;
+  return raw.replace(/_/g, ' ');
+}

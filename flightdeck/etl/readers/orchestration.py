@@ -22,6 +22,7 @@ from ..schema import (
     Distress,
     ModelIdentity,
     OperatorNote,
+    OrchestratorIdentity,
     RepairSummary,
     TokenTotals,
 )
@@ -53,6 +54,18 @@ def _orchestrator_model(campaign_report: dict, ledger: dict) -> str:
     return f"{provider}/{name}".strip("/")
 
 
+def _orchestrator_identity(campaign_report: dict, ledger: dict) -> OrchestratorIdentity:
+    report = campaign_report.get("orchestrator")
+    source = report if isinstance(report, dict) else ledger.get("orchestrator")
+    if not isinstance(source, dict):
+        source = {}
+    return OrchestratorIdentity(
+        provider=source.get("provider") or source.get("model_provider") or ledger.get("model_provider") or "",
+        model=source.get("model") or source.get("model_name") or ledger.get("model_name") or "",
+        effort=source.get("effort") or ledger.get("model_effort"),
+    )
+
+
 def build_campaign(
     orch_id: str, orch_dir: Path, ledger: dict, campaign_report: dict,
     ended_at: Optional[str], files_lookup: dict[str, str], warnings: Warnings,
@@ -73,6 +86,7 @@ def build_campaign(
         ended_at=ended_at,
         cycles_committed=to_int(ledger.get("cycles_committed")) or 0,
         orchestrator_model=_orchestrator_model(campaign_report, ledger),
+        orchestrator=_orchestrator_identity(campaign_report, ledger),
         consolidation=consolidation,
         framework_computed=campaign_report.get("framework_computed"),
         campaign_report_md=files_lookup.get("CAMPAIGN_REPORT.md"),
@@ -196,6 +210,12 @@ def _cost(ledger_deleg: dict, report: dict, telemetry_cost: dict) -> DelegationC
         tokens = telemetry_cost.get("tokens") or TokenTotals()
     report_cost = report.get("cost") or {}
     llm_usage = report_cost.get("llm_usage") or {}
+    cost_usd = to_float(
+        ledger_deleg.get("estimated_cost_usd")
+        or ledger_deleg.get("cost_usd")
+        or llm_usage.get("cost_usd")
+        or report_cost.get("cost_usd")
+    )
     return DelegationCost(
         tokens=tokens,
         model_calls=telemetry_cost.get("model_calls", 0),
@@ -203,7 +223,8 @@ def _cost(ledger_deleg: dict, report: dict, telemetry_cost: dict) -> DelegationC
         tool_failures=telemetry_cost.get("tool_failures", 0),
         cache_hit_rate=cache_hit_rate(tokens.cached_input, tokens.input),
         wall_clock_minutes=to_float(report_cost.get("wall_clock_minutes")),
-        cost_usd=to_float(llm_usage.get("cost_usd")),
+        cost_usd=cost_usd,
+        cost_estimated=bool(ledger_deleg.get("cost_estimated") or llm_usage.get("cost_estimated") or report_cost.get("cost_estimated") or cost_usd is not None),
     )
 
 

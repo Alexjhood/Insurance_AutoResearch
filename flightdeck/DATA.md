@@ -1,6 +1,6 @@
 # Flight Deck — Data Contracts & Source Mapping
 
-**Schema version 1** (`snapshot_schema_version: 1`). Companion to SPEC.md §2–3.
+**Schema version 2** (`snapshot_schema_version: 2`). Companion to SPEC.md §2–3.
 This file defines the snapshot JSON the ETL emits and where every field comes
 from. `app/src/lib/types.ts` and `etl/schema.py` must mirror it exactly.
 
@@ -23,7 +23,7 @@ General rules:
 
 ```ts
 interface SnapshotIndex {
-  snapshot_schema_version: 1;
+  snapshot_schema_version: 2;
   built_at: string;
   orchestrations: IndexEntry[];
 }
@@ -36,6 +36,8 @@ interface IndexEntry {
   created_at: string;
   ended_at: string | null;           // max delegation ended_at, else null
   orchestrator_model: string;        // campaign_report.json .orchestrator (e.g. "openai/gpt-5.6")
+  orchestrator: { provider: string; model: string; effort: string | null };
+  stale: boolean;                    // orchestration.json mtime newer than snapshot build
   backends: string[];                // distinct delegation .backend values
   n_delegations: number;
   cycles_committed: number;          // orchestration.json .cycles_committed
@@ -49,6 +51,8 @@ interface IndexEntry {
   distress_count: number;            // Σ active distress flags across delegations
   takeover_count: number;            // count of delegations with taken_over=true + notes kind="takeover" (dedup by delegation)
   champion_spark: number[];          // ordered champion gini after each promotion (for card sparkline)
+  cost_usd: number | null;           // always displayed as estimated when present
+  cost_estimated: boolean;
 }
 ```
 
@@ -56,7 +60,7 @@ interface IndexEntry {
 
 ```ts
 interface Snapshot {
-  snapshot_schema_version: 1;
+  snapshot_schema_version: 2;
   build: { built_at: string; source_mtime: string; warnings: string[] };
   campaign: Campaign;
   delegations: Delegation[];         // ordered d01..dNN
@@ -81,6 +85,7 @@ interface Campaign {
   ended_at: string | null;
   cycles_committed: number;
   orchestrator_model: string;
+  orchestrator: { provider: string; model: string; effort: string | null };
   consolidation: { run_id: string; track: string } | null;   // orchestration.json .consolidation
   framework_computed: unknown;       // campaign_report.json .framework_computed passthrough (headline stats block; render as-is where useful)
   campaign_report_md: string | null; // files/ path to CAMPAIGN_REPORT.md copy
@@ -261,10 +266,17 @@ interface Playoff {
     replay_experiment_id: string | null;   // consolidation-run experiment id when matchable
   }[];
   exclusions: { delegation_id: string | null; reason: string }[];  // shape passthrough; [] in fixture
+  pairings: { order: number; delegation_id: string; source_experiment_id: string;
+    incumbent_experiment_id: string; replayed_experiment_id: string | null;
+    comparison_id: string | null; decision: string | null; decision_reason: string | null;
+    mean_lift: number | null; challenger_win_rate: number | null;
+    gates: Record<string, boolean>; guardrail_passed: boolean | null }[];
   final: {
     delegation_id: string; source_experiment_id: string;
     consolidation_experiment_id: string;
   } | null;
+  status: string;                    // completed | incomplete | failed
+  failure_reason: string | null;
   report_md: string | null;          // files/ path
 }
 ```
@@ -300,6 +312,11 @@ interface TelemetrySummary {         // campaign rollup for Overview/Telemetry p
                    tool_calls: number; tool_failures: number; cache_hit_rate: number | null }[];
   tool_mix: { delegation_id: string; tool: string; calls: number;
               failures: number; total_duration_ms: number }[];   // llm_tool_calls GROUP BY name
+  usage_by_model: { key: string; provider: string; model: string; effort: string | null;
+                    role: string; tokens: TokenTotals | null; unmeasured: boolean;
+                    cost_usd: number | null; cost_estimated: boolean }[];
+  cost_usd: number | null;
+  cost_estimated: boolean;
 }
 ```
 

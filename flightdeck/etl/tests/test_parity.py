@@ -42,7 +42,7 @@ def test_d01_input_tokens(real_snapshot):
 def test_d02_distress_active(real_snapshot):
     d02 = next(d for d in real_snapshot["delegations"] if d["delegation_id"] == "d02")
     assert "all_rejected" in d02["distress"]["active"]
-    assert "cycles_forfeited" in d02["distress"]["active"]
+    assert "cycles_forfeited" not in d02["distress"]["active"]
 
 
 def test_five_delegations(real_snapshot):
@@ -77,3 +77,20 @@ def test_emits_telemetry_files(real_repo_root, real_snapshot):
     out = snapshots_dir(real_repo_root) / REAL_FIXTURE_ID
     for did in ("d01", "d02", "d03", "d04", "d05"):
         assert (out / f"telemetry_{did}.json").exists()
+
+
+def test_playoff_includes_pairing_gate_evidence(real_snapshot):
+    playoff = real_snapshot["playoff"]
+    assert playoff["status"] == "completed"
+    assert playoff["pairings"]
+    first = playoff["pairings"][0]
+    assert first["comparison_id"]
+    assert "challenger_win_rate" in first["gates"]
+    assert first["guardrail_passed"] is True
+    assert playoff["final"]["source_experiment_id"]
+
+
+def test_normalized_orchestrator_and_model_usage(real_snapshot):
+    assert real_snapshot["campaign"]["orchestrator"]["model"]
+    rows = real_snapshot["telemetry_summary"]["usage_by_model"]
+    assert any(row["role"] == "orchestrator" and row["unmeasured"] for row in rows)
