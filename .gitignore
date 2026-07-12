@@ -20,6 +20,7 @@ catboost_info/
 *.tfevents*
 *.tmp
 
+Archive/*
 artifacts/*
 outputs/*
 data/*
@@ -29,3 +30,10 @@ data/raw/*
 !data/raw/.gitkeep
 !data/raw/README.md
 !artifacts/.gitkeep
+
+# Flight Deck (orchestration report app) — build outputs only; source is tracked
+flightdeck/snapshots/
+flightdeck/app/node_modules/
+flightdeck/app/dist/
+flightdeck/export/out/
+flightdeck/etl/**/__pycache__/
