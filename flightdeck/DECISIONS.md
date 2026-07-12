@@ -77,3 +77,39 @@ One line per decision, newest phase last.
 - **Phase 2 scatter identity.** The placeholder scatter uses the first canonical
   delegation color for every point. Dataset-specific color assignment is left
   to the Phase 5 league polish so colors remain token-only and stable.
+
+## Phase 4 — Flagship exhibits
+
+- **Champion Ascent point color follows decision, not delegation.** SPEC §6.1
+  says "glyph = decision, color = delegation", but the approved concept
+  (`design/concept.html`) colors glyphs by decision semantics and conveys
+  delegation identity through the background bands. The concept sets the target
+  look, so the concept wins; delegation identity remains visible via bands and
+  band labels.
+- **"Consolidation champion" annotation.** The champion timeline's final event
+  is the consolidation-run seed at gini 0.3401 (the same model the playoff
+  report scores at 0.3373 on the delegation split). To avoid contradicting the
+  hero's playoff-sourced 0.3373, the ascent annotates the step line's terminal
+  value as "consolidation champion" when the last event is a consolidation seed
+  transfer.
+- **Distress rules on the ascent are limited to crashes/unclean exits.** Every
+  fixture delegation raises at least one distress flag (usually
+  `cycles_forfeited`), so drawing a red rule per flag would be noise. Red
+  vertical rules render only for delegations with `clean_exit == false` or a
+  `crashed` flag; takeover notes always draw an amber rule. The distress board
+  and journey callouts still surface every flag.
+- **Programmatic scrolls are instant with a target flash.** `behavior:"smooth"`
+  scrollIntoView is a silent no-op in the embedded verification browser, so
+  timeline clicks and `#hash` deep links scroll instantly and highlight the
+  landing card with a 1.6s outline fade (suppressed under
+  `prefers-reduced-motion`).
+- **Flight Recorder selection uses `click`, not `mouseup`.** d3-zoom installs a
+  capture-phase window `mouseup` handler that stops propagation, which silently
+  swallows React `onMouseUp`. Event selection binds to `click` (unsuppressed for
+  no-drag gestures); shift-drag brush completion stays on `mouseup`.
+- **Token Flow campaign mode's second stage is token classes.** SPEC §6.4 shows
+  Campaign → delegations → experiment steps, but campaign mode's typed props
+  (`TelemetryByDelegation[]`) carry no per-experiment usage. The right-hand
+  stage groups into cached/uncached/output/reasoning instead, which also carries
+  the §6.4 headline fact (>90% cache hits, input ≫ output); per-experiment burn
+  lives in delegation mode where `ExperimentUsage` exists.
