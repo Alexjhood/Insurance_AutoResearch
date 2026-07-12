@@ -28,6 +28,10 @@
 
 /* tooltip */
 .exhibit-tip { position: fixed; z-index: 60; pointer-events: none; max-width: 300px; padding: 9px 12px; background: var(--bg-raised-2); border: 1px solid var(--border-strong); border-radius: var(--radius-md); box-shadow: var(--shadow-drawer); font-size: var(--fs-xs); line-height: 1.45; color: var(--text-primary); }
+.shared-experiment-tip { border-color: var(--accent); }
+.experiment-linked-dimmed { opacity: 0.28; transition: opacity var(--dur-fast) var(--ease-out); }
+.experiment-linked-active { opacity: 1; filter: drop-shadow(0 0 4px var(--accent)); }
+.experiment-card.experiment-linked-active { border-color: var(--accent); box-shadow: var(--focus-ring); filter: none; }
 .tip-title { font-weight: var(--fw-semibold); margin-bottom: 3px; }
 .tip-meta { color: var(--text-secondary); }
 .tip-meta.mono, .exhibit-tip .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }

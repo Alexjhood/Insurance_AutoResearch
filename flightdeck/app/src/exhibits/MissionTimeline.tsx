@@ -1,9 +1,10 @@
 import { useMemo, useState } from 'react';
 import { scaleLinear } from 'd3-scale';
 import type { Delegation, Experiment, OperatorNote } from '../lib/types';
+import { useExperimentHover } from '../lib/experimentHover';
 import {
   LegendItem, useExhibitTooltip, useMeasure,
-  outcomeOf, OUTCOME_GLYPH, OUTCOME_LABEL, OUTCOME_VAR, delegationVar,
+  outcomeOf, OUTCOME_LABEL, OUTCOME_VAR, delegationVar,
   parseTime, clockLabel, localTime, durationLabel,
 } from './shared';
 import './exhibits.css';
@@ -23,6 +24,7 @@ export function MissionTimeline({ delegations, experiments, notes, activeDelegat
   const [wrapRef, width] = useMeasure<HTMLDivElement>();
   const [expanded, setExpanded] = useState(false);
   const { tooltip, show, hide } = useExhibitTooltip();
+  const { showExperiment, moveExperiment, clearExperiment, classNameFor } = useExperimentHover();
   const w = Math.max(width, 640);
   const M = { l: 168, r: 20, t: 8, b: 20 };
 
@@ -137,7 +139,8 @@ export function MissionTimeline({ delegations, experiments, notes, activeDelegat
                   {es.filter(e => !e.is_seed && !e.is_baseline).map(e => {
                     const t = parseTime(e.created_at); if (t == null) return null;
                     const o = outcomeOf(e);
-                    return <circle key={e.experiment_id} className="cycle-dot" cx={model.x(t)} cy={y} r={3.6} style={{ fill: `var(${OUTCOME_VAR[o]})` }} />;
+                    return <circle key={e.experiment_id} className={`cycle-dot ${classNameFor(e.experiment_id)}`} cx={model.x(t)} cy={y} r={3.6} style={{ fill: `var(${OUTCOME_VAR[o]})` }}
+                      onMouseEnter={ev => showExperiment(ev, e)} onMouseMove={moveExperiment} onMouseLeave={clearExperiment} />;
                   })}
                 </g>
               );
@@ -166,11 +169,11 @@ export function MissionTimeline({ delegations, experiments, notes, activeDelegat
                   const t = parseTime(e.created_at); if (t == null) return null;
                   const o = outcomeOf(e);
                   return (
-                    <circle key={e.experiment_id} className="cycle-dot" cx={Math.min(Math.max(model.x(t), bx0 + 4), bx1 - 4)} cy={y} r={3.6}
+                    <circle key={e.experiment_id} className={`cycle-dot ${classNameFor(e.experiment_id)}`} cx={Math.min(Math.max(model.x(t), bx0 + 4), bx1 - 4)} cy={y} r={3.6}
                       style={{ fill: `var(${OUTCOME_VAR[o]})` }} role="link" tabIndex={0}
                       aria-label={`${e.name}, ${OUTCOME_LABEL[o]} — open journey card`}
-                      onMouseMove={ev => show(ev, <><div className="tip-title">{e.name}</div><div className="tip-meta mono">cycle {e.cycle ?? '—'} · <span style={{ color: `var(${OUTCOME_VAR[o]})` }}>{OUTCOME_GLYPH[o]} {OUTCOME_LABEL[o]}</span>{e.metrics.gini_weighted != null && <> · gini {e.metrics.gini_weighted.toFixed(4)}</>}</div><div className="tip-hint">click → journey card</div></>)}
-                      onMouseLeave={hide} onClick={() => scrollTo(experimentHash(e))}
+                      onMouseEnter={ev => showExperiment(ev, e)} onMouseMove={moveExperiment}
+                      onMouseLeave={clearExperiment} onClick={() => { clearExperiment(); scrollTo(experimentHash(e)); }}
                       onKeyDown={ev => ev.key === 'Enter' && scrollTo(experimentHash(e))} />
                   );
                 })}

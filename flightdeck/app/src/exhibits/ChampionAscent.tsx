@@ -2,8 +2,9 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { scaleLinear } from 'd3-scale';
 import type { ChampionEvent, Delegation, Experiment, OperatorNote } from '../lib/types';
+import { useExperimentHover } from '../lib/experimentHover';
 import {
-  ExhibitShell, LegendItem, SegmentToggle, useExhibitTooltip, useMeasure, useReducedMotion,
+  ExhibitShell, LegendItem, SegmentToggle, useMeasure, useReducedMotion,
   outcomeOf, OUTCOME_GLYPH, OUTCOME_LABEL, OUTCOME_VAR, delegationVar, parseTime, clockLabel,
 } from './shared';
 import './exhibits.css';
@@ -23,7 +24,7 @@ function journeyHash(e: Experiment): string {
 export function ChampionAscent({ orchId, experiments, championTimeline, delegations, notes }: ChampionAscentProps) {
   const [wrapRef, width] = useMeasure<HTMLDivElement>();
   const [scaleMode, setScaleMode] = useState<'magnify' | 'full'>('magnify');
-  const { tooltip, show, hide } = useExhibitTooltip();
+  const { showExperiment, moveExperiment, clearExperiment, classNameFor } = useExperimentHover();
   const navigate = useNavigate();
   const reduced = useReducedMotion();
   const w = Math.max(width, 640);
@@ -94,30 +95,6 @@ export function ChampionAscent({ orchId, experiments, championTimeline, delegati
   const finalEvent = championTimeline[championTimeline.length - 1];
   const belowDomain = experiments.filter(e => e.metrics.gini_weighted != null && e.metrics.gini_weighted < model.domain[0]);
   const labelStride = Math.max(1, Math.ceil(belowDomain.length / Math.max(1, Math.floor(w / 120))));
-
-  const tipFor = (e: Experiment) => {
-    const o = outcomeOf(e);
-    return (
-      <>
-        <div className="tip-title">{e.name}</div>
-        <div className="tip-meta mono">
-          {e.delegation_id ?? 'playoff'}{e.cycle != null ? ` · cycle ${e.cycle}` : ''} · {e.model_family}
-          {e.metrics.gini_weighted != null && <> · gini {e.metrics.gini_weighted.toFixed(4)}</>}
-        </div>
-        <div className="tip-meta mono">
-          <span style={{ color: `var(${OUTCOME_VAR[o]})` }}>{OUTCOME_GLYPH[o]} {OUTCOME_LABEL[o]}</span>
-          {e.comparison?.decision_reason_code && <> · {e.comparison.decision_reason_code}</>}
-          {e.lift.vs_then_champion != null && <> · lift {e.lift.vs_then_champion >= 0 ? '+' : '−'}{Math.abs(e.lift.vs_then_champion).toFixed(4)}</>}
-          {e.comparison?.fold_win_rate != null && <> · {(e.comparison.fold_win_rate * 100).toFixed(0)}% folds</>}
-        </div>
-        {e.recipe != null && typeof e.recipe === 'object' && 'estimator' in (e.recipe as Record<string, unknown>) && (
-          <div className="tip-meta mono">{String((e.recipe as Record<string, unknown>).estimator)} · {String((e.recipe as Record<string, unknown>).objective ?? '')} · {String((e.recipe as Record<string, unknown>).encoding ?? '')}</div>
-        )}
-        <p className="tip-body">{e.comparison?.decision_rationale ?? e.proposal.hypothesis ?? ''}</p>
-        <div className="tip-hint">click → journey card</div>
-      </>
-    );
-  };
 
   const table = (
     <>
@@ -195,12 +172,12 @@ export function ChampionAscent({ orchId, experiments, championTimeline, delegati
             const py = clamped ? HEIGHT - M.b - 10 : model.y(Math.min(e.metrics.gini_weighted, model.domain[1]));
             const px = model.x(e.seq);
             return (
-              <g key={e.experiment_id} className="point-hit" tabIndex={0} role="link"
+              <g key={e.experiment_id} className={`point-hit ${classNameFor(e.experiment_id)}`} tabIndex={0} role="link"
                 aria-label={`${e.name}, ${OUTCOME_LABEL[o]}, gini ${e.metrics.gini_weighted.toFixed(4)} — open journey card`}
-                onMouseMove={ev => show(ev, tipFor(e))} onMouseLeave={hide}
-                onFocus={() => show({ clientX: 80, clientY: 120 }, tipFor(e))} onBlur={hide}
-                onClick={() => { hide(); navigate(`/o/${orchId}/journey${journeyHash(e)}`); }}
-                onKeyDown={ev => { if (ev.key === 'Enter') { hide(); navigate(`/o/${orchId}/journey${journeyHash(e)}`); } }}>
+                onMouseEnter={ev => showExperiment(ev, e)} onMouseMove={moveExperiment} onMouseLeave={clearExperiment}
+                onFocus={() => showExperiment({ clientX: 80, clientY: 120 }, e)} onBlur={clearExperiment}
+                onClick={() => { clearExperiment(); navigate(`/o/${orchId}/journey${journeyHash(e)}`); }}
+                onKeyDown={ev => { if (ev.key === 'Enter') { clearExperiment(); navigate(`/o/${orchId}/journey${journeyHash(e)}`); } }}>
                 <circle cx={px} cy={py} r={12} fill="transparent" />
                 {clamped && belowDomain.indexOf(e) % labelStride === 0 && <text className="clamp-label" x={px} y={HEIGHT - M.b - 24 - (Math.floor(belowDomain.indexOf(e) / labelStride) % 2) * 13} textAnchor="middle">▼ {e.metrics.gini_weighted.toFixed(4)}</text>}
                 <text className={`point-glyph ${o === 'seed' ? 'seed' : ''}`} x={px} y={py + 5} textAnchor="middle"
@@ -215,7 +192,6 @@ export function ChampionAscent({ orchId, experiments, championTimeline, delegati
             </text>
           )}
         </svg>
-        {tooltip}
       </div>
     </ExhibitShell>
   );

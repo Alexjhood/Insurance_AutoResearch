@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createBrowserRouter, createHashRouter, RouterProvider } from 'react-router-dom';
 import { DataProviderRoot, EmbeddedProvider, HttpProvider, isEmbeddedExport } from './lib/data/DataProvider';
+import { ExperimentHoverProvider } from './lib/experimentHover';
 import { AppShell } from './routes/AppShell';
 import './design/global.css';
 
@@ -30,5 +31,5 @@ const router = (embedded ? createHashRouter : createBrowserRouter)(routes, { fut
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 30_000, retry: 1 } } });
 ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode><QueryClientProvider client={queryClient}><DataProviderRoot provider={embedded ? new EmbeddedProvider() : new HttpProvider()}><RouterProvider router={router} future={{ v7_startTransition: true }} /></DataProviderRoot></QueryClientProvider></React.StrictMode>,
+  <React.StrictMode><QueryClientProvider client={queryClient}><DataProviderRoot provider={embedded ? new EmbeddedProvider() : new HttpProvider()}><ExperimentHoverProvider><RouterProvider router={router} future={{ v7_startTransition: true }} /></ExperimentHoverProvider></DataProviderRoot></QueryClientProvider></React.StrictMode>,
 );

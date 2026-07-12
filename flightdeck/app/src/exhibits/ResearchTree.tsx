@@ -1,8 +1,9 @@
 import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { Delegation, Experiment } from '../lib/types';
+import { useExperimentHover } from '../lib/experimentHover';
 import {
-  ExhibitShell, LegendItem, useExhibitTooltip, useMeasure, useReducedMotion,
+  ExhibitShell, LegendItem, useMeasure, useReducedMotion,
   outcomeOf, OUTCOME_GLYPH, OUTCOME_LABEL, OUTCOME_VAR, delegationVar,
 } from './shared';
 import './exhibits.css';
@@ -31,7 +32,7 @@ function nodeLabel(e: Experiment): string {
  */
 export function ResearchTree({ orchId, experiments, delegations }: ResearchTreeProps) {
   const [wrapRef, width] = useMeasure<HTMLDivElement>();
-  const { tooltip, show, hide } = useExhibitTooltip();
+  const { showExperiment, moveExperiment, clearExperiment, classNameFor } = useExperimentHover();
   const navigate = useNavigate();
   const reduced = useReducedMotion();
   const w = Math.max(width, 640);
@@ -78,22 +79,6 @@ export function ResearchTree({ orchId, experiments, delegations }: ResearchTreeP
   const H = M.t + M.b + (model.maxDepth + 1) * 62;
   const px = (x: number) => M.l + (model.slots === 1 ? 0.5 : x / (model.slots - 1)) * (w - M.l - M.r);
   const py = (depth: number) => M.t + depth * 62;
-
-  const tipFor = (e: Experiment) => {
-    const o = outcomeOf(e);
-    return (
-      <>
-        <div className="tip-title">{e.name}</div>
-        <div className="tip-meta mono">
-          {e.delegation_id ?? 'playoff'} · <span style={{ color: `var(${OUTCOME_VAR[o]})` }}>{OUTCOME_GLYPH[o]} {OUTCOME_LABEL[o]}</span>
-          {e.metrics.gini_weighted != null && <> · gini {e.metrics.gini_weighted.toFixed(4)}</>}
-        </div>
-        {e.research_line_id && <div className="tip-meta mono">line: {e.research_line_id}</div>}
-        {e.proposal.hypothesis && <p className="tip-body">{e.proposal.hypothesis.length > 180 ? `${e.proposal.hypothesis.slice(0, 179)}…` : e.proposal.hypothesis}</p>}
-        <div className="tip-hint">click → journey card</div>
-      </>
-    );
-  };
 
   const table = (
     <>
@@ -143,11 +128,12 @@ export function ResearchTree({ orchId, experiments, delegations }: ResearchTreeP
           {model.nodes.map(n => {
             const o = outcomeOf(n.e);
             return (
-              <g key={n.e.experiment_id} className="tree-node" tabIndex={0} role="link"
+              <g key={n.e.experiment_id} className={`tree-node ${classNameFor(n.e.experiment_id)}`} tabIndex={0} role="link"
                 aria-label={`${n.e.name}, ${OUTCOME_LABEL[o]} — open journey card`}
-                onMouseMove={ev => show(ev, tipFor(n.e))} onMouseLeave={hide}
-                onClick={() => { hide(); navigate(`/o/${orchId}/journey${journeyHash(n.e)}`); }}
-                onKeyDown={ev => { if (ev.key === 'Enter') { hide(); navigate(`/o/${orchId}/journey${journeyHash(n.e)}`); } }}>
+                onMouseEnter={ev => showExperiment(ev, n.e)} onMouseMove={moveExperiment} onMouseLeave={clearExperiment}
+                onFocus={() => showExperiment({ clientX: 80, clientY: 120 }, n.e)} onBlur={clearExperiment}
+                onClick={() => { clearExperiment(); navigate(`/o/${orchId}/journey${journeyHash(n.e)}`); }}
+                onKeyDown={ev => { if (ev.key === 'Enter') { clearExperiment(); navigate(`/o/${orchId}/journey${journeyHash(n.e)}`); } }}>
                 <circle cx={px(n.x)} cy={py(n.depth)} r={13} className="tree-halo"
                   style={{ fill: `var(${delegationVar(n.e.delegation_id)})` }} />
                 <text x={px(n.x)} y={py(n.depth) + 5} textAnchor="middle" className="tree-glyph"
@@ -159,7 +145,6 @@ export function ResearchTree({ orchId, experiments, delegations }: ResearchTreeP
             );
           })}
         </svg>
-        {tooltip}
       </div>
     </ExhibitShell>
   );

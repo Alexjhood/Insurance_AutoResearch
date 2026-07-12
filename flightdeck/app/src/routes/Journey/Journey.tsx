@@ -8,11 +8,13 @@ import { PlayoffBracket } from '../../exhibits/PlayoffBracket';
 import { decisionKind } from '../../lib/format';
 import { useSnapshot } from '../../lib/data/queries';
 import type { Experiment } from '../../lib/types';
+import { useExperimentHover } from '../../lib/experimentHover';
 import './Journey.css';
 
 function ExperimentCard({ e, orchId, forfeited }: { e: Experiment; orchId: string; forfeited: boolean }) {
   const decision = e.comparison?.decision;
-  return <article className="experiment-card panel" id={`${e.delegation_id ?? 'playoff'}-x${e.cycle ?? e.seq}`}>
+  const { showExperiment, moveExperiment, clearExperiment, classNameFor } = useExperimentHover();
+  return <article className={`experiment-card panel ${classNameFor(e.experiment_id)}`} id={`${e.delegation_id ?? 'playoff'}-x${e.cycle ?? e.seq}`} onMouseEnter={event => showExperiment(event, e)} onMouseMove={moveExperiment} onMouseLeave={clearExperiment}>
     <header><div><span className="eyebrow">Cycle {e.cycle ?? 'seed'} · {e.model_family}</span><h3>{e.name}</h3></div><Badge kind={forfeited ? 'distress' : decisionKind(decision, e.status)}>{forfeited ? 'forfeited' : decision ?? (e.is_seed ? 'seed' : 'pending')}</Badge></header>
     <p className="hypothesis">{e.proposal.hypothesis ?? 'Seed or framework-generated experiment.'}</p>
     {e.proposal.change_summary && <p><b>Changed:</b> {e.proposal.change_summary}</p>}
