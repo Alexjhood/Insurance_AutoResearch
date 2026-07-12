@@ -374,17 +374,21 @@ autoresearch orchestrate kill     --orchestration-id <oid> --delegation d01
   "distress": {
     "flags": ["repair_exhausted", "all_rejected", "budget_overrun",
               "crashed", "no_finish_delegation", "champion_is_baseline",
-              "calibration_anomaly"],
+              "calibration_anomaly", "cycles_forfeited"],
     "active": ["all_rejected"],
-    "detail": "4/4 cycles rejected; 2 with reason_code=artifact_suspected"
+    "detail": "4/4 cycles rejected; 2 with reason_code=artifact_suspected",
+    "informational": ["auto_rejected"],
+    "informational_detail": "1 screening-gate decision recorded"
   },
   "cost": {"wall_clock_minutes": 38, "llm_usage": {...from telemetry/tool output...}}
 }
 ```
 
   Distress flags are mechanical predicates on registry/telemetry state (each
-  one cheap and unambiguous). The orchestrator's contract (section 6) tells it
-  how to respond: refine brief and `respawn`, or take over directly.
+  one cheap and unambiguous). `early_stop` and `auto_rejected` are separate
+  informational flags: the former is clean completion and the latter is
+  screening evidence. The orchestrator's contract (section 6) tells it how to
+  respond: refine brief and `respawn`, recover an orphan, or take over directly.
 - `orchestrate respawn --delegation d01 --brief <revised>`: convenience for
   the takeover-lite path — new delegation, optionally `--seed-champion
   from:d01` or `--continue-run` (reopen the same run with additional cycles
@@ -471,7 +475,8 @@ The contract gives the decision procedure, not a fixed model list:
   it one low-stakes delegation (routine brief, small K) early in the campaign
   and judge it by its report against the incumbent's scorecard numbers. This
   is how a new model earns `default` status — evidence from this repo's
-  actual workload, not release notes.
+  actual workload, not release notes. Calibrate a second backend rung with one
+  low-stakes delegation in every campaign.
 
 **Layer 3 — the empirical scorecard (evidence that keeps layers 1–2 honest).**
 Every delegation report already records backend, cycles, decisions, distress
@@ -495,6 +500,9 @@ same table when editing `backends.toml` metadata, closing the loop. When the
 scorecard contradicts the curated `notes` (a trial backend outperforming a
 default, a default's distress rate creeping up after a silent model revision),
 that's the signal to update Layer 1.
+
+Scorecard caveat (2026-07-12): distress before this date overcounts because
+seed replays were incorrectly included in forfeited-cycle accounting.
 
 Deliberately **not** in scope: automatic backend selection or auto-promotion
 of trial backends by the framework. Model choice is a taste decision with
@@ -544,13 +552,19 @@ Contents in brief:
    takeover.
 2. **Workflow.** `orchestrate new --dataset … --target-mode … --total-cycles N`
    → write brief → `spawn` (choose backend + K; `--wait` for
-   sequential-reflective, parallel spawns for breadth) → `status` / wait →
+   sequential-reflective under a generous command timeout, parallel spawns for
+   breadth; after a harness cutoff use `status --follow --until-terminal`, never
+   manual re-polls) →
    `collect` → **reflect in the orchestration log** (`orchestrate note` writes
    a timestamped entry into `ORCHESTRATION_LOG.md`; hypothesis/outcome facts
    are framework-written like the research log) → next brief(s) → … →
    `playoff` → `orchestrate report` (final campaign report for the user).
 3. **Delegation heuristics.** K=1 for risky/diagnostic probes; K=3–5 for
-   confident directions; parallel spawns only for genuinely independent
+   confident directions. Ensemble cycles cost about `constituents × 5` fits,
+   so use K=2–3 and an extended timeout. Put single-variant refinements in the
+   parent brief as conditional follow-ups; near a plateau, single-weight or
+   single-hyperparameter deltas are below the gate noise floor. Parallel spawns
+   only for genuinely independent
    directions (they can't see each other's learnings mid-flight — knowledge
    flows between delegations only through *your* briefs and, when enabled, the
    memory aggregator). Budget arithmetic: cycles are the scarce unit; the
@@ -567,12 +581,17 @@ Contents in brief:
    `champion_is_baseline` → the direction or the sub-agent failed — check
    which before burning more cycles; repeated distress from one backend →
    climb the escalation ladder (effort up, then tier up — section 4.7) before
-   escalating to takeover.
-5. **Takeover.** Declare it in the log, then drive the child run directly via
+   escalating to takeover. `early_stop` is informational, not distress;
+   `auto_rejected` is a screening decision and evidence. Recover a confirmed
+   orphan evaluator with `orchestrate recover --orchestration-id <oid>
+   --delegation <dNN>`.
+5. **Campaign log.** Close out any dropped planned stage with a follow-up note
+   explaining why it was removed.
+6. **Takeover.** Declare it in the log, then drive the child run directly via
    the normal run-scoped commands (guard permits it). Prefer takeover for
    *diagnosis*, respawn for *continuation* — a takeover that turns into you
    running many cycles means the delegation grain was wrong.
-6. **Hard constraints.** All AGENT.md safety rules apply to you too (holdout,
+7. **Hard constraints.** All AGENT.md safety rules apply to you too (holdout,
    protected files, fixed splits/metric). Additionally: never edit a child
    run's artifacts by hand; influence children only through briefs, seeds,
    respawns, and takeover-via-CLI, so the audit trail stays complete.

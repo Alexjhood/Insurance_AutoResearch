@@ -52,6 +52,9 @@ autoresearch orchestrate report  --orchestration-id <oid>
 launching anything. Use it whenever you are unsure what a spawn will do.
 `orchestrate new` runs `orchestrate doctor` first; use `--skip-doctor` only when
 an unavailable backend is intentionally irrelevant to the campaign.
+Run `spawn --wait` under a generous command timeout. If the harness cuts it off,
+continue with `status --follow --until-terminal`; never build a manual
+re-polling loop.
 
 ## 3. The brief
 
@@ -90,13 +93,18 @@ See `docs/RUN_ORCHESTRATED.md` for the token/extra prerequisites.
 ## 4. Delegation heuristics
 
 1. **K=1** for a risky or diagnostic probe. **K=3–5** for a direction you are
-   confident in. Anything you would take over anyway: do not delegate.
+   confident in. An ensemble cycle costs about `constituents × 5` fits (more on
+   close-call escalation), so use **K=2–3** and an extended timeout. Anything
+   you would take over anyway: do not delegate.
 2. Spawn in **parallel** only for genuinely independent directions. Spawn
    `--wait` when the next brief depends on this one's result.
 3. **Seed** a follow-up delegation from a prior champion rather than spending its
    first cycles re-beating the flat baseline.
 4. Two same-axis delegations in a row is a signal to change axis, exactly as it
    is inside a run.
+5. Put single-variant refinements in the parent brief as conditional follow-ups,
+   not fresh delegations. Near a plateau, single-weight or single-hyperparameter
+   deltas are below the gate noise floor; bundle them or skip them.
 
 ## 5. Backend choice
 
@@ -115,10 +123,14 @@ authenticated, or currently good.
    Cheapest-that-succeeds is the steady state, discovered per campaign.
 3. **Trial protocol.** When `list-backends` marks a backend `[TRIAL]`, give it one
    low-stakes delegation early (routine brief, small K) and judge it against the
-   incumbent's scorecard numbers, not against release notes.
+   incumbent's scorecard numbers, not against release notes. Calibrate a second
+   backend rung with one low-stakes delegation in every campaign.
 4. The scorecard beneath each entry is measured on this repo's workload. When it
    contradicts the curated `notes`, say so in a campaign note — that is the signal
    for Alex to edit `configs/orchestration/backends.toml`.
+
+Scorecard caveat (2026-07-12): backend-stats distress from earlier delegations
+overcounts because seed replays were incorrectly recorded as forfeited cycles.
 
 **When to reach for foundation models (`foundation_models: true`).** Per the
 2026-07-05 cross-run analysis, TabPFN wins on **sparse / severity-shaped**
@@ -133,7 +145,7 @@ problem — and pair it with a small `cycle_budget`, since credits are finite.
 framework-computed metrics; treat `agent_summary` as testimony**, not evidence.
 A sub-agent cannot flatter its own report.
 
-Distress flags and the response each one calls for:
+Active distress flags and the response each one calls for:
 
 | flag | what it means | do |
 |---|---|---|
@@ -145,6 +157,16 @@ Distress flags and the response each one calls for:
 | `no_finish_delegation` | exited without a summary | the report is still valid; the testimony is missing |
 | `calibration_anomaly` | champion predicted/actual off by >10% | suspect an artifact; probe with K=1 before promoting anything downstream |
 | `cycles_forfeited` | experiments attempted without a recorded decision, or proposals left nonterminal at exit | compute was spent that never became evidence — usually a killed `run-session-cycles`; run `orchestrate recover --orchestration-id <oid> --delegation <dNN>` when a cycle lock remains |
+
+Informational flags are not distress: `early_stop` means the brief ended cleanly
+before using its full budget; `auto_rejected` is a framework screening decision
+and therefore evidence, not a forfeited cycle.
+
+For a confirmed orphan evaluator, the one-command response is:
+
+```bash
+autoresearch orchestrate recover --orchestration-id <oid> --delegation <dNN>
+```
 
 Repeated distress from one backend is a backend problem, not a brief problem:
 climb the ladder in §5 before escalating to takeover.
@@ -166,7 +188,8 @@ autoresearch orchestrate note --orchestration-id <oid> \
 same way `RESEARCH_LOG.md` is generated from the registry. Never hand-edit it.
 Framework facts and your commentary are rendered in separate sections and stay
 that way. `--kind` is one of `plan`, `reflection`, `takeover`, `decision`,
-`other`.
+`other`. If a planned stage is dropped, add a follow-up note that closes it out
+and states why, so the recorded plan remains truthful.
 
 ## 8. Playoff and final report
 

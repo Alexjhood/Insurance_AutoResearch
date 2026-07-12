@@ -104,7 +104,9 @@ backend earning its keep; `deprecated` entries are refused at spawn.
 Rule of thumb (full procedure in ORCHESTRATOR.md §5): recipe tuning and
 structured sweeps go to the cheapest matching `default` backend; novel scripts and
 diagnostic probes go one tier up; distress means climb one rung — effort first,
-then tier.
+then tier. Calibrate a second backend rung with one low-stakes delegation per
+campaign. Scorecard distress before 2026-07-12 overcounts because seed replays
+were incorrectly recorded as forfeited cycles.
 
 ## Writing a brief
 
@@ -139,8 +141,10 @@ correctness.
 
 ## Sequential campaign (reflect between delegations)
 
-`--wait` blocks until the sub-agent exits, then builds its report. Use it when
-the next brief depends on this one's result — which is most of the time.
+`--wait` blocks until the sub-agent exits, then builds its report. Use it under a
+generous command timeout when the next brief depends on this one's result —
+which is most of the time. If the harness cuts it off, run `orchestrate status
+--follow --until-terminal`; never build a manual re-polling loop.
 
 ```bash
 autoresearch orchestrate spawn --brief briefs/d01_tweedie.json \
@@ -178,6 +182,12 @@ pass `--memory-access own|all` — the memory aggregator.
 Spawn in parallel only for genuinely independent directions. Two delegations
 exploring the same axis will rediscover the same dead end.
 
+An ensemble cycle costs about `constituents × 5` fits, and more on close-call
+escalation; budget K=2–3 with an extended timeout. Keep a single-variant
+refinement as a conditional follow-up in its parent brief. Near a plateau,
+single-weight or single-hyperparameter deltas are below the gate noise floor;
+bundle them or skip them.
+
 ## Distress handling
 
 Every report carries mechanical distress flags computed from the child's
@@ -192,6 +202,17 @@ registry. `orchestrate status` shows liveness; the report shows the flags.
 | `budget_overrun` | delegation timed out or overran its cycles; `kill` it if still live |
 | `no_finish_delegation` | the report stands; only the testimony is missing |
 | `calibration_anomaly` | suspect an artifact; probe with K=1 before building on it |
+| `cycles_forfeited` | attempted work never reached a decision; recover a remaining orphan cycle lock |
+
+`early_stop` and `auto_rejected` are informational, not distress. The former is
+a clean brief stop; the latter is a framework screening decision and counts as
+evidence.
+
+For a confirmed orphan evaluator:
+
+```bash
+autoresearch orchestrate recover --orchestration-id <oid> --delegation <dNN>
+```
 
 A delegation that overruns its wall-clock allowance is marked `timed_out` but is
 **never killed automatically**. Terminate it explicitly:
@@ -285,7 +306,8 @@ complete.
 `orchestrate note` appends a timestamped entry to `notes.json` and regenerates
 `ORCHESTRATION_LOG.md`. The Markdown is derived: framework facts (budget,
 delegations, status) render in their own sections, your commentary in its own.
-Never hand-edit it — edit through the command.
+Never hand-edit it — edit through the command. When a planned stage is dropped,
+add a follow-up note closing it out and stating why.
 
 ```bash
 autoresearch orchestrate report          # prints the Markdown
