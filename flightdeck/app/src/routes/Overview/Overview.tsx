@@ -4,6 +4,7 @@ import { MetricNumber } from '../../components/MetricNumber';
 import { PageState } from '../../components/PageState';
 import { StatTile } from '../../components/StatTile';
 import { ChampionAscent } from '../../exhibits/ChampionAscent';
+import { PlayoffBracket } from '../../exhibits/PlayoffBracket';
 import { ResearchTree } from '../../exhibits/ResearchTree';
 import { championDescriptor, compact, duration, orchestratorLabel, totalTokens } from '../../lib/format';
 import { useSnapshot } from '../../lib/data/queries';
@@ -59,15 +60,6 @@ export function Overview() {
     </div>
     <section className="distress-section"><header className="section-title"><div><span className="eyebrow">Distress board</span><h2>Raised flags</h2></div></header><div className="distress-grid">{s.delegations.flatMap(d => [...new Set(d.distress.active)].map(flag => <Link className="distress-card panel" key={`${d.delegation_id}-${flag}`} to={`/o/${orchId}/journey#chapter-${d.delegation_id}`}><Badge kind={flag === 'early_stop' ? 'promote' : flag === 'auto_rejected' ? 'reject' : 'distress'}>{flag}</Badge><b>{d.delegation_id}</b><p>{DISTRESS_COPY[flag] ?? d.distress.detail ?? 'Flag raised during delegation.'}</p>{d.taken_over && <Badge kind="takeover">takeover recovered</Badge>}</Link>))}</div></section>
     <ResearchTree orchId={s.campaign.orch_id} experiments={s.experiments} delegations={s.delegations} />
-    <section className="panel playoff-panel" id="playoff"><header className="section-title"><div><span className="eyebrow">Playoff · {s.playoff?.status ?? 'unavailable'}</span><h2>Final consolidation</h2></div><Badge kind="orchestrator">{s.playoff?.decision_mode ?? 'unavailable'}</Badge></header>
-      {s.playoff ? <>
-        <div className="playoff-table">{s.playoff.finalists.map(f => { const e=s.experiments.find(x=>x.experiment_id===f.experiment_id); return <Link key={f.delegation_id} to={`/o/${orchId}/delegations/${f.delegation_id}`}><b>{f.delegation_id}</b><span>{championDescriptor(s.experiments,e,f.model_family)}</span><MetricNumber value={f.gini_weighted} /></Link>; })}</div>
-        {s.playoff.pairings.map(p => <div className="playoff-pairing" key={p.order}><b>Pairing {p.order} · {p.delegation_id}</b><Badge kind={p.decision === 'promote' ? 'promote' : 'reject'}>{p.decision ?? 'incomplete'}</Badge><span><MetricNumber kind="lift" value={p.mean_lift} /> · {Object.entries(p.gates).map(([gate,pass])=><i key={gate} className={pass?'gate-pass':'gate-fail'}>{pass?'✓':'×'} {gate}</i>)}</span></div>)}
-        {s.playoff.exclusions.map(e => <p className="playoff-exclusion" key={`${e.delegation_id}-${e.reason}`}>Excluded {e.delegation_id ?? 'finalist'} · {e.reason}</p>)}
-        {s.playoff.final && <p className="lineage mono">{s.playoff.final.source_experiment_id} → {s.playoff.final.consolidation_experiment_id}</p>}
-        {!s.playoff.final && s.playoff.failure_reason && <p className="playoff-failure">{s.playoff.failure_reason}</p>}
-        {s.playoff.report_md && <Link to={`/o/${orchId}/files/${s.playoff.report_md}`}>Open playoff evidence →</Link>}
-      </> : <p>No playoff record.</p>}
-    </section>
+    <div id="playoff"><PlayoffBracket playoff={s.playoff} experiments={s.experiments} /></div>
   </main>;
 }

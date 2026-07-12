@@ -4,7 +4,8 @@ import { Badge } from '../../components/Badge';
 import { MetricNumber } from '../../components/MetricNumber';
 import { PageState } from '../../components/PageState';
 import { MissionTimeline } from '../../exhibits/MissionTimeline';
-import { championDescriptor, decisionKind } from '../../lib/format';
+import { PlayoffBracket } from '../../exhibits/PlayoffBracket';
+import { decisionKind } from '../../lib/format';
 import { useSnapshot } from '../../lib/data/queries';
 import type { Experiment } from '../../lib/types';
 import './Journey.css';
@@ -54,7 +55,7 @@ export function Journey() {
         const label = (d.brief.name ?? d.backend).replace(new RegExp(`^${d.delegation_id}[_ ·-]*`, 'i'), '');
         return <div key={d.delegation_id}><section className="chapter" id={`chapter-${d.delegation_id}`}><header className="chapter-header"><span className="chapter-number">0{di + 1}</span><div><span className="eyebrow">Delegation chapter · {d.delegation_id}</span><h2>{label}</h2><p>{d.brief.direction}</p></div><Link to={`/o/${orchId}/delegations/${d.delegation_id}`}>Forensic view →</Link></header><div className="brief-card panel"><b>Mission brief</b><div className="chips">{d.brief.constraints.map(c => <span key={c}>✓ {c}</span>)}</div></div>{experiments.filter(e => !e.is_seed && !e.is_baseline).map(e => <ExperimentCard key={e.experiment_id} e={e} orchId={orchId!} forfeited={!e.comparison?.decision && d.ended_at != null} />)}</section>{notes.map((n, i) => <aside className={n.kind === 'takeover' ? 'takeover-scene panel' : 'interlude panel'} key={`${n.at}-${i}`}><Badge kind={n.kind === 'takeover' ? 'takeover' : 'reflection'}>{n.kind} · {d.delegation_id}</Badge><p>{n.text}</p></aside>)}</div>;
       })}
-      <section className="finale panel" id="finale"><Badge kind="promote">Finale</Badge><h2>Playoff consolidation</h2><div className="finalist-grid">{s.playoff?.finalists.map(f => { const exp=s.experiments.find(e=>e.experiment_id===f.experiment_id); return <div key={f.delegation_id}><b>{f.delegation_id}</b><MetricNumber value={f.gini_weighted} /><span>{championDescriptor(s.experiments,exp,f.model_family)}</span></div>; })}</div>{s.notes.filter(n => !n.delegation_id && n !== plan).map((n, i) => <blockquote className="finale-note" key={`${n.at}-${i}`}><Badge kind="reflection">Orchestrator {n.kind}</Badge><p>{n.text}</p></blockquote>)}{s.playoff?.final && <p className="mono">Champion: {s.playoff.final.source_experiment_id}</p>}<Link to={`/o/${orchId}#playoff`}>Open playoff panel →</Link></section>
+      <section className="finale" id="finale"><PlayoffBracket playoff={s.playoff} experiments={s.experiments} compact />{s.notes.filter(n => !n.delegation_id && n !== plan).map((n, i) => <blockquote className="finale-note panel" key={`${n.at}-${i}`}><Badge kind="reflection">Orchestrator {n.kind}</Badge><p>{n.text}</p></blockquote>)}<Link to={`/o/${orchId}#playoff`}>Open Overview playoff →</Link></section>
     </div>
   </main>;
 }

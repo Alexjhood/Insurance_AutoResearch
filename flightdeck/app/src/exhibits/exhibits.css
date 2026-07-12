@@ -125,6 +125,50 @@
 .research-tree .tree-glyph { font-size: 14px; paint-order: stroke; stroke: var(--bg-inset); stroke-width: 3px; }
 .research-tree .tree-label { fill: var(--text-faint); font-size: 9.5px; }
 
+/* ================= Playoff Bracket ================= */
+.playoff-bracket { padding: var(--sp-5); }
+.playoff-lineage { display: flex; align-items: center; gap: var(--sp-2); min-height: 52px; padding: var(--sp-3); margin-bottom: var(--sp-4); overflow-x: auto; background: var(--bg-inset); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
+.lineage-label { color: var(--text-faint); font-size: var(--fs-xs); text-transform: uppercase; white-space: nowrap; }
+.lineage-step { display: flex; align-items: center; gap: var(--sp-2); white-space: nowrap; font-family: var(--font-mono); }
+.lineage-step svg { width: 15px; transform: rotate(90deg); color: var(--c-promote); }
+.lineage-step span { max-width: 170px; overflow: hidden; text-overflow: ellipsis; color: var(--text-secondary); font-size: var(--fs-xs); }
+.lineage-pending { color: var(--c-takeover); font-size: var(--fs-xs); white-space: nowrap; }
+.gauntlet { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--sp-3); align-items: end; }
+.pairing-card { position: relative; min-width: 0; height: 248px; padding: 0; color: inherit; border: 0; background: transparent; text-align: left; perspective: 900px; cursor: pointer; }
+.pairing-card:nth-child(2n) { transform: translateY(-8px); }
+.pairing-card:nth-child(3n) { transform: translateY(-16px); }
+.pairing-inner { position: absolute; inset: 22px 0 0; transform-style: preserve-3d; transition: transform var(--dur-med) var(--ease-out); }
+.pairing-card.flipped .pairing-inner { transform: rotateY(180deg); }
+.pairing-card:focus-visible { outline: none; }
+.pairing-card:focus-visible .pairing-face { box-shadow: var(--focus-ring); }
+.pairing-face { position: absolute; inset: 0; display: flex; flex-direction: column; gap: var(--sp-3); padding: var(--sp-3); overflow: hidden; backface-visibility: hidden; background: var(--bg-raised-2); border: 1px solid var(--border-strong); border-radius: var(--radius-md); box-shadow: var(--shadow-raised); }
+.pairing-back { transform: rotateY(180deg); }
+.pairing-rung { position: absolute; top: 0; left: var(--sp-3); z-index: 2; color: var(--text-faint); font: var(--fs-xs) var(--font-mono); }
+.pairing-rung::after { content: ''; display: inline-block; width: 34px; margin-left: var(--sp-2); border-top: 1px solid var(--c-promote); vertical-align: middle; }
+.pairing-top { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+.pairing-top > i { width: 8px; height: 8px; border-radius: 50%; box-shadow: var(--glow-status); }
+.pairing-top .badge { margin-left: auto; }
+.pairing-face > strong { min-height: 40px; font-size: var(--fs-sm); line-height: var(--lh-tight); overflow-wrap: anywhere; }
+.pairing-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--sp-2); }
+.pairing-metrics > span { display: grid; gap: var(--sp-1); color: var(--text-faint); font-size: 10px; }
+.pairing-face small { color: var(--text-secondary); line-height: 1.35; }
+.flip-hint { display: flex; align-items: center; gap: 5px; margin-top: auto; color: var(--accent); font-size: var(--fs-xs); }
+.flip-hint svg { width: 13px; height: 13px; }
+.gate-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.gate-grid > span { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--text-secondary); font-size: 10px; line-height: 1.2; }
+.gate-grid i { flex: none; width: 17px; height: 17px; border-radius: 50%; text-align: center; font-style: normal; line-height: 16px; }
+.gate-grid .pass i, .guardrail-chip.pass { color: var(--c-promote); background: var(--c-promote-dim); }
+.gate-grid .fail i, .guardrail-chip.fail { color: var(--c-distress); background: var(--c-distress-dim); }
+.guardrail-chip { align-self: flex-start; padding: var(--sp-1) var(--sp-2); border-radius: var(--radius-sm); font: var(--fs-xs) var(--font-mono); }
+.playoff-bench { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-3); margin-top: var(--sp-4); padding-top: var(--sp-3); border-top: 1px solid var(--border-subtle); }
+.playoff-bench > div { display: flex; align-items: center; gap: var(--sp-2); color: var(--text-secondary); font-size: var(--fs-xs); }
+.playoff-incomplete { padding: var(--sp-3); background: var(--c-distress-dim); border-left: 3px solid var(--c-distress); }
+.playoff-incomplete p { margin-bottom: 0; color: var(--text-secondary); }
+.playoff-bracket.compact .gauntlet { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.playoff-bracket.compact .pairing-card:nth-child(n) { transform: none; }
+@media (max-width: 760px) { .gauntlet, .playoff-bracket.compact .gauntlet { grid-template-columns: 1fr; }.pairing-card:nth-child(n) { transform: none; }.playoff-lineage { align-items: flex-start; }.lineage-step span { max-width: 110px; } }
+@media (prefers-reduced-motion: reduce) { .pairing-inner { transition: none; } }
+
 .burn-checkpoint .checkpoint-rule { stroke: var(--border-strong); stroke-dasharray: 2 4; opacity: 0.7; }
 .burn-checkpoint:hover .checkpoint-rule { stroke: var(--text-secondary); opacity: 1; }
 .checkpoint-label { font-size: 9.5px; }
