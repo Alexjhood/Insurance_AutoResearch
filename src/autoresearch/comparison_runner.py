@@ -600,10 +600,14 @@ def record_decision(
     reason_code: str | None = None,
     interpretation: str,
     next_step: str,
+    decided_by: str = "llm",
 ) -> dict[str, Any]:
     """Record the LLM's global promote, local promote, or reject verdict.
 
     ``decision`` must be ``"promote"``, ``"local_promote"``, or ``"reject"``.
+    ``decided_by`` defaults to ``"llm"``; mechanical callers (e.g. the playoff's
+    auto mode) must pass their own identity so the audit trail does not credit
+    an LLM with a rule-based verdict.
 
     On ``promote``: re-evaluates guardrails and blocks if any hard fail is detected.
     On pass: updates the champion, fires holdout, persists the decision.
@@ -842,7 +846,7 @@ def record_decision(
         decision=decision,
         rationale=rationale,
         reason_code=reason_code,
-        decided_by="llm",
+        decided_by=decided_by,
         decided_at=decided_at,
         guardrail_status=guardrail_result or None,
     )
@@ -855,7 +859,7 @@ def record_decision(
         "decision": decision,
         "rationale": rationale,
         "reason_code": reason_code,
-        "decided_by": "llm",
+        "decided_by": decided_by,
         "decided_at": decided_at,
         "promoted": decision == "promote",
         "local_promoted": decision == "local_promote",
@@ -885,7 +889,7 @@ def record_decision(
             "decision": decision,
             "rationale": rationale,
             "reason_code": reason_code,
-            "decided_by": "llm",
+            "decided_by": decided_by,
             "decided_at": decided_at,
             "proposal_id": proposal_id,
             "research_line_id": line_id,
@@ -900,7 +904,7 @@ def record_decision(
         "decision": decision,
         "rationale": rationale,
         "reason_code": reason_code,
-        "decided_by": "llm",
+        "decided_by": decided_by,
         "decided_at": decided_at,
         "proposal_id": proposal_id,
         "research_line_id": line_id,

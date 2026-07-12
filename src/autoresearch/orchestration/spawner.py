@@ -17,6 +17,7 @@ depends on "latest".
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, replace
@@ -30,6 +31,8 @@ from autoresearch.orchestration.manifest import (
     Delegation,
     Orchestration,
     add_delegation,
+    baseline_registry_path,
+    delegation_run_dir,
     exit_status_path,
     load_orchestration,
     log_path,
@@ -118,6 +121,10 @@ def compose_prompt(*, track: str, run_id: str, cycle_budget: int) -> str:
         "contains an **Orchestration brief** — treat its direction, constraints, and "
         "stop conditions as binding, on par with the Active dataset block. Spend your "
         f"{cycle_budget} cycles adaptively within the brief.\n\n"
+        "`run-session-cycles` runs a full experiment and can take many minutes. If "
+        "your harness enforces a per-command timeout, raise it for that command or "
+        "use `run-session-cycles 1 --background` and poll `session-status` until the "
+        "state is `awaiting_decision` — never let the harness kill a running cycle.\n\n"
         "When your budget is exhausted (or a brief stop-condition fires), finish with "
         f"`autoresearch --track {track} --run-id {run_id} orchestrate finish-delegation "
         '--summary "<3–6 sentence scientific summary: what you learned, what you\'d try '
@@ -215,11 +222,20 @@ def _bootstrap_child_run(
 
     from autoresearch.bootstrap import bootstrap_track
 
-    config = load_config(
-        track_id=backend.track,
-        new_run=True,
-        dataset=orch.dataset,
-    )
+    run_id = _new_child_run_id(backend.track)
+    canonical_dir = delegation_run_dir(orch.orchestration_id, delegation_id)
+    legacy_dir = PROJECT_ROOT / "artifacts" / "tracks" / backend.track / "runs" / run_id
+    config = load_config(track_id=backend.track, run_id=run_id, dataset=orch.dataset)
+    managed_layout = config.artifacts_dir == legacy_dir
+    if managed_layout:
+        canonical_dir.parent.mkdir(parents=True, exist_ok=True)
+        if canonical_dir.exists() or legacy_dir.exists() or legacy_dir.is_symlink():
+            raise FileExistsError(
+                f"Refusing to overwrite orchestration child path: {canonical_dir} / {legacy_dir}"
+            )
+        canonical_dir.mkdir()
+        legacy_dir.parent.mkdir(parents=True, exist_ok=True)
+        legacy_dir.symlink_to(canonical_dir, target_is_directory=True)
     from dataclasses import replace as _replace
 
     config = _replace(
@@ -230,11 +246,25 @@ def _bootstrap_child_run(
         target_mode=orch.target_mode,
     )
 
-    bootstrap_track(
-        config,
-        default_max_cycles=brief.cycle_budget,
-        enable_foundation_models=brief.foundation_models,
-    )
+    baseline_registry = _campaign_baseline_registry(orch)
+    try:
+        bootstrap_track(
+            config,
+            run_baselines=baseline_registry is None,
+            baseline_registry_source=baseline_registry,
+            default_max_cycles=brief.cycle_budget,
+            enable_foundation_models=brief.foundation_models,
+        )
+        if baseline_registry is None and managed_layout:
+            template = baseline_registry_path(orch.orchestration_id)
+            template.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(config.registry_path, template)
+    except Exception:
+        # Do not leave a path that looks like a valid run after failed bootstrap.
+        if managed_layout:
+            legacy_dir.unlink(missing_ok=True)
+            shutil.rmtree(canonical_dir, ignore_errors=True)
+        raise
 
     write_run_backpointer(
         config.artifacts_dir,
@@ -255,6 +285,33 @@ def _bootstrap_child_run(
             label=f"delegation_seed_{delegation_id}",
         )
     return config
+
+
+def _new_child_run_id(track: str) -> str:
+    """Allocate a timestamp-shaped compatibility id without moving latest_run."""
+
+    from datetime import datetime, timedelta, timezone
+
+    runs_dir = PROJECT_ROOT / "artifacts" / "tracks" / track / "runs"
+    candidate = datetime.now(timezone.utc).replace(microsecond=0)
+    while (runs_dir / candidate.strftime("%Y%m%dT%H%M%SZ")).exists():
+        candidate += timedelta(seconds=1)
+    return candidate.strftime("%Y%m%dT%H%M%SZ")
+
+
+def _campaign_baseline_registry(orch: Orchestration) -> Path | None:
+    """Return the campaign's frozen baseline-only registry, if initialized."""
+
+    delegations = getattr(orch, "delegations", ())
+    if not delegations:
+        return None
+    source = baseline_registry_path(orch.orchestration_id)
+    if not source.is_file():
+        raise FileNotFoundError(
+            "The campaign's frozen baseline registry is missing: "
+            f"{source}"
+        )
+    return source
 
 
 def _export_handoff_with_brief(config: Any, delegation_id: str) -> None:
@@ -298,6 +355,13 @@ def spawn(
 
     orch = load_orchestration(orchestration_id)
     brief = load_brief(brief_path)
+    if respawn_of is not None:
+        source = orch.delegation(respawn_of)
+        if not source.is_terminal:
+            raise ValueError(
+                f"Cannot mark spawn as retry of {respawn_of}: source status is "
+                f"{source.status!r}, not terminal."
+            )
     if seed_champion_override is not None:
         if brief.seed_champion is not None:
             raise ValueError(
@@ -307,13 +371,14 @@ def spawn(
     backend = get_backend(backend_name)
     _check_budget(orch, brief)
 
+    resolved_backend: dict[str, str | None] = {}
     if not dry_run:
         from autoresearch.orchestration.backends import (
             preflight_backend,
             preflight_foundation_models,
         )
 
-        preflight_backend(backend)
+        resolved_backend = preflight_backend(backend) or {}
         if brief.foundation_models:
             preflight_foundation_models()
 
@@ -355,6 +420,7 @@ def spawn(
             track=backend.track,
             run_id=run_id,
             cycle_budget=brief.cycle_budget,
+            run_path=str(child_config.artifacts_dir.resolve().relative_to(PROJECT_ROOT)),
             status="spawned",
             spawned_at=utc_stamp(),
             prompt_path=str(prompt_file.relative_to(PROJECT_ROOT)),
@@ -362,6 +428,8 @@ def spawn(
             command=plan.command,
             timeout_minutes=plan.timeout_minutes,
             respawn_of=respawn_of,
+            resolved_executable=resolved_backend.get("executable"),
+            resolved_version=resolved_backend.get("version"),
         )
         orch = add_delegation(orch, delegation)
         save_orchestration(orch)
@@ -484,7 +552,17 @@ def _finalise_after_wait(
     orch = load_orchestration(orchestration_id)
     delegation = orch.delegation(delegation_id)
     report_file = collect_report(orch, delegation)
-    refunded = should_refund_budget(read_json(report_file))
+    report_payload = read_json(report_file)
+    refunded = should_refund_budget(report_payload)
+    # A finished delegation returns its committed-but-unused cycles to the pool
+    # explicitly, instead of silently down-scoping whatever spawns next. A full
+    # refund supersedes this; a takeover keeps the budget with the orchestrator.
+    forfeited = 0
+    if not refunded and not delegation.taken_over and delegation.status == "completed":
+        # Only for clean completions: a failed/timed-out delegation still paid
+        # its full commitment (the attempt), matching the refund policy above.
+        completed_cycles = int((report_payload.get("cycles") or {}).get("completed") or 0)
+        forfeited = max(0, delegation.cycle_budget - completed_cycles)
 
     with manifest_lock(orchestration_id):
         orch = load_orchestration(orchestration_id)
@@ -495,6 +573,7 @@ def _finalise_after_wait(
                 delegation,
                 report_path=str(report_file.relative_to(PROJECT_ROOT)),
                 budget_refunded=refunded,
+                cycles_forfeited=forfeited,
             ),
         )
         save_orchestration(orch)
@@ -532,6 +611,61 @@ def finish_delegation(run_dir: Path, *, summary: str) -> dict[str, Any]:
             "run manifest). `finish-delegation` is only for spawned sub-agent runs."
         )
     orchestration_id, delegation_id = pointer
+
+    # A headless agent can issue tool calls concurrently. Refuse to let it end
+    # the delegation while a framework command is still evaluating or while a
+    # proposal still needs a decision/repair. Otherwise the CLI process exit can
+    # terminate that work and leave screening-only artifacts behind.
+    from autoresearch.config import load_config
+    from autoresearch.controller.session import inflight_cycle_status, latest_session
+    from autoresearch.controller.workflow import INFLIGHT_PROPOSAL_STATUSES
+    from autoresearch.experiment_registry.registry import list_proposals
+
+    child_config = load_config(
+        track_id=str(read_json(run_dir / "run_manifest.json").get("track_id") or "codex"),
+        run_id=run_dir.name,
+    )
+    session = latest_session(child_config)
+    active_states = {"running", "ingesting", "evaluating", "comparing"}
+    decision_states = {"awaiting_decision", "awaiting_reflection", "waiting_for_repair"}
+    if session is not None and session.get("state") in active_states | decision_states:
+        session_state = str(session.get("state"))
+        inflight = inflight_cycle_status(child_config, session.get("session_id"))
+        if session_state in active_states and (inflight is None or not inflight["alive"]):
+            # Wedged, not busy: the process that owned this state died (e.g. a
+            # harness command timeout killed `run-session-cycles`). Blocking
+            # unconditionally would deadlock the delegation — point at recovery.
+            raise ValueError(
+                f"Cannot finish delegation: the session is stuck in {session_state!r} "
+                "but no process is working on it — the command that owned this cycle "
+                "was killed. Run `run-session-cycles 1` to recover the orphaned "
+                "cycle, complete any resulting decision, then finish."
+            )
+        if session_state in active_states:
+            raise ValueError(
+                "Cannot finish delegation while a process "
+                f"(pid {inflight['pid']}) is still evaluating the current cycle. "
+                "Wait for it to finish and complete the resulting decision first."
+            )
+        raise ValueError(
+            "Cannot finish delegation while the supervised session is "
+            f"{session_state!r}. Complete the required decision, reflection, "
+            "or repair first."
+        )
+    nonterminal_proposals = [
+        f"{item.get('proposal_id')} ({item.get('status')})"
+        for item in list_proposals(child_config.registry_path)
+        if item.get("status")
+        in {"proposed", "validated", "queued", "needs_repair", "awaiting_decision"}
+        | set(INFLIGHT_PROPOSAL_STATUSES)
+    ]
+    if nonterminal_proposals:
+        raise ValueError(
+            "Cannot finish delegation with nonterminal proposals: "
+            + ", ".join(nonterminal_proposals[:5])
+            + ". Run `run-session-cycles 1` — it recovers proposals orphaned by a "
+            "killed cycle — and complete the outcome first."
+        )
 
     with manifest_lock(orchestration_id):
         orch = load_orchestration(orchestration_id)
@@ -631,7 +765,7 @@ def respawn(
         preflight_foundation_models,
     )
 
-    preflight_backend(backend)
+    resolved_backend = preflight_backend(backend) or {}
     if brief.foundation_models:
         preflight_foundation_models()
 
@@ -672,6 +806,7 @@ def respawn(
             track=source.track,
             run_id=source.run_id,
             cycle_budget=brief.cycle_budget,
+            run_path=source.run_path,
             status="spawned",
             spawned_at=utc_stamp(),
             prompt_path=str(prompt_file.relative_to(PROJECT_ROOT)),
@@ -681,6 +816,8 @@ def respawn(
             respawn_of=delegation_id,
             continue_run=True,
             cycles_at_start=_cycles_used(child_config.registry_path),
+            resolved_executable=resolved_backend.get("executable"),
+            resolved_version=resolved_backend.get("version"),
         )
         orch = add_delegation(orch, delegation)
         save_orchestration(orch)

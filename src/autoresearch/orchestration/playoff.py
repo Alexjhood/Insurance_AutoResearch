@@ -637,6 +637,7 @@ def _record_playoff_decision(
     decision: str,
     rationale: str,
     reason_code: str,
+    decided_by: str = "llm",
 ) -> dict[str, Any]:
     from autoresearch.comparison_runner import record_decision
 
@@ -648,6 +649,7 @@ def _record_playoff_decision(
         reason_code=reason_code,
         interpretation=f"Mechanical playoff decision: {rationale}",
         next_step="Continue the ascending finalist gauntlet.",
+        decided_by=decided_by,
     )
 
 
@@ -668,6 +670,7 @@ def _auto_decide_pairing(config: ProjectConfig, pairing: dict[str, Any]) -> None
         decision=decision,
         rationale=rationale,
         reason_code="clear_win" if passed else "inferior",
+        decided_by="auto_playoff",
     )
 
 

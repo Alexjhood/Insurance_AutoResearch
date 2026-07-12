@@ -1,0 +1,22 @@
+{
+  "direction": "Validate the seeded 127-leaf LightGBM Tweedie AllState champion through a structurally different direct pure-premium loss specification. Start with LightGBM squared-error using the allowed native categorical representation, then use observed comparison results to decide whether one targeted robust alternative is justified. Do not spend cycles on another shallow-capacity sweep.",
+  "cycle_budget": 4,
+  "starting_knowledge": [
+    "In d02, native-categorical LightGBM Tweedie at 63 leaves achieved gini 0.0381 versus the flat baseline.",
+    "A 31-leaf, 0.03-learning-rate variant was decisively worse (gini 0.0111); capacity matters.",
+    "Expanding to 127 leaves improved the d02 champion to gini 0.0488 with calibration ratio about 0.968."
+  ],
+  "constraints": [
+    "Use declarative recipes only; do not write custom scripts.",
+    "Stay within direct pure-premium framing and use only named eligible features.",
+    "The first proposal must be a genuine loss/objective comparison against the seeded Tweedie champion, not a capacity retune.",
+    "If the alternative is clearly inferior, use remaining cycles for one materially different validation only; do not tune the losing objective repeatedly.",
+    "Do not enable foundation models."
+  ],
+  "success_criteria": "Either beat the seeded 127-leaf Tweedie champion with clean calibration, or establish an evidence-backed reason to retain Tweedie before final consolidation.",
+  "seed_champion": {
+    "from_run": "codex/20260711T231249Z",
+    "experiment_id": "20260711T232015Z_lgbm_tweedie_deeper_capacity"
+  },
+  "foundation_models": false
+}

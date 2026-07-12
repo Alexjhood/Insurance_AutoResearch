@@ -1,0 +1,20 @@
+{
+  "direction": "Run one stability-focused follow-up to the seeded direct XGBoost Tweedie champion. Make the recipe shallower and more regularized, with a lower learning rate and early stopping, to test whether the apparent Gini gain can be retained while improving decile monotonicity and robustness.",
+  "cycle_budget": 1,
+  "starting_knowledge": [
+    "d03 direct ordinal XGBoost reached gini_weighted 0.376078, rank_gini 0.371076, pricing loss 638.261, and calibration 1.01208.",
+    "The d03 gain over LightGBM was promising but CV/bootstrap evidence was inconclusive and decile monotonicity weakened."
+  ],
+  "constraints": [
+    "Run exactly one experiment and finish the delegation.",
+    "Use a champion-referenced XGBoost recipe override rather than changing model family or target framing.",
+    "Move clearly toward shallower trees and stronger regularization; avoid a near-duplicate parameter tweak.",
+    "Keep runtime within budget despite the lower learning rate."
+  ],
+  "success_criteria": "Retain or improve weighted and rank Gini while strengthening stability/decile behavior and preserving calibration; otherwise establish that the original XGBoost capacity is preferable.",
+  "seed_champion": {
+    "from_run": "codex/20260711T113455Z",
+    "experiment_id": "20260711T113631Z_xgb_tweedie_ordinal_conservative"
+  },
+  "foundation_models": false
+}

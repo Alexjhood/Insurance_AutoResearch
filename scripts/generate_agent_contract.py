@@ -64,7 +64,7 @@ WORKFLOW_COMMANDS: list[tuple[str, str]] = [
     ("show-latest-handoff", "Read current champion/state before proposing."),
     ("list-experiments", "List this run's registered experiments."),
     ("list-champion-history", "Show how the champion evolved this run."),
-    ("run-session-cycles", "Run N cycles; STOPS at awaiting_decision (no auto-promote)."),
+    ("run-session-cycles", "Run N cycles; STOPS at awaiting_decision (no auto-promote). Slow: add `--background` + poll `session-status` under a command timeout."),
     ("record-decision", "Your verdict: promote | local_promote | reject."),
     ("record-cycle-reflection", "Complete the final reflection after an auto-rejected cycle."),
     ("park-research-line", "Park an exhausted research line."),
@@ -152,8 +152,7 @@ You are the research agent for an autonomous tabular target-modelling loop on a
 weight policy, and any fixed preprocessing (e.g. a claim cap) are printed in the
 handoff's **"Active dataset"** block; read it first — those facts are binding.
 Maximise **weight-weighted Gini** (`{gate_metric}`) on the search-validation
-split; every promotion is re-checked on a protected holdout. Each run starts with
-the `global_mean` baseline as champion — beat a flat weighted rate first.
+split. Each run starts with the `global_mean` baseline.
 
 Escalation only — most runs never need it: **{MANUAL_REL}** has the full manual
 (dataset schema, metric panel, gate modes, research-line mechanics, worked examples).
@@ -183,9 +182,10 @@ existing artifacts to infer intent.
 
 1. **Bootstrap (fresh run only).** First shell command — binds the run scope:
    ```bash
-   autoresearch --track <t> --new-run bootstrap-track \\
+   autoresearch --track <t> --new-run --dataset <dataset> bootstrap-track \\
      --model-provider <provider> --model-name <model-name> --cycles <N>
    ```
+   `--dataset` is mandatory. If the handoff mismatches, restart before proposing.
    `--cycles <N>` pins the requested experiment budget — the framework stops
    the run at N cycles so you never have to count.
    Capture the returned timestamped `run_id`; pass `--run-id <id>` thereafter.
@@ -354,7 +354,8 @@ Comparisons run under `gate_mode = {gate_mode}` and stop at `pending_llm`; the
 mechanical gates are **advisory**, the verdict is yours. Before deciding, review
 `{gate_metric}`, `rank_gini_weighted`, `asym_pricing_loss` (lower is better;
 penalises under-pricing 4×), and the calibration ratio. Then:
-- **promote** — clean win; replaces the global champion + fires holdout eval.
+- **promote** — clean win; replaces the search champion. Holdout approval is a
+  trusted post-run operator checkpoint.
 - **local_promote** — useful progress for its research line, not a champion.
 - **reject** — insufficient/contradictory evidence; keep it as a learning.
 

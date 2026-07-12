@@ -79,10 +79,14 @@ def build_campaign_report(
     testimony: dict[str, str | None] = {}
     missing_reports: list[str] = []
 
-    cycles_used = 0
+    cycles_attempted = 0
+    cycles_completed = 0
+    cycles_decided = 0
     experiments_total = 0
     by_decision: dict[str, int] = {}
     promoted_lifts: list[float] = []
+    baseline_promotion_lifts: list[float] = []
+    incremental_promotion_lifts: list[float] = []
     distress_by_flag: dict[str, int] = {flag: 0 for flag in DISTRESS_FLAGS}
     delegations_in_distress = 0
     repair_requests = 0
@@ -113,8 +117,13 @@ def build_campaign_report(
             testimony[delegation.delegation_id] = delegation.agent_summary
             continue
 
-        used = int((report.get("cycles") or {}).get("used") or 0)
-        cycles_used += used
+        cycle_facts = report.get("cycles") or {}
+        completed = int(cycle_facts.get("completed", cycle_facts.get("used", 0)) or 0)
+        attempted = int(cycle_facts.get("attempted", completed) or 0)
+        decided = int(cycle_facts.get("decided", completed) or 0)
+        cycles_attempted += attempted
+        cycles_completed += completed
+        cycles_decided += decided
         rows = report.get("experiments") or []
         experiments_total += len(rows)
         for row in rows:
@@ -123,7 +132,14 @@ def build_campaign_report(
                 continue
             by_decision[decision] = by_decision.get(decision, 0) + 1
             if decision == _PROMOTE and row.get("lift_vs_champion") is not None:
-                promoted_lifts.append(float(row["lift_vs_champion"]))
+                lift = float(row["lift_vs_champion"])
+                promoted_lifts.append(lift)
+                # vs_baseline is absent from reports generated before the split
+                # existed; leave those out of both buckets rather than mislabel.
+                if row.get("vs_baseline") is True:
+                    baseline_promotion_lifts.append(lift)
+                elif row.get("vs_baseline") is False:
+                    incremental_promotion_lifts.append(lift)
 
         active = list((report.get("distress") or {}).get("active") or ())
         if active:
@@ -156,7 +172,10 @@ def build_campaign_report(
                 "run_id": delegation.run_id,
                 "status": delegation.status,
                 "cycle_budget": delegation.cycle_budget,
-                "cycles_used": used,
+                "cycles_attempted": attempted,
+                "cycles_completed": completed,
+                "cycles_decided": decided,
+                "cycles_used": completed,
                 "respawn_of": delegation.respawn_of,
                 "champion": {
                     "experiment_id": champion.get("experiment_id"),
@@ -180,8 +199,12 @@ def build_campaign_report(
         "cycles": {
             "total_budget": orch.total_cycle_budget,
             "committed": orch.cycles_committed,
-            "used": cycles_used,
+            "attempted": cycles_attempted,
+            "completed": cycles_completed,
+            "decided": cycles_decided,
+            "used": cycles_completed,
             "remaining": orch.cycles_remaining,
+            "forfeited": sum(d.cycles_forfeited for d in orch.delegations),
         },
         "delegations": delegations,
         "missing_reports": missing_reports,
@@ -192,11 +215,26 @@ def build_campaign_report(
         "promotions": {
             "promote": promotions,
             "local_promote": by_decision.get(_LOCAL_PROMOTE, 0),
+            # Retained for older consumers; do not read it for analysis — it
+            # averages baseline-relative and incremental lifts, which differ by
+            # an order of magnitude. Use the two split stats below.
             "mean_promoted_gini_lift": (
                 round(sum(promoted_lifts) / len(promoted_lifts), 6)
                 if promoted_lifts
                 else None
             ),
+            "mean_baseline_promotion_gini_lift": (
+                round(sum(baseline_promotion_lifts) / len(baseline_promotion_lifts), 6)
+                if baseline_promotion_lifts
+                else None
+            ),
+            "mean_incremental_promotion_gini_lift": (
+                round(sum(incremental_promotion_lifts) / len(incremental_promotion_lifts), 6)
+                if incremental_promotion_lifts
+                else None
+            ),
+            "baseline_promotions": len(baseline_promotion_lifts),
+            "incremental_promotions": len(incremental_promotion_lifts),
         },
         "distress": {
             "by_flag": {flag: distress_by_flag[flag] for flag in DISTRESS_FLAGS},
@@ -204,7 +242,9 @@ def build_campaign_report(
         },
         "repairs": {
             "requests": repair_requests,
-            "per_cycle": (round(repair_requests / cycles_used, 4) if cycles_used else None),
+            "per_cycle": (
+                round(repair_requests / cycles_completed, 4) if cycles_completed else None
+            ),
         },
         "playoff": playoff,
         "final_champion": _final_champion(orch, playoff),
@@ -221,7 +261,9 @@ def build_campaign_report(
             "cost_usd_reported_by": cost_reported_by,
             "cost_usd_missing_for": cost_missing_for,
             "cost_per_cycle_usd": (
-                round(cost_usd / cycles_used, 6) if cost_reported_by and cycles_used else None
+                round(cost_usd / cycles_completed, 6)
+                if cost_reported_by and cycles_completed
+                else None
             ),
             "cost_per_promotion_usd": (
                 round(cost_usd / promotions, 6) if cost_reported_by and promotions else None
@@ -290,7 +332,59 @@ def _final_champion(
         "consolidation_run_id": orch.consolidation.run_id,
         "consolidation_experiment_id": lineage.get("consolidation_experiment_id"),
         "source": lineage.get("source"),
+        "holdout": _holdout_status(
+            orch.consolidation.track,
+            orch.consolidation.run_id,
+            lineage.get("consolidation_experiment_id"),
+        ),
     }
+
+
+def _holdout_status(
+    track: str | None, run_id: str | None, champion_id: str | None
+) -> dict[str, Any]:
+    """The protected-holdout evaluation status for the final champion.
+
+    A campaign is not validated until this ran; a skipped evaluation (no
+    milestone token in an agent context) must be visible in the report rather
+    than buried in the consolidation run's milestone_reports directory.
+    """
+
+    pending = {
+        "status": "pending",
+        "detail": "No milestone report found for the final champion — the protected "
+        "holdout evaluation has not run. Operator action required.",
+    }
+    if not (track and run_id and champion_id):
+        return pending
+    reports_dir = PROJECT_ROOT / "artifacts" / "tracks" / track / "runs" / run_id / "milestone_reports"
+    if not reports_dir.is_dir():
+        return pending
+    latest: dict[str, Any] | None = None
+    latest_mtime = -1.0
+    for path in reports_dir.glob("*.json"):
+        try:
+            report = read_json(path)
+        except (OSError, ValueError):
+            continue
+        if report.get("champion_id") != champion_id:
+            continue
+        mtime = path.stat().st_mtime
+        if mtime > latest_mtime:
+            latest, latest_mtime = report, mtime
+    if latest is None:
+        return pending
+    status = str(latest.get("status") or "unknown")
+    detail = latest.get("reason") or latest.get("summary")
+    result: dict[str, Any] = {"status": status}
+    if status == "skipped":
+        result["detail"] = (
+            "Holdout evaluation was SKIPPED (no milestone token in the agent "
+            "context). The champion is unvalidated until an operator runs it."
+        )
+    elif detail:
+        result["detail"] = str(detail)
+    return result
 
 
 def _elapsed_minutes(start: str, end: str) -> float | None:
@@ -402,8 +496,16 @@ def render_campaign_markdown(payload: dict[str, Any]) -> str:
             "",
             "### Cycle budget",
             "",
-            f"- Budget {cycles['total_budget']} · committed {cycles['committed']} · "
-            f"used {cycles['used']} · remaining {cycles['remaining']}",
+            f"- Budget {cycles['total_budget']} · reserved {cycles['committed']} · "
+            f"attempted {cycles.get('attempted', cycles['used'])} · "
+            f"completed {cycles.get('completed', cycles['used'])} · "
+            f"decided {cycles.get('decided', cycles['used'])} · "
+            f"unreserved {cycles['remaining']}"
+            + (
+                f" · forfeited-and-reclaimed {cycles['forfeited']}"
+                if cycles.get("forfeited")
+                else ""
+            ),
             "",
             "### Delegations",
             "",
@@ -413,7 +515,7 @@ def render_campaign_markdown(payload: dict[str, Any]) -> str:
     if not framework["delegations"]:
         lines.extend(["No delegations were spawned.", ""])
     else:
-        lines.append("| id | backend | run | cycles | champion | gini | distress |")
+        lines.append("| id | backend | run | cycles (A/C/D/B) | champion | gini | distress |")
         lines.append("|---|---|---|---|---|---|---|")
         for item in framework["delegations"]:
             if item.get("report") == "missing":
@@ -425,7 +527,10 @@ def render_campaign_markdown(payload: dict[str, Any]) -> str:
             champion = item["champion"]
             lines.append(
                 f"| {item['delegation_id']} | {item['backend']} | `{item['run_id']}` "
-                f"| {item['cycles_used']}/{item['cycle_budget']} "
+                f"| {item.get('cycles_attempted', item['cycles_used'])}/"
+                f"{item.get('cycles_completed', item['cycles_used'])}/"
+                f"{item.get('cycles_decided', item['cycles_used'])}/"
+                f"{item['cycle_budget']} "
                 f"| {champion.get('model_family') or '—'} "
                 f"| {_fmt(champion.get('gini_weighted'))} "
                 f"| {', '.join(item['distress']) or '—'} |"
@@ -452,8 +557,12 @@ def render_campaign_markdown(payload: dict[str, Any]) -> str:
             f"- Decisions: {_fmt_counts(experiments['by_decision'])}",
             f"- Promotions: {promotions['promote']} "
             f"(local: {promotions['local_promote']})",
-            f"- Mean Gini lift of promoted experiments: "
-            f"{_fmt(promotions['mean_promoted_gini_lift'])}",
+            f"- Baseline-relative promotion lift (vs the flat start, "
+            f"n={promotions['baseline_promotions']}): "
+            f"{_fmt(promotions['mean_baseline_promotion_gini_lift'])}",
+            f"- Incremental promotion lift (champion vs champion, "
+            f"n={promotions['incremental_promotions']}): "
+            f"{_fmt(promotions['mean_incremental_promotion_gini_lift'])}",
             "",
             "### Distress",
             "",
@@ -506,6 +615,11 @@ def render_campaign_markdown(payload: dict[str, Any]) -> str:
             f"`{source.get('run_id') or '—'}`, experiment "
             f"`{source.get('experiment_id') or '—'}`"
         )
+        holdout = champion.get("holdout") or {}
+        holdout_line = f"- Protected holdout: **{holdout.get('status', 'unknown')}**"
+        if holdout.get("detail"):
+            holdout_line += f" — {holdout['detail']}"
+        lines.append(holdout_line)
         lines.append("")
 
     wall_clock = framework["wall_clock"]

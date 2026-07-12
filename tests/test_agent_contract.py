@@ -26,10 +26,11 @@ from autoresearch.cli import COMMANDS  # noqa: E402
 AGENT_MD = REPO_ROOT / "AGENT.md"
 
 # Generous ceiling: guards against regression toward the old 48 KB manual while
-# leaving room for accurate, code-derived content. The contract is ~16.8 KB
+# leaving room for accurate, code-derived content. The contract is ~17.2 KB
 # today (objective, safety, workflow, orchestrated mode, repair, model interface
-# + calibration, adaptive search, decision policy, proposal contract).
-SIZE_CEILING_BYTES = 17_500
+# + calibration, adaptive search, decision policy, proposal contract, and the
+# run-session-cycles --background guidance for harness command timeouts).
+SIZE_CEILING_BYTES = 17_600
 
 
 def test_agent_md_is_in_sync_with_sources():

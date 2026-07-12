@@ -1,0 +1,19 @@
+{
+  "direction": "Run one direct XGBoost Tweedie experiment with ordinal encoding as an estimator-family alternative to the seeded LightGBM champion. Use conservative depth, shrinkage, regularization, and early stopping suitable for repeated fitting on 678K rows; prioritize robust ranking over an exhaustive parameter search.",
+  "cycle_budget": 1,
+  "starting_knowledge": [
+    "d01 direct native-categorical LightGBM Tweedie is the reference at gini_weighted 0.369137 and calibration 1.01248.",
+    "d02 frequency-severity LightGBM was rejected at about 0.3445 Gini; retain direct target framing and rotate estimator family."
+  ],
+  "constraints": [
+    "Run exactly one experiment and finish the delegation.",
+    "Use a declarative direct XGBoost Tweedie recipe with ordinal encoding.",
+    "Keep depth and estimator count within the repeated-fit compute budget; use early stopping."
+  ],
+  "success_criteria": "Improve weighted or rank Gini over the seeded LightGBM champion without calibration or asymmetric pricing-loss deterioration, or provide a clean family-level negative result.",
+  "seed_champion": {
+    "from_run": "codex/20260711T112638Z",
+    "experiment_id": "20260711T112812Z_lgbm_tweedie_native_benchmark"
+  },
+  "foundation_models": false
+}

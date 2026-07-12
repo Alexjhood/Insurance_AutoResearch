@@ -1,0 +1,13 @@
+{
+  "direction": "Establish a robust direct pure-premium baseline on AllState using recipe-based gradient boosting, prioritizing LightGBM Tweedie with native categorical handling. Compare only a small, adaptive set of sensible capacity and regularisation choices; use each cycle's result to decide the next one.",
+  "cycle_budget": 4,
+  "constraints": [
+    "Use declarative recipes only; do not write custom model scripts.",
+    "Stay within direct pure-premium target framing and GBM approach_family.",
+    "Prefer LightGBM Tweedie with native categorical encoding; use the handoff's target and feature constraints exactly.",
+    "After two consecutive rejected tuning changes, make a structural comparison within the permitted recipe families or stop early with a clear negative learning.",
+    "Do not enable foundation models."
+  ],
+  "success_criteria": "Produce a clean promoted direct-model champion above the global-mean baseline, or determine whether the direct Tweedie recipe line is unpromising and why.",
+  "foundation_models": false
+}

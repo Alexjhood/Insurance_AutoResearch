@@ -295,8 +295,10 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
             compute_budget_sec=compute_budget_sec,
         )
         experiment_id = read_json(outputs["config_snapshot"])["experiment_id"]
-        update_proposal_status(config.registry_path, proposal_id, "completed", experiment_id=experiment_id)
-        _upsert_proposal_node(config, proposal, status="completed", experiment_id=experiment_id)
+        # "fitted" (not "completed"): the proposal is nonterminal until screening
+        # and comparison finish, so a killed process leaves a recoverable status.
+        update_proposal_status(config.registry_path, proposal_id, "fitted", experiment_id=experiment_id)
+        _upsert_proposal_node(config, proposal, status="fitted", experiment_id=experiment_id)
         upsert_branch(
             config.registry_path,
             branch_id=proposal["branch_id"],
@@ -307,6 +309,129 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
             description=proposal.get("change_summary"),
         )
 
+    except ExperimentNeedsRepair as exc:
+        update_proposal_status(config.registry_path, proposal_id, "needs_repair", notes=str(exc))
+        _upsert_proposal_node(config, proposal, status="needs_repair", outcome_type="needs_repair", guidance=str(exc))
+        raise
+    except Exception as exc:
+        reason = str(exc)
+        if "Experiment output validation failed" not in reason:
+            update_proposal_status(config.registry_path, proposal_id, "failed", notes=reason)
+            _upsert_proposal_node(config, proposal, status="failed", outcome_type="system_error", guidance=reason)
+            raise
+        update_proposal_status(config.registry_path, proposal_id, "rejected", notes=f"Auto-rejected failed run: {reason}")
+        _upsert_proposal_node(
+            config,
+            proposal,
+            status="rejected",
+            outcome_type="failed_run",
+            guidance=(
+                "Reflect on the failure mode before proposing a related child idea. "
+                "Avoid repeating the same execution, schema, or modelling failure."
+            ),
+        )
+        _write_nonpromotion_summary(
+            config,
+            proposal_id=proposal_id,
+            outcome_type="failed",
+            reason=f"Auto-rejected failed run: {reason}",
+            quantitative_signal=None,
+        )
+        return {
+            "proposal_id": proposal_id,
+            "experiment_id": None,
+            "comparison_id": None,
+            "decision": "auto_reject",
+            "auto_rejected": True,
+            "auto_reject_reason": reason,
+            "metrics_summary": {},
+        }
+    return _screen_and_compare(config, proposal, champion, experiment_id, iteration_dir)
+
+
+# Statuses a proposal can hold only while a cycle process is actively working on
+# it. Finding one with no live process means the cycle was killed mid-flight.
+INFLIGHT_PROPOSAL_STATUSES = frozenset({"running", "fitted", "screened", "comparing"})
+
+
+def find_orphaned_proposals(config: ProjectConfig) -> list[dict[str, Any]]:
+    """Proposals left in an in-flight status by a killed cycle process."""
+
+    return [
+        proposal
+        for proposal in list_proposals(config.registry_path)
+        if proposal.get("status") in INFLIGHT_PROPOSAL_STATUSES
+    ]
+
+
+def requeue_orphaned_proposal(config: ProjectConfig, proposal: dict[str, Any]) -> None:
+    """Requeue a proposal whose fit was killed before producing an experiment."""
+
+    update_proposal_status(
+        config.registry_path,
+        proposal["proposal_id"],
+        "validated",
+        notes="Recovered: the cycle running this proposal was killed mid-fit; requeued.",
+    )
+    _upsert_proposal_node(
+        config,
+        proposal,
+        status="validated",
+        guidance="Requeued after a killed cycle; it will run again on the next cycle.",
+    )
+
+
+def resume_orphaned_proposal(config: ProjectConfig, proposal: dict[str, Any]) -> dict[str, Any] | None:
+    """Resume a proposal whose cycle was killed after the fit completed.
+
+    The fit (and possibly screening) artifacts are already on disk, so the lost
+    comparison is re-run from ``_screen_and_compare`` rather than discarded.
+    Returns the normal cycle-result dict, or ``None`` when the proposal had to
+    be closed out instead (stale parent, or no registered experiment to resume —
+    the latter is requeued).
+    """
+
+    proposal = _hydrate_proposal_from_path(proposal)
+    proposal_id = proposal["proposal_id"]
+    experiment_id = proposal.get("experiment_id")
+    if not experiment_id:
+        requeue_orphaned_proposal(config, proposal)
+        return None
+    champion = _require_champion(config)
+    if proposal.get("parent_experiment_id") != champion["champion_id"]:
+        reason = (
+            f"Orphaned proposal parent {proposal.get('parent_experiment_id')!r} is stale; "
+            f"current champion is {champion['champion_id']!r}."
+        )
+        update_proposal_status(config.registry_path, proposal_id, "stale_parent", notes=reason)
+        _upsert_proposal_node(
+            config,
+            proposal,
+            status="stale_parent",
+            outcome_type="stale_parent",
+            guidance="Redesign the idea from the current champion before re-proposing it.",
+        )
+        return None
+    iteration_dir = proposal_iteration_dir(config, proposal)
+    return _screen_and_compare(config, proposal, champion, experiment_id, iteration_dir)
+
+
+def _screen_and_compare(
+    config: ProjectConfig,
+    proposal: dict[str, Any],
+    champion: dict[str, Any],
+    experiment_id: str,
+    iteration_dir: Path,
+) -> dict[str, Any]:
+    """Screen a fitted challenger and gate it against the official champion.
+
+    Split out from ``run_next_queued_proposal`` so a cycle killed after the fit
+    (proposal status ``fitted``/``screened``/``comparing``) can resume here via
+    ``resume_orphaned_proposal`` instead of silently losing the comparison.
+    """
+
+    proposal_id = proposal["proposal_id"]
+    try:
         screening: dict[str, Any] | None = None
         local_champion_id = _local_research_line_champion(config, proposal, champion["champion_id"])
         if getattr(config, "screening_enabled", True):
@@ -379,7 +504,21 @@ def run_next_queued_proposal(config: ProjectConfig) -> dict[str, Any]:
                     "screening": screening,
                     "metrics_summary": _screening_metrics_summary(screening),
                 }
+            update_proposal_status(
+                config.registry_path,
+                proposal_id,
+                "screened",
+                experiment_id=experiment_id,
+                notes="Passed single-split screen; full comparison pending.",
+            )
 
+        update_proposal_status(
+            config.registry_path,
+            proposal_id,
+            "comparing",
+            experiment_id=experiment_id,
+            notes="Running the champion comparison.",
+        )
         comparison_outputs = compare_experiments(
             config,
             champion["champion_id"],

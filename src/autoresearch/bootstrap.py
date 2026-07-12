@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 from typing import Any
 
 from autoresearch.config import ProjectConfig, ensure_project_dirs
@@ -25,6 +26,7 @@ def bootstrap_track(
     prepare_shared_data: bool = True,
     force_prepare_data: bool = False,
     run_baselines: bool = True,
+    baseline_registry_source: Path | None = None,
     default_max_cycles: int | None = None,
     enable_foundation_models: bool = False,
 ) -> dict[str, Any]:
@@ -99,12 +101,32 @@ def bootstrap_track(
         raise ValueError("Pytest gate failed during bootstrap:\n" + str(test_gate["output"]))
 
     registry_existed = config.registry_path.exists()
+    if baseline_registry_source is not None:
+        if registry_existed:
+            raise ValueError(
+                "baseline_registry_source can only initialise a new registry"
+            )
+        if not baseline_registry_source.is_file():
+            raise FileNotFoundError(
+                f"Baseline registry template not found: {baseline_registry_source}"
+            )
+        config.registry_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(baseline_registry_source, config.registry_path)
     registry_path = init_registry(config.registry_path)
     steps.append(
         {
             "step": "init-registry",
-            "status": "skipped" if registry_existed else "ran",
+            "status": (
+                "cloned_baseline"
+                if baseline_registry_source is not None
+                else "skipped" if registry_existed else "ran"
+            ),
             "registry": str(registry_path),
+            "baseline_registry_source": (
+                str(baseline_registry_source)
+                if baseline_registry_source is not None
+                else None
+            ),
         }
     )
 
@@ -170,6 +192,8 @@ def bootstrap_track(
         "track": config.track_id,
         "run_id": config.run_id,
         "run_dir": str(config.artifacts_dir),
+        "dataset": config.dataset_name,
+        "target_mode": config.target_mode,
         "default_max_cycles": default_max_cycles,
         "registry": str(config.registry_path),
         "context": str(context_outputs["latest_context_json"]),

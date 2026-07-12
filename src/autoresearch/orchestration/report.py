@@ -34,6 +34,7 @@ DISTRESS_FLAGS = (
     "no_finish_delegation",
     "champion_is_baseline",
     "calibration_anomaly",
+    "cycles_forfeited",
 )
 
 #: Model family of the flat-rate experiment every run starts from.
@@ -78,6 +79,8 @@ def assess_distress(
     champion_model_family: str | None,
     calibration_ratio: float | None,
     max_repair_attempts_seen: int,
+    cycles_attempted: int | None = None,
+    nonterminal_proposals: int = 0,
 ) -> DistressAssessment:
     """Evaluate every distress predicate against mechanical child-run state.
 
@@ -122,6 +125,20 @@ def assess_distress(
         active.append("calibration_anomaly")
         details.append(f"champion predicted/actual ratio is {calibration_ratio:.3f}")
 
+    decided = len([d for d in decisions if d])
+    forfeit_details: list[str] = []
+    if cycles_attempted is not None and cycles_attempted > decided:
+        forfeit_details.append(
+            f"{cycles_attempted} experiments attempted but only {decided} reached a decision"
+        )
+    if nonterminal_proposals > 0:
+        forfeit_details.append(
+            f"{nonterminal_proposals} proposal(s) left nonterminal at exit"
+        )
+    if forfeit_details:
+        active.append("cycles_forfeited")
+        details.append("; ".join(forfeit_details))
+
     unknown = set(active) - set(DISTRESS_FLAGS)
     if unknown:  # defensive: keeps the closed set honest as flags are added
         raise AssertionError(f"assess_distress produced unknown flags: {sorted(unknown)}")
@@ -146,6 +163,49 @@ def _cycles_used(registry_path: Path) -> int:
     if not sessions:
         return 0
     return sum(int(s.get("current_cycle") or 0) for s in sessions)
+
+
+def _cycle_accounting(config: ProjectConfig, delegation: Delegation) -> dict[str, int]:
+    """Separate reserved budget from attempted, completed, and decided work."""
+
+    from autoresearch.experiment_registry.registry import list_experiments
+
+    attempted = sum(
+        1
+        for experiment in list_experiments(config.registry_path)
+        if experiment.get("model_family") != BASELINE_MODEL_FAMILY
+    )
+    attempted = max(0, attempted - delegation.cycles_at_start)
+    completed = max(0, _cycles_used(config.registry_path) - delegation.cycles_at_start)
+    rows = _experiment_rows(config)
+    if delegation.continue_run:
+        rows = rows[delegation.cycles_at_start :]
+    decided = sum(1 for row in rows if row.get("decision"))
+    return {
+        "budget": delegation.cycle_budget,
+        "attempted": attempted,
+        "completed": completed,
+        "decided": decided,
+        # Backward-compatible alias. A used cycle reached a framework result;
+        # whether the LLM supplied a verdict is reported separately.
+        "used": completed,
+    }
+
+
+def _nonterminal_proposal_count(config: ProjectConfig) -> int:
+    """Proposals that never reached a terminal outcome in this run."""
+
+    from autoresearch.controller.workflow import INFLIGHT_PROPOSAL_STATUSES
+    from autoresearch.experiment_registry.registry import list_proposals
+
+    nonterminal = {"proposed", "validated", "queued", "needs_repair", "awaiting_decision"} | set(
+        INFLIGHT_PROPOSAL_STATUSES
+    )
+    return sum(
+        1
+        for proposal in list_proposals(config.registry_path)
+        if proposal.get("status") in nonterminal
+    )
 
 
 def _max_repair_attempts_seen(run_dir: Path) -> int:
@@ -237,6 +297,13 @@ def _experiment_rows(config: ProjectConfig) -> list[dict[str, Any]]:
                 experiment_name = (experiment or {}).get("experiment_name")
             except Exception:
                 experiment_name = None
+        vs_baseline = None
+        if paired.get("champion_id"):
+            try:
+                incumbent = get_experiment(config.registry_path, paired["champion_id"]) or {}
+                vs_baseline = incumbent.get("model_family") == BASELINE_MODEL_FAMILY
+            except Exception:
+                vs_baseline = None
         rows.append(
             {
                 "cycle": int(entry.get("cycle") or 0),
@@ -247,6 +314,10 @@ def _experiment_rows(config: ProjectConfig) -> list[dict[str, Any]]:
                 "lift_vs_champion": (
                     float(paired["mean_lift"]) if paired.get("mean_lift") is not None else None
                 ),
+                # Baseline-relative lifts (vs the flat global_mean start) are an
+                # order of magnitude larger than incremental champion-vs-champion
+                # lifts; downstream aggregation must not average the two together.
+                "vs_baseline": vs_baseline,
                 "interpretation": entry.get("interpretation"),
             }
         )
@@ -282,7 +353,8 @@ def build_report(orch: Orchestration, delegation: Delegation) -> dict[str, Any]:
     # config rather than rebuilding the path keeps this testable against a fixture.
     run_dir = config.artifacts_dir
 
-    cycles_used = max(0, _cycles_used(config.registry_path) - delegation.cycles_at_start)
+    cycle_accounting = _cycle_accounting(config, delegation)
+    cycles_used = cycle_accounting["completed"]
     experiments = _experiment_rows(config)
     if delegation.continue_run:
         # Positional slice: research-log entries' own cycle numbers restart per
@@ -301,6 +373,8 @@ def build_report(orch: Orchestration, delegation: Delegation) -> dict[str, Any]:
         champion_model_family=champion.get("model_family"),
         calibration_ratio=champion.get("calibration_ratio"),
         max_repair_attempts_seen=_max_repair_attempts_seen(run_dir),
+        cycles_attempted=cycle_accounting["attempted"],
+        nonterminal_proposals=_nonterminal_proposal_count(config),
     )
 
     return {
@@ -313,7 +387,7 @@ def build_report(orch: Orchestration, delegation: Delegation) -> dict[str, Any]:
         "continue_run": delegation.continue_run,
         "taken_over": delegation.taken_over,
         "status": delegation.status,
-        "cycles": {"budget": delegation.cycle_budget, "used": cycles_used},
+        "cycles": cycle_accounting,
         "champion": champion,
         "experiments": experiments,
         "repairs": {
@@ -365,6 +439,13 @@ def _cost(delegation: Delegation, config: ProjectConfig) -> dict[str, Any]:
     llm_usage = _llm_usage(config)
     if delegation.tool_usage:
         llm_usage["backend"] = delegation.tool_usage
+        if llm_usage.get("cost_usd") is None:
+            backend_cost = delegation.tool_usage.get("cost_usd")
+            if backend_cost is None:
+                backend_cost = delegation.tool_usage.get("provider_cost_usd")
+            if backend_cost is not None:
+                llm_usage["cost_usd"] = float(backend_cost)
+                llm_usage["cost_source"] = "backend_exit"
     return {
         "wall_clock_minutes": wall_clock,
         "llm_usage": llm_usage,

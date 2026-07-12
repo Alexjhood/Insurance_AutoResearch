@@ -42,6 +42,8 @@ def test_bootstrap_track_reuses_existing_baseline_and_exports_context(tmp_path: 
     result = bootstrap_track(config)
 
     assert result["track"] == "test"
+    assert result["dataset"] == config.dataset_name
+    assert result["target_mode"] == config.target_mode
     assert Path(result["context"]).exists()
     assert Path(result["handoff"]).exists()
     assert get_official_champion(config.registry_path)["champion_id"] == "direct"

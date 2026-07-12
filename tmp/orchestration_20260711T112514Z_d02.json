@@ -1,0 +1,19 @@
+{
+  "direction": "Test one structurally distinct frequency-severity LightGBM recipe for French Motor burning cost. Use a Poisson frequency stage and Gamma severity stage with native categorical handling, selecting moderate parameters and early stopping. Assess whether decomposition improves ranking or pricing loss over the seeded direct Tweedie champion.",
+  "cycle_budget": 1,
+  "starting_knowledge": [
+    "d01 direct LightGBM Tweedie achieved gini_weighted 0.369137, rank_gini_weighted 0.370656, asym_pricing_loss 639.373, and calibration ratio 1.01248.",
+    "d01 was a clean promotion with no distress; this cycle deliberately changes target framing."
+  ],
+  "constraints": [
+    "Run exactly one experiment and finish the delegation.",
+    "Use the declarative frequency_severity recipe structure; do not write a novel model script.",
+    "Keep both stages moderate enough for repeated comparison fitting."
+  ],
+  "success_criteria": "Beat the seeded champion on weighted Gini with acceptable calibration and no material pricing-loss regression, or establish that frequency-severity is inferior in this setup.",
+  "seed_champion": {
+    "from_run": "codex/20260711T112638Z",
+    "experiment_id": "20260711T112812Z_lgbm_tweedie_native_benchmark"
+  },
+  "foundation_models": false
+}

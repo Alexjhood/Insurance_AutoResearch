@@ -5,7 +5,7 @@ conversation plans directions and reads results; cheap headless *sub-agents* do
 the mechanics — filling proposal templates, running cycles, handling repairs,
 making routine promote/reject calls inside a narrow brief.
 
-Nothing about single-agent research changes. A sub-agent run is an ordinary
+Nothing about single-agent research changes. A sub-agent workspace is an ordinary
 tracked run: same `AGENT.md` contract, same proposal inbox, same
 `run-session-cycles`, same `record-decision`. Orchestration only pre-bootstraps
 the run, adds an **Orchestration brief** block to its handoff, and generates a
@@ -74,7 +74,7 @@ and every child run in that campaign's manifest — and denies every other
 orchestration, every foreign run, and `runs/` enumeration.
 
 Sub-agents are untouched by this: they bind as ordinary `research` sessions from
-the environment the spawner gives them, confined to their own run from the first
+the environment the spawner gives them, confined to their own workspace from the first
 tool call.
 
 ## Creating a campaign

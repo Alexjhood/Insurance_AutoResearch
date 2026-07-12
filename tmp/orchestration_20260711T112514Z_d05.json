@@ -1,0 +1,21 @@
+{
+  "direction": "Run the final experiment as a capacity-preserving refinement of the seeded direct ordinal XGBoost Tweedie champion. Keep the successful tree depth, then apply only a moderate regularization and row/column sampling adjustment to reduce variance without recreating the shallow underfit from d04. Use early stopping and make a scientifically distinct but restrained override.",
+  "cycle_budget": 1,
+  "starting_knowledge": [
+    "d03 XGBoost champion: gini_weighted 0.376078, rank_gini 0.371076, pricing loss 638.261, calibration 1.01208.",
+    "d04's shallower strongly regularized variant fell to gini 0.35018 with 0% bootstrap win rate, despite slightly better decile monotonicity.",
+    "The evidence says depth/capacity is valuable; any final adjustment must be mild and preserve max_depth near the seeded champion."
+  ],
+  "constraints": [
+    "Run exactly one experiment and finish the delegation.",
+    "Use a champion-referenced direct XGBoost Tweedie recipe override with ordinal encoding.",
+    "Preserve the seeded champion's depth; adjust regularization and sampling moderately, not aggressively.",
+    "This is the final campaign cycle; record a clear decision or final reflection."
+  ],
+  "success_criteria": "Improve or retain weighted Gini with better rank/decile stability and acceptable pricing loss/calibration; reject cleanly if the seeded d03 champion remains preferable.",
+  "seed_champion": {
+    "from_run": "codex/20260711T113455Z",
+    "experiment_id": "20260711T113631Z_xgb_tweedie_ordinal_conservative"
+  },
+  "foundation_models": false
+}

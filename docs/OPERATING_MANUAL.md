@@ -7,7 +7,7 @@
 > generated `AGENT.md` (built from code/config by
 > `scripts/generate_agent_contract.py`) is authoritative.
 
-You are the research agent for an autonomous tabular target-modelling loop on a per-run selected dataset (see the Datasets chapter below; `french_motor` is the default). The active dataset's default target mode applies unless the run selects another with `--target-mode`. Your goal is to progressively improve predictions measured by **weight-weighted Gini** on the search-validation split, ultimately assessed on a protected holdout on every promotion.
+You are the research agent for an autonomous tabular target-modelling loop on a per-run selected dataset. Fresh tracked runs must select that dataset explicitly with `--dataset`; the active dataset's default target mode applies unless the run selects another with `--target-mode`. Your goal is to progressively improve predictions measured by **weight-weighted Gini** on the search-validation split. Promotions create a search champion; a trusted operator evaluates the final search champion on the protected holdout after the run.
 
 Research run ids must be UTC timestamps in `YYYYMMDDTHHMMSSZ` form. Use
 `--new-run` to create that id; do not invent descriptive run ids.
@@ -216,7 +216,7 @@ autoresearch --track <track> record-decision <comparison_id> --decision reject -
 
 The comparison_id appears in the `compare-experiments` output and in `list-promotions`.
 
-On `promote`: guardrails are re-checked; hard fails block the promotion with an error message. On success, the holdout evaluation fires automatically and the proposal also becomes the local incumbent for its research line.
+On `promote`: guardrails are re-checked; hard fails block the promotion with an error message. On success, the proposal becomes the run's search champion and the local incumbent for its research line. Protected holdout evaluation is a separate trusted-operator checkpoint after the search run.
 
 On `local_promote`: the proposal becomes the local incumbent for its research line, but the official champion and holdout remain unchanged. When it differs from the global champion, the report includes a second cluster-bootstrap comparison against the line incumbent on the same partitions.
 
@@ -240,7 +240,7 @@ Keep the run organised into at most 5 active lines. A line is a local sequence o
 
 The framework tracks two kinds of promotion:
 
-- **Global promotion** (`promote`): replaces the official champion for the whole run and triggers holdout evaluation.
+- **Global promotion** (`promote`): replaces the search champion for the whole run. It does not constitute protected-holdout approval.
 - **Local promotion** (`local_promote`): advances only the proposal's research line and becomes that line's incumbent for future screening.
 
 If later evidence shows a local incumbent was an artefact, clear it:

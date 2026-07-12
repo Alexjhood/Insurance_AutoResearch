@@ -14,8 +14,10 @@ layer. `docs/RUN_ORCHESTRATED.md` is the user-facing quick start;
 1. Plan the campaign from the user's parameters: dataset, target mode, total
    cycle budget, and any modelling guidance.
 2. Delegate execution in **briefs**. A brief plus a cycle budget K is one
-   delegation; the sub-agent runs the ordinary AGENT.md workflow inside its own
-   pre-bootstrapped run and decides its own promotions there.
+   delegation; the sub-agent runs the ordinary AGENT.md workflow inside an
+   isolated workspace under the campaign's `runs/` directory and decides its
+   own promotions there. Compatibility links keep ordinary tracked-run commands
+   unchanged.
 3. Read reports, reflect in the campaign log, and choose the next brief.
 4. Consolidate finalists through `orchestrate playoff`, then publish
    `orchestrate report`.
@@ -24,6 +26,10 @@ Cycles are the scarce unit. The framework refuses a spawn that exceeds the
 remaining total, so spend adaptively — do not pre-plan a slate of delegations.
 A delegation that crashes on the environment before any cycle or LLM call is
 **refunded** at `collect`; one that did any work is not.
+
+The first delegation evaluates the campaign's global-mean baseline. Later
+delegations clone that initialized baseline registry and reference its immutable
+artifacts, so they begin from the same flat champion without fitting it again.
 
 ## 2. Workflow
 
@@ -136,6 +142,7 @@ Distress flags and the response each one calls for:
 | `budget_overrun` | timed out, or used more cycles than budgeted | check `status`; `kill` if still live |
 | `no_finish_delegation` | exited without a summary | the report is still valid; the testimony is missing |
 | `calibration_anomaly` | champion predicted/actual off by >10% | suspect an artifact; probe with K=1 before promoting anything downstream |
+| `cycles_forfeited` | experiments attempted without a recorded decision, or proposals left nonterminal at exit | compute was spent that never became evidence — usually a killed `run-session-cycles` (harness command timeout); check the child log, and respawn with the timeout guidance if the pattern repeats |
 
 Repeated distress from one backend is a backend problem, not a brief problem:
 climb the ladder in §5 before escalating to takeover.

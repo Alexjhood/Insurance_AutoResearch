@@ -88,7 +88,13 @@ def _report(
         "track": delegation.track,
         "backend": delegation.backend,
         "status": delegation.status,
-        "cycles": {"budget": delegation.cycle_budget, "used": cycles_used},
+        "cycles": {
+            "budget": delegation.cycle_budget,
+            "attempted": cycles_used,
+            "completed": cycles_used,
+            "decided": len(decisions),
+            "used": cycles_used,
+        },
         "champion": {
             "experiment_id": f"exp_{delegation.delegation_id}",
             "model_family": model_family,
@@ -265,8 +271,12 @@ def test_campaign_report_aggregates_framework_facts_and_keeps_testimony_apart(
     assert framework["cycles"] == {
         "total_budget": 10,
         "committed": 4,
+        "attempted": 3,
+        "completed": 3,
+        "decided": 3,
         "used": 3,
         "remaining": 6,
+        "forfeited": 0,
     }
     assert framework["experiments"]["total"] == 3
     assert framework["experiments"]["by_decision"] == {"promote": 1, "reject": 2}

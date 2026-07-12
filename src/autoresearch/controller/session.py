@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,13 @@ from autoresearch.controller.handoff import (
     inbox_status,
     ingest_proposals,
 )
-from autoresearch.controller.workflow import ExperimentNeedsRepair, run_next_queued_proposal
+from autoresearch.controller.workflow import (
+    ExperimentNeedsRepair,
+    find_orphaned_proposals,
+    requeue_orphaned_proposal,
+    resume_orphaned_proposal,
+    run_next_queued_proposal,
+)
 from autoresearch.experiment_registry.registry import (
     complete_research_log_entry,
     find_research_log_entry_by_comparison,
@@ -186,57 +193,72 @@ def run_session_cycle(config: ProjectConfig, session_id: str | None = None) -> d
         export_context_bundle(config)
         return state
 
+    orphan: dict[str, Any] | None = None
+    inflight = inflight_cycle_status(config, state["session_id"])
+    if inflight is not None:
+        if inflight["alive"]:
+            return _record_waiting(
+                config,
+                state,
+                f"Another process (pid {inflight['pid']}) is still evaluating this session's "
+                "current cycle. Wait for it to finish instead of starting a second one.",
+            )
+        _clear_inflight_marker(config, state["session_id"])
+        orphans = find_orphaned_proposals(config)
+        orphan = orphans[0] if orphans else None
+        _persist_state(
+            config,
+            state,
+            event_type="orphan_detected",
+            proposal_id=(orphan or {}).get("proposal_id"),
+            message=(
+                f"The process evaluating the previous cycle (pid {inflight['pid']}) died "
+                "without finishing — likely killed by a command timeout. "
+                + (
+                    f"Recovering proposal {orphan['proposal_id']} "
+                    f"(status {orphan.get('status')!r})."
+                    if orphan is not None
+                    else "No orphaned proposal found; continuing normally."
+                )
+            ),
+        )
+        if orphan is not None and orphan.get("status") == "running":
+            # Killed mid-fit: nothing to resume, so requeue and let the normal
+            # flow below re-run it this cycle.
+            requeue_orphaned_proposal(config, orphan)
+            _persist_state(
+                config,
+                state,
+                event_type="orphan_requeued",
+                proposal_id=orphan.get("proposal_id"),
+                message=(
+                    f"Proposal {orphan['proposal_id']} was killed mid-fit; requeued to run "
+                    "again this cycle."
+                ),
+            )
+            orphan = None
+
     state["state"] = "running"
     state.pop("latest_error", None)
     _persist_state(config, state, event_type="running", message="Cycle started.")
 
-    inbox = inbox_status(config)
-    queued_before = _queued_count(config)
-    if inbox["inbox_json_count"] == 0 and queued_before == 0:
-        pending = latest_incomplete_research_log_entry(config.registry_path)
-        state["state"] = "awaiting_reflection" if pending is not None else "waiting_for_proposal"
-        message = (
-            f"Cycle {pending['cycle']} needs interpretation and next direction. "
-            "Include `previous_cycle_reflection` in the next proposal or run "
-            "`record-cycle-reflection`."
-            if pending is not None
-            else "Waiting for an external proposal file."
-        )
-        _persist_state(config, state, event_type=state["state"], message=message)
-        export_context_bundle(config)
-        return state
-
-    state["state"] = "ingesting"
-    _persist_state(config, state, event_type="ingesting", message="Ingesting inbox proposals.")
-    ingest_summary = ingest_proposals(config)
-
-    if _queued_count(config) == 0:
-        state["state"] = "waiting_for_proposal"
-        state["latest_ingest_summary"] = ingest_summary
-        _persist_state(config, state, event_type="waiting_for_proposal", message="No validated proposal is queued.")
-        export_context_bundle(config)
-        return state
-
-    if not _complete_pending_reflection_from_queued_proposal(config):
-        pending = latest_incomplete_research_log_entry(config.registry_path)
-        state["state"] = "awaiting_reflection"
-        _persist_state(
-            config,
-            state,
-            event_type="awaiting_reflection",
-            message=(
-                f"Cycle {pending['cycle']} needs interpretation and next direction. "
-                "Add `previous_cycle_reflection` to the next proposal or run "
-                "`record-cycle-reflection`."
-            ),
-        )
-        export_context_bundle(config)
-        return state
+    ingest_summary: dict[str, Any] | None = None
+    if orphan is None:
+        return_state = _prepare_queued_proposal(config, state)
+        if isinstance(return_state, dict) and return_state.get("_early_return"):
+            return_state.pop("_early_return", None)
+            return return_state
+        ingest_summary = return_state
 
     state["state"] = "evaluating"
     _persist_state(config, state, event_type="evaluating", message="Running next queued proposal.")
+    _write_inflight_marker(config, state)
     try:
-        result = run_next_queued_proposal(config)
+        result = (
+            resume_orphaned_proposal(config, orphan)
+            if orphan is not None
+            else run_next_queued_proposal(config)
+        )
     except ExperimentNeedsRepair as exc:
         state["state"] = "waiting_for_repair"
         state["latest_error"] = str(exc)
@@ -248,10 +270,30 @@ def run_session_cycle(config: ProjectConfig, session_id: str | None = None) -> d
         state["latest_error"] = str(exc)
         _persist_state(config, state, event_type="failed", message=str(exc))
         raise
+    finally:
+        _clear_inflight_marker(config, state["session_id"])
+
+    if orphan is not None and result is None:
+        # The orphan could not be resumed in place (stale parent, or requeued
+        # because the fit never registered an experiment). Nothing to decide.
+        state["state"] = "waiting_for_proposal"
+        _persist_state(
+            config,
+            state,
+            event_type="orphan_closed",
+            proposal_id=orphan.get("proposal_id"),
+            message=(
+                f"Orphaned proposal {orphan['proposal_id']} was closed out or requeued "
+                "instead of resumed; run the next cycle to continue."
+            ),
+        )
+        export_context_bundle(config)
+        return state
 
     state["current_cycle"] += 1
     state["latest_cycle_result"] = result
-    state["latest_ingest_summary"] = ingest_summary
+    if ingest_summary is not None:
+        state["latest_ingest_summary"] = ingest_summary
     _record_cycle_log_entry(config, state, result)
 
     if state["current_cycle"] % 5 == 0:
@@ -303,6 +345,64 @@ def run_session_cycle(config: ProjectConfig, session_id: str | None = None) -> d
 
     export_context_bundle(config)
     return state
+
+
+def _prepare_queued_proposal(
+    config: ProjectConfig, state: dict[str, Any]
+) -> dict[str, Any]:
+    """Ingest the inbox and confirm a proposal is ready to evaluate.
+
+    Returns the ingest summary, or the session state marked ``_early_return``
+    when the cycle should stop here (nothing queued, or reflection pending).
+    """
+
+    inbox = inbox_status(config)
+    queued_before = _queued_count(config)
+    if inbox["inbox_json_count"] == 0 and queued_before == 0:
+        pending = latest_incomplete_research_log_entry(config.registry_path)
+        state["state"] = "awaiting_reflection" if pending is not None else "waiting_for_proposal"
+        message = (
+            f"Cycle {pending['cycle']} needs interpretation and next direction. "
+            "Include `previous_cycle_reflection` in the next proposal or run "
+            "`record-cycle-reflection`."
+            if pending is not None
+            else "Waiting for an external proposal file."
+        )
+        _persist_state(config, state, event_type=state["state"], message=message)
+        export_context_bundle(config)
+        state["_early_return"] = True
+        return state
+
+    state["state"] = "ingesting"
+    _persist_state(config, state, event_type="ingesting", message="Ingesting inbox proposals.")
+    ingest_summary = ingest_proposals(config)
+
+    if _queued_count(config) == 0:
+        state["state"] = "waiting_for_proposal"
+        state["latest_ingest_summary"] = ingest_summary
+        _persist_state(config, state, event_type="waiting_for_proposal", message="No validated proposal is queued.")
+        export_context_bundle(config)
+        state["_early_return"] = True
+        return state
+
+    if not _complete_pending_reflection_from_queued_proposal(config):
+        pending = latest_incomplete_research_log_entry(config.registry_path)
+        state["state"] = "awaiting_reflection"
+        _persist_state(
+            config,
+            state,
+            event_type="awaiting_reflection",
+            message=(
+                f"Cycle {pending['cycle']} needs interpretation and next direction. "
+                "Add `previous_cycle_reflection` to the next proposal or run "
+                "`record-cycle-reflection`."
+            ),
+        )
+        export_context_bundle(config)
+        state["_early_return"] = True
+        return state
+
+    return ingest_summary
 
 
 def run_session_cycles(config: ProjectConfig, count: int, session_id: str | None = None) -> list[dict[str, Any]]:
@@ -516,8 +616,11 @@ def _persist_state(
     comparison_id: str | None = None,
     details: dict[str, Any] | None = None,
 ) -> None:
+    from autoresearch.controller.milestone_status import milestone_status
+
     state["updated_at"] = _now()
     state["official_champion"] = get_official_champion(config.registry_path)
+    state["milestone"] = milestone_status(config, state["official_champion"])
     state["running_proposals"] = _running_proposal_status(config)
     session_dir = _session_dir(config, state["session_id"])
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -625,11 +728,82 @@ def _session_dir(config: ProjectConfig, session_id: str) -> Path:
     return _sessions_dir(config) / session_id
 
 
+def _inflight_marker_path(config: ProjectConfig, session_id: str) -> Path:
+    return _session_dir(config, session_id) / "cycle_in_flight.json"
+
+
+def _write_inflight_marker(config: ProjectConfig, state: dict[str, Any]) -> None:
+    """Write-ahead marker for the evaluating phase.
+
+    Removed on every normal outcome (including handled exceptions); it survives
+    only when the process is killed outright, which is exactly the signal the
+    next invocation needs to detect the orphaned cycle.
+    """
+
+    path = _inflight_marker_path(config, state["session_id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(
+        path,
+        {
+            "pid": os.getpid(),
+            "session_id": state["session_id"],
+            "cycle": int(state.get("current_cycle") or 0) + 1,
+            "started_at": _now(),
+        },
+    )
+
+
+def _clear_inflight_marker(config: ProjectConfig, session_id: str) -> None:
+    _inflight_marker_path(config, session_id).unlink(missing_ok=True)
+
+
+def _pid_alive(pid: object) -> bool:
+    try:
+        os.kill(int(pid), 0)  # signal 0: existence check only
+    except (ProcessLookupError, TypeError, ValueError):
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def inflight_cycle_status(
+    config: ProjectConfig, session_id: str | None = None
+) -> dict[str, Any] | None:
+    """The in-flight cycle marker left by an evaluating process, if any.
+
+    Returns ``{"pid", "alive", "started_at", "cycle", "session_id"}`` or None.
+    ``alive`` distinguishes a genuinely busy session from one wedged by a
+    killed command.
+    """
+
+    if session_id is None:
+        state = latest_session(config)
+        if state is None or not state.get("session_id"):
+            return None
+        session_id = state["session_id"]
+    path = _inflight_marker_path(config, session_id)
+    if not path.exists():
+        return None
+    try:
+        marker = read_json(path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        marker = {}
+    pid = marker.get("pid")
+    return {
+        "pid": pid,
+        "alive": _pid_alive(pid),
+        "started_at": marker.get("started_at"),
+        "cycle": marker.get("cycle"),
+        "session_id": session_id,
+    }
+
+
 def _render_session_summary(state: dict[str, Any]) -> str:
     champion = state.get("official_champion") or {}
+    milestone = state.get("milestone") or {"status": "unknown"}
     running = state.get("running_proposals") or []
-    return "\n".join(
-        [
+    lines = [
             "# Auto-Research Session Summary",
             "",
             f"- session_id: `{state['session_id']}`",
@@ -638,11 +812,14 @@ def _render_session_summary(state: dict[str, Any]) -> str:
             f"- current_cycle: {state['current_cycle']}",
             f"- max_cycles: {state.get('max_cycles')}",
             f"- stop_requested: {state.get('stop_requested')}",
-            f"- official_champion: `{champion.get('champion_id')}`",
+            f"- search_champion: `{champion.get('champion_id')}`",
+            f"- milestone_status: `{milestone.get('status')}`",
             f"- running_proposals: {len(running)}",
             f"- updated_at: {state['updated_at']}",
         ]
-    ) + "\n"
+    if milestone.get("operator_action"):
+        lines.append(f"- operator_action: `{milestone['operator_action']}`")
+    return "\n".join(lines) + "\n"
 
 
 def _running_proposal_status(config: ProjectConfig) -> list[dict[str, Any]]:

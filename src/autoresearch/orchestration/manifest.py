@@ -71,6 +71,7 @@ class Delegation:
     track: str
     run_id: str
     cycle_budget: int
+    run_path: str | None = None
     status: str = "spawned"
     pid: int | None = None
     spawned_at: str | None = None
@@ -89,6 +90,14 @@ class Delegation:
     cycles_at_start: int = 0
     budget_refunded: bool = False
     taken_over: bool = False
+    # Audit trail for "same argv, different outcome" failures: which binary the
+    # backend command actually resolved to at spawn time, and its version.
+    resolved_executable: str | None = None
+    resolved_version: str | None = None
+    # Committed-but-unused cycles returned to the pool when this delegation
+    # reached a terminal state (set at report collection). Keeps ``cycle_budget``
+    # as the historical commitment while the campaign reclaims the remainder.
+    cycles_forfeited: int = 0
 
     def __post_init__(self) -> None:
         if not DELEGATION_ID_RE.fullmatch(self.delegation_id):
@@ -117,6 +126,9 @@ class Delegation:
     def run_dir(self) -> Path:
         """Absolute path of this delegation's child run folder."""
 
+        if self.run_path:
+            path = Path(self.run_path)
+            return path if path.is_absolute() else PROJECT_ROOT / path
         return PROJECT_ROOT / "artifacts" / "tracks" / self.track / "runs" / self.run_id
 
     def to_dict(self) -> dict[str, Any]:
@@ -127,6 +139,7 @@ class Delegation:
             "track": self.track,
             "run_id": self.run_id,
             "cycle_budget": self.cycle_budget,
+            "run_path": self.run_path,
             "status": self.status,
             "pid": self.pid,
             "spawned_at": self.spawned_at,
@@ -145,6 +158,9 @@ class Delegation:
             "cycles_at_start": self.cycles_at_start,
             "budget_refunded": self.budget_refunded,
             "taken_over": self.taken_over,
+            "resolved_executable": self.resolved_executable,
+            "resolved_version": self.resolved_version,
+            "cycles_forfeited": self.cycles_forfeited,
         }
         return payload
 
@@ -157,6 +173,7 @@ class Delegation:
             track=str(raw["track"]),
             run_id=str(raw["run_id"]),
             cycle_budget=int(raw["cycle_budget"]),
+            run_path=raw.get("run_path"),
             status=str(raw.get("status", "spawned")),
             pid=(int(raw["pid"]) if raw.get("pid") is not None else None),
             spawned_at=raw.get("spawned_at"),
@@ -181,6 +198,9 @@ class Delegation:
             cycles_at_start=int(raw.get("cycles_at_start") or 0),
             budget_refunded=bool(raw.get("budget_refunded", False)),
             taken_over=bool(raw.get("taken_over", False)),
+            resolved_executable=raw.get("resolved_executable"),
+            resolved_version=raw.get("resolved_version"),
+            cycles_forfeited=int(raw.get("cycles_forfeited") or 0),
         )
 
 
@@ -254,9 +274,16 @@ class Orchestration:
         is concerned — the orchestrator paid for the attempt. The exception is a
         ``budget_refunded`` delegation: it crashed on the environment before any
         cycle or LLM call happened, so the campaign got nothing and pays nothing.
+        A finished delegation's committed-but-unused cycles (``cycles_forfeited``)
+        are likewise returned to the pool — explicitly, not by silently
+        down-scoping the next delegation.
         """
 
-        return sum(d.cycle_budget for d in self.delegations if not d.budget_refunded)
+        return sum(
+            max(0, d.cycle_budget - d.cycles_forfeited)
+            for d in self.delegations
+            if not d.budget_refunded
+        )
 
     @property
     def cycles_remaining(self) -> int:
@@ -346,6 +373,18 @@ def report_path(orchestration_id: str, delegation_id: str) -> Path:
     return orchestration_dir(orchestration_id) / "reports" / f"{delegation_id}.json"
 
 
+def delegation_run_dir(orchestration_id: str, delegation_id: str) -> Path:
+    """Canonical campaign-owned directory for one isolated delegation run."""
+
+    return orchestration_dir(orchestration_id) / "runs" / delegation_id
+
+
+def baseline_registry_path(orchestration_id: str) -> Path:
+    """Frozen baseline-only registry cloned into later delegation workspaces."""
+
+    return orchestration_dir(orchestration_id) / "baseline" / "registry.sqlite"
+
+
 def playoff_dir(orchestration_id: str) -> Path:
     return orchestration_dir(orchestration_id) / "playoff"
 
@@ -403,7 +442,7 @@ def create_orchestration(
             f"Orchestration {oid} already exists at {orchestration_dir(oid)}"
         )
     base = orchestration_dir(oid)
-    for sub in ("briefs", "prompts", "logs", "reports", "playoff"):
+    for sub in ("baseline", "briefs", "prompts", "logs", "reports", "runs", "playoff"):
         (base / sub).mkdir(parents=True, exist_ok=True)
 
     orch = Orchestration(

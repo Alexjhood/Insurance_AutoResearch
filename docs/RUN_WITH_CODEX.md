@@ -28,7 +28,7 @@ Copy and paste this block (replace model name as appropriate):
 
 ```
 Read AGENT.md, then bootstrap a new run under track "codex" with a
-timestamped run id: use `--new-run` and pass --model-provider openai
+timestamped run id: use `--new-run`, pass `--dataset <name>`, and pass --model-provider openai
 --model-name codex-mini-latest to bootstrap-track. Capture the run id it
 prints, then open the session with `start-session main --max-cycles 3`
 so the session owns the cycle budget, and run the adaptive loop
@@ -38,8 +38,9 @@ is exhausted. The dataset is already prepared.
 
 Vary the run by adding flags to the bootstrap instruction:
 
-- **Dataset** — add `--dataset <name>` (`french_motor` default, `allstate`,
-  `allstate_full`, `porto_seguro`); the run manifest pins it thereafter.
+- **Dataset** — pass `--dataset <name>` (`french_motor`, `allstate`,
+  `allstate_full`, `porto_seguro`); fresh tracked bootstraps require an explicit
+  selection and the run manifest pins it thereafter.
 - **Target mode** — add `--target-mode <mode>` (must be one of the dataset's
   modes, per `list-datasets`) and instruct the agent to pass it on **every**
   command; omit for the dataset's default.
@@ -51,7 +52,7 @@ Vary the run by adding flags to the bootstrap instruction:
 
 ## What Happens
 
-- **Bootstrap**: `autoresearch --track codex --new-run bootstrap-track --model-provider openai --model-name codex-mini-latest` creates a fresh timestamped run folder, creates the registry, runs the global-mean baseline, initialises the official champion, and exports the handoff context. The `--model-provider` and `--model-name` flags are required so results can be attributed in the cross-run memory aggregator.
+- **Bootstrap**: `autoresearch --track codex --new-run --dataset french_motor bootstrap-track --model-provider openai --model-name codex-mini-latest` creates a fresh timestamped run folder, creates the registry, runs the global-mean baseline, initialises the search champion, and exports the handoff context. The `--model-provider` and `--model-name` flags are required so results can be attributed in the cross-run memory aggregator.
 - **Session open**: `autoresearch --track codex --run-id <run-id> start-session main --max-cycles N` opens the supervised session and makes it own the cycle budget, so the session stops itself after N cycles instead of the agent counting.
 - **Handoff read**: the agent reads the latest handoff file to understand the current champion state before proposing anything.
 - **Proposal generation**: the agent writes a proposal JSON and a companion model script to the proposal inbox.
@@ -105,7 +106,7 @@ unbound analysis threads.
 ## Recommended Command Sequence
 
 ```bash
-autoresearch --track codex --new-run bootstrap-track \
+autoresearch --track codex --new-run --dataset french_motor bootstrap-track \
   --model-provider openai --model-name codex-mini-latest
 # capture the printed run id, then let the session own the budget:
 autoresearch --track codex --run-id <run-id> start-session main --max-cycles 3
@@ -130,7 +131,7 @@ This exempts the session from confinement. See [`docs/architecture.md`](architec
 export AUTORESEARCH_MEMORY_ACCESS=own   # this model's history only
 # or
 export AUTORESEARCH_MEMORY_ACCESS=all   # all models, fully attributed
-autoresearch --track codex --new-run bootstrap-track \
+autoresearch --track codex --new-run --dataset french_motor bootstrap-track \
   --model-provider openai --model-name codex-mini-latest
 ```
 

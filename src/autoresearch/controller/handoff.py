@@ -402,6 +402,9 @@ def render_handoff_markdown(
     champion = context.get("official_champion") or {}
     champion_id = champion.get("champion_id", "FILL_IN_CHAMPION_ID")
     branch_id = champion.get("branch_id", "main")
+    from autoresearch.controller.milestone_status import milestone_status
+
+    milestone = milestone_status(config, champion)
 
     # Find champion Gini from recent_experiments list
     gini_str = ""
@@ -666,7 +669,8 @@ def render_handoff_markdown(
     current_state_lines = [
         "## Current state",
         "",
-        f"- **Champion**: `{champion_id}` (branch `{branch_id}`{gini_str})",
+        f"- **Search champion**: `{champion_id}` (branch `{branch_id}`{gini_str})",
+        f"- **Milestone status**: `{milestone['status']}`",
         f"- **Inbox**: `{config.handoff_proposal_inbox_dir}`  ← write the proposal JSON here",
         f"- **Next command**: `{_next_supervised_command(config, context)}`",
         *_render_champion_followup(config),

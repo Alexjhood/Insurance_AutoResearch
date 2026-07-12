@@ -53,10 +53,10 @@ The milestone holdout is reserved for checkpoint comparisons (e.g. quarterly or 
 To access:
 ```bash
 export AUTORESEARCH_MILESTONE_TOKEN=<secret>
-autoresearch evaluate-on-holdout EXPERIMENT_ID
+autoresearch --track TRACK --run-id RUN_ID evaluate-milestone EXPERIMENT_ID
 ```
 
-The token prevents accidental reads. The holdout file lives in `data/datasets/<name>/holdout_vault/` which is never written by the experiment runner.
+The token prevents accidental reads. The holdout file lives in `data/datasets/<name>/holdout_vault/` which is never written by the experiment runner. Research-session promotions are search promotions only. Run this command from a trusted operator process after the search is complete; do not expose the token or detailed milestone report to an active research agent.
 
 ## Model Families
 

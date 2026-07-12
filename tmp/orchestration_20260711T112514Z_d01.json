@@ -1,0 +1,14 @@
+{
+  "direction": "Run one clean benchmark experiment using a direct LightGBM Tweedie recipe with native categorical handling. Choose sensible moderate-complexity parameters for French Motor burning cost, and focus on producing a reliable first challenger to the global-mean baseline.",
+  "cycle_budget": 1,
+  "starting_knowledge": [
+    "This is the first delegation in a fresh five-cycle campaign; the current champion is the global mean."
+  ],
+  "constraints": [
+    "Run exactly one experiment and finish the delegation.",
+    "Prefer a declarative recipe; do not write a novel model script.",
+    "Keep the single-fit runtime comfortably within the comparison budget."
+  ],
+  "success_criteria": "Produce a calibrated non-baseline challenger with materially positive weighted Gini, or a clear diagnostic explaining failure.",
+  "foundation_models": false
+}

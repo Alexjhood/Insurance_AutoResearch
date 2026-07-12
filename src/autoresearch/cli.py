@@ -226,6 +226,10 @@ def _cmd_compare_to_champion(config, args) -> int:
 
 
 def _cmd_record_decision(config, args) -> int:
+    import os
+
+    # Research decisions must never inherit trusted-operator holdout access.
+    os.environ.pop("AUTORESEARCH_MILESTONE_TOKEN", None)
     result = record_decision(
         config,
         args.comparison_id,
@@ -247,6 +251,7 @@ def _cmd_record_decision(config, args) -> int:
     # new champion and the next command.
     from autoresearch.controller.context import build_llm_context
     from autoresearch.controller.handoff import _next_supervised_command
+    from autoresearch.controller.milestone_status import milestone_status
     from autoresearch.experiment_registry.champions import get_official_champion
 
     champion = get_official_champion(config.registry_path) or {}
@@ -254,9 +259,13 @@ def _cmd_record_decision(config, args) -> int:
     print("--- next state ---")
     if champion:
         print(
-            f"Champion: {champion.get('champion_id')} "
+            f"Search champion: {champion.get('champion_id')} "
             f"(branch {champion.get('branch_id')})"
         )
+        milestone = milestone_status(config, champion)
+        print(f"Milestone status: {milestone['status']}")
+        if milestone.get("operator_action"):
+            print(f"Operator action: {milestone['operator_action']}")
     print(f"Next command: {_next_supervised_command(config, context)}")
     return 0
 
@@ -491,7 +500,47 @@ def _cmd_run_session_cycle(config, args) -> int:
 
 
 def _cmd_run_session_cycles(config, args) -> int:
+    if getattr(args, "background", False):
+        return _run_session_cycles_background(config, args)
     print(json.dumps(run_session_cycles(config, args.count, args.session_id), indent=2, sort_keys=True))
+    return 0
+
+
+def _run_session_cycles_background(config, args) -> int:
+    """Detach the cycles into a child process immune to this command's timeout."""
+
+    import subprocess
+    import sys as _sys
+
+    log_dir = config.handoff_base_dir / "sessions"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "background_cycles.log"
+    command = [
+        _sys.executable, "-m", "autoresearch.cli",
+        "--track", str(config.track_id),
+        "--run-id", str(config.run_id),
+        "run-session-cycles", str(args.count),
+    ]
+    if args.session_id:
+        command += ["--session-id", args.session_id]
+    with log_path.open("ab") as log_file:
+        process = subprocess.Popen(
+            command,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,  # survive the parent's process group being killed
+        )
+    print(json.dumps({
+        "detached": True,
+        "pid": process.pid,
+        "log": str(log_path),
+        "next": (
+            f"Poll `autoresearch --track {config.track_id} --run-id {config.run_id} "
+            "session-status` until the state is awaiting_decision (or "
+            "awaiting_reflection / waiting_for_repair), then proceed as normal."
+        ),
+    }, indent=2))
     return 0
 
 
@@ -1002,8 +1051,9 @@ def _orchestrate_spawn(args) -> int:
             wait=args.wait,
             dry_run=args.dry_run,
             memory_access=args.memory_access,
+            respawn_of=args.respawn_of,
         )
-    except (ValueError, KeyError, FileNotFoundError, NotImplementedError) as exc:
+    except (ValueError, KeyError, FileNotFoundError, NotImplementedError, RuntimeError) as exc:
         parser.error(str(exc))
         return 2
 
@@ -1068,7 +1118,7 @@ def _orchestrate_respawn(args) -> int:
             memory_access=args.memory_access,
             seed_champion=args.seed_champion,
         )
-    except (ValueError, KeyError, FileNotFoundError, NotImplementedError) as exc:
+    except (ValueError, KeyError, FileNotFoundError, NotImplementedError, RuntimeError) as exc:
         parser.error(str(exc))
         return 2
 
@@ -1428,6 +1478,16 @@ def build_parser() -> argparse.ArgumentParser:
     multi_parser = subparsers.add_parser("run-session-cycles", help="Run up to N local-side session cycles.")
     multi_parser.add_argument("count", type=int)
     multi_parser.add_argument("--session-id", default=None)
+    multi_parser.add_argument(
+        "--background",
+        action="store_true",
+        help=(
+            "Detach and return immediately; the cycles run in a child process that "
+            "survives this command. Poll `session-status` until the session reaches "
+            "awaiting_decision. Use this when a harness command timeout could kill "
+            "a long-running cycle."
+        ),
+    )
     reflection_parser = subparsers.add_parser(
         "record-cycle-reflection",
         help="Complete the reflection for an auto-rejected cycle.",
@@ -1504,6 +1564,10 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrate_spawn.add_argument(
         "--memory-access", dest="memory_access", default=None, choices=("own", "all"),
         help="Grant the sub-agent aggregator-mediated cross-run memory access.",
+    )
+    orchestrate_spawn.add_argument(
+        "--respawn-of", default=None,
+        help="Record retry lineage to a terminal source delegation (for example d01).",
     )
 
     orchestrate_respawn = orchestrate_subs.add_parser(
@@ -1758,6 +1822,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if getattr(args, "new_run", False) and getattr(args, "run_id", None):
         parser.error("--new-run cannot be used together with --run-id")
+    if (
+        args.command == "bootstrap-track"
+        and getattr(args, "new_run", False)
+        and not getattr(args, "dataset", None)
+    ):
+        parser.error(
+            "fresh bootstrap-track requires --dataset <name>; "
+            "pass --dataset french_motor explicitly to select the former default"
+        )
     config = load_config(
         args.config,
         track_id=getattr(args, "track", None),

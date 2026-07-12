@@ -56,7 +56,7 @@ Safe to run at the start of every new session.
 **Model identity is required.** Pass `--model-provider` and `--model-name` so results can be attributed in the cross-run memory aggregator.
 
 ```bash
-autoresearch --track demo --new-run bootstrap-track \
+autoresearch --track demo --new-run --dataset french_motor bootstrap-track \
   --model-provider anthropic \
   --model-name claude-sonnet-4-6 \
   --model-version 20251101 \
@@ -71,7 +71,7 @@ Flags:
 | `--model-name` | Yes | Model identifier (e.g. `claude-sonnet-4-6`, `gpt-4o`) |
 | `--model-version` | No | Version string stored for reference |
 | `--harness` | No | Agent harness name (e.g. `claude-code`, `codex`, `opencode`) |
-| `--dataset` | No | Registered dataset for the run (default `french_motor`); pinned in `run_manifest.json` so later commands on the run resolve it automatically |
+| `--dataset` | **Yes for a fresh tracked bootstrap** | Registered dataset for the run; pinned in `run_manifest.json` so later commands resolve it automatically. Pass `french_motor` explicitly when desired. |
 | `--skip-data` | No | Skip `prepare-data` even if shared data is missing |
 | `--force-data` | No | Rebuild shared data artifacts before bootstrapping |
 | `--skip-baselines` | No | Do not run the global-mean starting baseline if the registry is empty |
@@ -372,6 +372,19 @@ Run up to N local-side session cycles.
 ```bash
 autoresearch --track demo --run-id quickstart run-session-cycles 3
 ```
+
+A cycle runs a full experiment and can take many minutes. `--background`
+detaches the cycles into a child process that survives the calling command
+being killed (e.g. by an agent harness's per-command timeout); poll
+`session-status` until the state is `awaiting_decision`. Output of the
+detached process is appended to `sessions/background_cycles.log` in the run's
+handoff directory.
+
+If a previous cycle's process was killed mid-evaluation, the next
+`run-session-cycles` detects the orphaned cycle from the session's
+`cycle_in_flight.json` marker and recovers it: a proposal killed after its fit
+resumes at the champion comparison, and one killed mid-fit is requeued. The
+recovery is recorded as `orphan_detected` / `orphan_requeued` session events.
 
 ### `record-cycle-reflection`
 

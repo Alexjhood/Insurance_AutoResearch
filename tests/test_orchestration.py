@@ -86,6 +86,51 @@ def test_manifest_round_trip(orchestrations_root):
     assert reloaded.cycles_remaining == 8
 
 
+def test_delegation_run_path_can_live_inside_campaign(orchestrations_root):
+    delegation = Delegation(
+        delegation_id="d01",
+        brief_path="briefs/d01.json",
+        backend="stub",
+        track="claude",
+        run_id="20260712T091500Z",
+        cycle_budget=1,
+        run_path="artifacts/orchestrations/20260712T090000Z/runs/d01",
+    )
+
+    assert delegation.run_dir() == (
+        spawner_mod.PROJECT_ROOT
+        / "artifacts/orchestrations/20260712T090000Z/runs/d01"
+    )
+    assert Delegation.from_dict(delegation.to_dict()).run_path == delegation.run_path
+
+
+def test_campaign_baseline_registry_is_frozen_campaign_snapshot(orchestrations_root):
+    campaign_dir = orchestrations_root / "20260712T090000Z"
+    registry = campaign_dir / "baseline" / "registry.sqlite"
+    registry.parent.mkdir(parents=True)
+    registry.touch()
+    orch = Orchestration(
+        orchestration_id="20260712T090000Z",
+        dataset="porto_seguro",
+        target_mode="claim_incidence",
+        created_at="now",
+        total_cycle_budget=2,
+        delegations=(
+            Delegation(
+                delegation_id="d01",
+                brief_path="b",
+                backend="stub",
+                track="claude",
+                run_id="20260712T091500Z",
+                cycle_budget=1,
+                run_path=str(campaign_dir / "runs" / "d01"),
+            ),
+        ),
+    )
+
+    assert spawner_mod._campaign_baseline_registry(orch) == registry
+
+
 def test_manifest_rejects_bad_records(orchestrations_root):
     with pytest.raises(ValueError, match="YYYYMMDDTHHMMSSZ"):
         Orchestration(
@@ -404,6 +449,30 @@ def test_codex_backend_pins_verified_headless_flags_and_metadata():
     # backend and earns default from its scorecard (design §4.7 lifecycle).
     assert backend.status == "trial"
     assert "diagnostic_probes" in backend.good_for
+
+
+@pytest.mark.parametrize(
+    ("backend_name", "model", "effort"),
+    [
+        ("codex-gpt-5-6-luna-low", "gpt-5.6-luna", "low"),
+        ("codex-gpt-5-6-luna-medium", "gpt-5.6-luna", "medium"),
+        ("codex-gpt-5-6-luna-high", "gpt-5.6-luna", "high"),
+        ("codex-gpt-5-6-terra-low", "gpt-5.6-terra", "low"),
+        ("codex-gpt-5-6-terra-medium", "gpt-5.6-terra", "medium"),
+        ("codex-gpt-5-6-terra-high", "gpt-5.6-terra", "high"),
+    ],
+)
+def test_gpt_56_codex_backends_pin_model_and_reasoning_effort(
+    backend_name, model, effort
+):
+    backend = load_backends()[backend_name]
+    command = backend.render_command(prompt="the prompt travels over stdin")
+
+    assert command[command.index("-m") + 1] == model
+    assert command[command.index("-c") + 1] == f'model_reasoning_effort="{effort}"'
+    assert backend.model_provider == "openai"
+    assert backend.model_name == f"{model}-{effort}"
+    assert backend.status == "trial"
 
 
 def test_codex_stub_uses_codex_adapter_and_track_without_a_real_cli():
@@ -742,6 +811,27 @@ def test_preflight_refuses_missing_executable_and_unwritable_state_dir(monkeypat
     preflight_backend(stub)
 
 
+def test_preflight_enforces_backend_minimum_tool_version(monkeypatch, tmp_path):
+    from autoresearch.orchestration.backends import load_backends, preflight_backend
+
+    luna = load_backends()["codex-gpt-5-6-luna-medium"]
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/codex")
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(lambda: tmp_path))
+
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="codex-cli 0.137.0\n"),
+    )
+    with pytest.raises(RuntimeError, match="requires codex >= 0.144.0-alpha.4"):
+        preflight_backend(luna)
+
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="codex-cli 0.144.0-alpha.4\n"),
+    )
+    preflight_backend(luna)
+
+
 def test_compute_timeout_scales_with_budget():
     assert spawner_mod.compute_timeout_minutes(1) == 20.0
     # Cycles 0-4 cost 10 min each; the 6th cycle's budget steps up to 15.
@@ -764,10 +854,108 @@ def test_spawn_dry_run_shows_argv_and_env_without_launching(orchestrations_root,
     assert "scripts/stub_subagent.py" in rendered
     assert "AUTORESEARCH_SCOPE=research" in rendered
     assert "AUTORESEARCH_TRACK=claude" in rendered
-
     # Dry run must not create a delegation or a child run.
     assert load_orchestration(orch.orchestration_id).delegations == ()
 
+
+def test_spawn_retry_lineage_requires_terminal_source(orchestrations_root, tmp_path):
+    orch = create_orchestration(
+        dataset="porto_seguro", target_mode="claim_incidence", total_cycle_budget=4
+    )
+    source = _running_delegation(status="running", pid=123)
+    save_orchestration(add_delegation(orch, source))
+    brief_file = tmp_path / "brief.json"
+    write_json(brief_file, {"direction": "Retry after failure.", "cycle_budget": 1})
+
+    with pytest.raises(ValueError, match="not terminal"):
+        spawner_mod.spawn(
+            orch.orchestration_id,
+            brief_path=brief_file,
+            backend_name="stub",
+            dry_run=True,
+            respawn_of="d01",
+        )
+
+
+def test_finish_delegation_refuses_active_session(
+    orchestrations_root, tmp_path, monkeypatch
+):
+    orch = create_orchestration(
+        dataset="porto_seguro", target_mode="claim_incidence", total_cycle_budget=2
+    )
+    delegation = _running_delegation(status="running", pid=123)
+    save_orchestration(add_delegation(orch, delegation))
+    run_dir = tmp_path / delegation.run_id
+    run_dir.mkdir()
+    write_json(
+        run_dir / "run_manifest.json",
+        {
+            "orchestration_id": orch.orchestration_id,
+            "delegation_id": delegation.delegation_id,
+            "track_id": delegation.track,
+        },
+    )
+    config = SimpleNamespace(registry_path=tmp_path / "registry.sqlite")
+    monkeypatch.setattr("autoresearch.config.load_config", lambda **kwargs: config)
+    monkeypatch.setattr(
+        "autoresearch.controller.session.latest_session",
+        lambda child_config: {"state": "evaluating"},
+    )
+    monkeypatch.setattr(
+        "autoresearch.experiment_registry.registry.list_proposals", lambda path: []
+    )
+
+    # No in-flight marker and no live pid: the state is wedged, so the refusal
+    # must point at orphan recovery instead of telling the agent to wait forever.
+    with pytest.raises(ValueError, match="stuck in 'evaluating'.*run-session-cycles 1"):
+        spawner_mod.finish_delegation(run_dir, summary="Still running.")
+
+    # A live in-flight marker means genuinely busy: refuse with "wait".
+    monkeypatch.setattr(
+        "autoresearch.controller.session.inflight_cycle_status",
+        lambda child_config, session_id=None: {
+            "pid": 4242,
+            "alive": True,
+            "started_at": "2026-07-11T00:00:00Z",
+            "cycle": 1,
+            "session_id": "s1",
+        },
+    )
+    with pytest.raises(ValueError, match="pid 4242.*still evaluating"):
+        spawner_mod.finish_delegation(run_dir, summary="Still running.")
+
+
+def test_finish_delegation_refuses_nonterminal_proposal(
+    orchestrations_root, tmp_path, monkeypatch
+):
+    orch = create_orchestration(
+        dataset="porto_seguro", target_mode="claim_incidence", total_cycle_budget=2
+    )
+    delegation = _running_delegation(status="running", pid=123)
+    save_orchestration(add_delegation(orch, delegation))
+    run_dir = tmp_path / delegation.run_id
+    run_dir.mkdir()
+    write_json(
+        run_dir / "run_manifest.json",
+        {
+            "orchestration_id": orch.orchestration_id,
+            "delegation_id": delegation.delegation_id,
+            "track_id": delegation.track,
+        },
+    )
+    config = SimpleNamespace(registry_path=tmp_path / "registry.sqlite")
+    monkeypatch.setattr("autoresearch.config.load_config", lambda **kwargs: config)
+    monkeypatch.setattr(
+        "autoresearch.controller.session.latest_session",
+        lambda child_config: {"state": "waiting_for_proposal"},
+    )
+    monkeypatch.setattr(
+        "autoresearch.experiment_registry.registry.list_proposals",
+        lambda path: [{"proposal_id": "p1", "status": "running"}],
+    )
+
+    with pytest.raises(ValueError, match="nonterminal proposals: p1"):
+        spawner_mod.finish_delegation(run_dir, summary="Still running.")
 
 def test_spawn_refuses_to_exceed_total_cycle_budget(orchestrations_root, tmp_path):
     orch = create_orchestration(
@@ -1424,7 +1612,13 @@ def _fixture_orchestration() -> Orchestration:
 def test_report_is_built_from_registry_not_agent_claims(fixture_child_run):
     report = build_report(_fixture_orchestration(), _fixture_delegation())
 
-    assert report["cycles"] == {"budget": 2, "used": 1}
+    assert report["cycles"] == {
+        "budget": 2,
+        "attempted": 1,
+        "completed": 1,
+        "decided": 1,
+        "used": 1,
+    }
     assert report["champion"]["experiment_id"] == "exp_baseline"
     assert report["champion"]["model_family"] == "global_mean"
     assert report["champion"]["beat_seed_baseline"] is False
@@ -1448,6 +1642,13 @@ def test_report_includes_best_effort_backend_usage(fixture_child_run):
     )
     report = build_report(_fixture_orchestration(), delegation)
     assert report["cost"]["llm_usage"]["backend"] == delegation.tool_usage
+
+
+def test_report_uses_backend_reported_cost_when_telemetry_has_none(fixture_child_run):
+    delegation = _fixture_delegation(tool_usage={"provider_cost_usd": 0.42})
+    report = build_report(_fixture_orchestration(), delegation)
+    assert report["cost"]["llm_usage"]["cost_usd"] == pytest.approx(0.42)
+    assert report["cost"]["llm_usage"]["cost_source"] == "backend_exit"
 
 
 def test_report_flags_baseline_champion_and_all_rejected(fixture_child_run):
@@ -1475,7 +1676,13 @@ def test_continued_report_excludes_cycles_before_its_offset(fixture_child_run):
 
     report = build_report(_fixture_orchestration(), delegation)
 
-    assert report["cycles"] == {"budget": 1, "used": 0}
+    assert report["cycles"] == {
+        "budget": 1,
+        "attempted": 0,
+        "completed": 0,
+        "decided": 0,
+        "used": 0,
+    }
     assert report["experiments"] == []
     assert report["respawn_of"] == "d01"
 
@@ -1671,3 +1878,31 @@ def test_orchestrated_handoff_degrades_gracefully_when_brief_is_unreadable(
     handoff = _handoff_for(config)
     assert "Orchestration brief" not in handoff
     assert "## Active dataset" in handoff
+
+
+def test_cycles_forfeited_fires_on_undecided_attempts_or_nonterminal_proposals():
+    lost_compute = _distress(cycles_attempted=3, decisions=["promote"])
+    leftover = _distress(nonterminal_proposals=2)
+    healthy = _distress(cycles_attempted=3)
+
+    assert "cycles_forfeited" in lost_compute.active
+    assert "3 experiments attempted but only 1 reached a decision" in lost_compute.detail
+    assert "cycles_forfeited" in leftover.active
+    assert "cycles_forfeited" not in healthy.active
+
+
+def test_forfeited_cycles_return_to_the_pool(orchestrations_root):
+    from dataclasses import replace as _replace
+
+    orch = create_orchestration(
+        dataset="porto_seguro", target_mode="claim_incidence", total_cycle_budget=5
+    )
+    finished_early = _replace(
+        _running_delegation(status="completed"), cycle_budget=3, cycles_forfeited=2
+    )
+    orch = add_delegation(orch, finished_early)
+
+    # The historical commitment stays 3, but the campaign reclaims the 2 unused.
+    assert finished_early.cycle_budget == 3
+    assert orch.cycles_committed == 1
+    assert orch.cycles_remaining == 4

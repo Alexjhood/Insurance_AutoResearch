@@ -33,7 +33,7 @@ working unchanged.
 | Where orchestration lives | In the framework: new `autoresearch orchestrate …` commands spawn headless CLI sub-agents. The orchestrator itself is a normal interactive Claude Code / Codex conversation. |
 | Sub-agent authority | Full cycle **including** promote/local_promote/reject decisions, inside its own run. |
 | Unit of delegation | Chosen per spawn: a brief plus a cycle budget K (1..N). K=1 gives tight orchestrator control; K=3–5 gives an autonomous mini-run. |
-| Parallelism | Via independent tracked runs (no change to sequential comparison semantics inside a run). Consolidation via a framework **playoff** command that re-runs finalists head-to-head under the same gates in a fresh consolidation run. |
+| Parallelism | Via isolated delegation workspaces grouped beneath one campaign run directory (no change to sequential comparison semantics inside a workspace). Consolidation via a framework **playoff** command that re-runs finalists head-to-head under the same gates in a fresh consolidation run. |
 | Sub-agent tools v1 | Claude Code (`claude -p`) and Codex (`codex exec`), behind a tool-agnostic backend registry so OpenCode etc. can be added by config. |
 | Intervention | Report-triggered: sub-agents run to completion/failure; distress flags in the end-of-run report drive respawn-with-better-brief or direct takeover by the orchestrator. |
 | Compatibility | Additive. Single-agent mode (and its docs, guard behaviour, and CLI) unchanged. |
@@ -98,13 +98,18 @@ working unchanged.
                winner = orchestration champion, holdout eval fires)
 ```
 
-A sub-agent run **is a normal tracked run**. It uses the existing AGENT.md
+A sub-agent workspace **behaves as a normal tracked run** but is stored at
+`artifacts/orchestrations/<orch-id>/runs/<delegation-id>/`. A compatibility
+symlink at the legacy track/run path preserves all existing CLI and guard
+contracts. It uses the existing AGENT.md
 contract, the existing proposal inbox, `run-session-cycles`,
 `record-decision`, repair flow, research log — everything. Orchestrated mode
 adds only: (a) the run is pre-bootstrapped by the spawner, (b) the handoff
 carries an **orchestration brief** block, (c) a report is generated at the
 end. This is what keeps single-agent mode untouched: there is one workflow,
-and orchestration is a caller of it.
+and orchestration is a caller of it. The first delegation runs the global-mean
+baseline; later workspaces clone its initialized registry and reuse the
+immutable baseline artifacts instead of refitting the same model.
 
 ---
 

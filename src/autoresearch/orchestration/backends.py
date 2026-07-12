@@ -85,6 +85,7 @@ class Backend:
     max_turns: int | None = None
     max_budget_usd: float | None = None
     notes: str = ""
+    min_tool_version: str | None = None
 
     def __post_init__(self) -> None:
         if self.track not in ALLOWED_TRACKS:
@@ -308,6 +309,9 @@ def _parse_backend(name: str, entry: dict[str, Any], config_path: Path) -> Backe
             float(entry["max_budget_usd"]) if entry.get("max_budget_usd") is not None else None
         ),
         notes=str(entry.get("notes", "")),
+        min_tool_version=(
+            str(entry["min_tool_version"]) if entry.get("min_tool_version") else None
+        ),
     )
 
 
@@ -339,8 +343,12 @@ def get_backend(name: str, *, path: Path | None = None) -> Backend:
 _TOOL_STATE_DIRS = {"claude": ".claude", "codex": ".codex"}
 
 
-def preflight_backend(backend: Backend) -> None:
+def preflight_backend(backend: Backend) -> dict[str, str | None]:
     """Fail a spawn fast, with a clear message, on known environment problems.
+
+    Returns the resolved executable path and version string so the spawner can
+    persist them in the delegation manifest — the recorded argv alone cannot
+    explain "same command, different outcome" PATH failures.
 
     Checks the backend executable is on PATH and (for tools with local state)
     that the tool's home-state directory is actually writable — a real write
@@ -350,19 +358,50 @@ def preflight_backend(backend: Backend) -> None:
     """
 
     import os
+    import re
     import shutil
+    import subprocess
     from pathlib import Path as _Path
 
     executable = backend.command[0]
-    if shutil.which(executable) is None:
+    resolved_path = shutil.which(executable)
+    if resolved_path is None:
         raise RuntimeError(
             f"Backend {backend.name!r}: executable {executable!r} is not on PATH. "
             "Install it (or fix PATH) before spawning."
         )
 
+    resolved_version: str | None = None
+    try:
+        output = subprocess.run(
+            [executable, "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        if backend.min_tool_version:
+            raise RuntimeError(
+                f"Backend {backend.name!r}: could not determine {executable!r} version: {exc}"
+            ) from exc
+        output = ""
+    match = re.search(r"(\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?)", output)
+    if match is not None:
+        resolved_version = match.group(1)
+    if backend.min_tool_version:
+        if match is None or _version_key(match.group(1)) < _version_key(backend.min_tool_version):
+            found = match.group(1) if match else output.strip() or "unknown"
+            raise RuntimeError(
+                f"Backend {backend.name!r} requires {executable} >= "
+                f"{backend.min_tool_version}, but PATH resolves version {found}. "
+                "Upgrade the CLI or place a compatible binary earlier on PATH."
+            )
+    resolved = {"executable": resolved_path, "version": resolved_version}
+
     state_name = _TOOL_STATE_DIRS.get(backend.tool)
     if state_name is None:
-        return
+        return resolved
     state_dir = _Path.home() / state_name
     probe = state_dir / f".autoresearch_preflight_{os.getpid()}"
     try:
@@ -376,6 +415,20 @@ def preflight_backend(backend: Backend) -> None:
             "orchestrating from a sandboxed harness, relaunch it with enough "
             "process privileges (e.g. Codex `--sandbox danger-full-access`)."
         ) from exc
+    return resolved
+
+
+def _version_key(value: str) -> tuple[tuple[int, ...], int, tuple[int, ...]]:
+    """Comparable key for the numeric and alpha-style CLI versions we support."""
+
+    import re
+
+    base, separator, suffix = value.partition("-")
+    base_parts = tuple(int(part) for part in base.split("."))
+    if not separator:
+        return base_parts, 1, ()  # stable releases sort after prereleases
+    suffix_parts = tuple(int(part) for part in re.findall(r"\d+", suffix))
+    return base_parts, 0, suffix_parts
 
 
 def preflight_foundation_models() -> None:

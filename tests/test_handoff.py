@@ -274,7 +274,8 @@ def test_delta_handoff_drops_static_blocks_keeps_dynamic_state(tmp_path: Path) -
     # Dynamic state the agent needs every cycle is retained in both.
     for body in (full, delta):
         assert "## Current state" in body
-        assert "**Champion**" in body
+        assert "**Search champion**" in body
+        assert "**Milestone status**" in body
         assert "**Next command**" in body
 
     assert "(delta)" in delta
