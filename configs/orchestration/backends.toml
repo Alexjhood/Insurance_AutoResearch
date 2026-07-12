@@ -52,6 +52,11 @@ max_budget_usd = 5.0
 tier = "cheap"
 status = "trial"
 cost_hint = "$"
+# Introductory Claude Sonnet 5 pricing through 2026-08-31; update to
+# 3.00 / 0.30 / 15.00 on 2026-09-01 (Anthropic standard pricing).
+usd_per_mtok_input = 2.00
+usd_per_mtok_cached = 0.20
+usd_per_mtok_output = 10.00
 good_for = ["recipe_tuning", "structured_sweeps"]
 avoid_for = ["novel_scripts"]
 notes = "Reliable on recipe-only briefs; escalate effort for repair-heavy estimators."
@@ -75,8 +80,89 @@ max_budget_usd = 10.0
 tier = "mid"
 status = "trial"
 cost_hint = "$$"
+usd_per_mtok_input = 2.00
+usd_per_mtok_cached = 0.20
+usd_per_mtok_output = 10.00
 good_for = ["novel_scripts", "diagnostic_probes", "repair_prone"]
 notes = "Default escalation rung above claude-sonnet-low (--effort medium)."
+
+[backends.claude-sonnet-high]
+tool = "claude"
+command = [
+    "claude", "-p",
+    "--model", "claude-sonnet-5",
+    "--effort", "high",
+    "--output-format", "stream-json",
+    "--verbose",
+    "--permission-mode", "acceptEdits",
+    "--max-budget-usd", "{max_budget_usd}",
+]
+prompt_via = "stdin"
+track = "claude"
+model_provider = "anthropic"
+model_name = "claude-sonnet-5-high"
+max_budget_usd = 15.0
+tier = "frontier"
+status = "trial"
+cost_hint = "$$$"
+usd_per_mtok_input = 2.00
+usd_per_mtok_cached = 0.20
+usd_per_mtok_output = 10.00
+good_for = ["novel_scripts", "diagnostic_probes", "repair_prone"]
+avoid_for = ["routine_recipe_tuning"]
+notes = "Claude Sonnet 5 at high effort for difficult diagnostics and repairs. Introductory pricing expires 2026-08-31."
+
+[backends.claude-haiku-low]
+tool = "claude"
+command = [
+    "claude", "-p",
+    "--model", "claude-haiku-4-5",
+    "--effort", "low",
+    "--output-format", "stream-json",
+    "--verbose",
+    "--permission-mode", "acceptEdits",
+    "--max-budget-usd", "{max_budget_usd}",
+]
+prompt_via = "stdin"
+track = "claude"
+model_provider = "anthropic"
+model_name = "claude-haiku-4-5-low"
+max_budget_usd = 3.0
+tier = "cheap"
+status = "trial"
+cost_hint = "$"
+usd_per_mtok_input = 1.00
+usd_per_mtok_cached = 0.10
+usd_per_mtok_output = 5.00
+good_for = ["recipe_tuning", "structured_sweeps"]
+avoid_for = ["novel_scripts", "repair_prone"]
+notes = "Claude Haiku 4.5 at low effort for inexpensive routine delegations."
+
+[backends.claude-opus-high]
+tool = "claude"
+command = [
+    "claude", "-p",
+    "--model", "claude-opus-4-8",
+    "--effort", "high",
+    "--output-format", "stream-json",
+    "--verbose",
+    "--permission-mode", "acceptEdits",
+    "--max-budget-usd", "{max_budget_usd}",
+]
+prompt_via = "stdin"
+track = "claude"
+model_provider = "anthropic"
+model_name = "claude-opus-4-8-high"
+max_budget_usd = 30.0
+tier = "frontier"
+status = "trial"
+cost_hint = "$$$"
+usd_per_mtok_input = 5.00
+usd_per_mtok_cached = 0.50
+usd_per_mtok_output = 25.00
+good_for = ["novel_scripts", "diagnostic_probes", "repair_prone"]
+avoid_for = ["routine_recipe_tuning", "structured_sweeps"]
+notes = "Claude Opus 4.8 at high effort for the most difficult delegated work."
 
 # ── Codex CLI ────────────────────────────────────────────────────────────────
 # Flags verified against `codex exec --help` on codex-cli 0.137.0 (2026-07-10):
@@ -118,6 +204,9 @@ model_name = "gpt-5.5-medium"
 tier = "mid"
 status = "trial"
 cost_hint = "$$"
+usd_per_mtok_input = 5.00
+usd_per_mtok_cached = 0.50
+usd_per_mtok_output = 30.00
 good_for = ["novel_scripts", "diagnostic_probes", "repair_prone"]
 notes = "Configured Codex backend: gpt-5.5 at medium reasoning; JSONL usage is parsed best-effort."
 
@@ -144,6 +233,9 @@ model_name = "gpt-5.6-luna-low"
 tier = "cheap"
 status = "trial"
 cost_hint = "$"
+usd_per_mtok_input = 1.00
+usd_per_mtok_cached = 0.10
+usd_per_mtok_output = 6.00
 good_for = ["recipe_tuning", "structured_sweeps"]
 avoid_for = ["novel_scripts", "repair_prone"]
 notes = "Fast, affordable Luna at low reasoning; use for routine recipe work and structured sweeps."
@@ -169,6 +261,9 @@ model_name = "gpt-5.6-luna-medium"
 tier = "cheap"
 status = "trial"
 cost_hint = "$"
+usd_per_mtok_input = 1.00
+usd_per_mtok_cached = 0.10
+usd_per_mtok_output = 6.00
 good_for = ["recipe_tuning", "structured_sweeps", "diagnostic_probes"]
 avoid_for = ["novel_scripts", "repair_prone"]
 notes = "Fast, affordable Luna at medium reasoning; a low-cost probe for routine and diagnostic briefs."
@@ -194,6 +289,9 @@ model_name = "gpt-5.6-luna-high"
 tier = "mid"
 status = "trial"
 cost_hint = "$$"
+usd_per_mtok_input = 1.00
+usd_per_mtok_cached = 0.10
+usd_per_mtok_output = 6.00
 good_for = ["structured_sweeps", "diagnostic_probes", "repair_prone"]
 avoid_for = ["routine_recipe_tuning"]
 notes = "Luna at high reasoning; reserve the extra effort for difficult diagnostics and repairs."
@@ -219,6 +317,9 @@ model_name = "gpt-5.6-terra-low"
 tier = "mid"
 status = "trial"
 cost_hint = "$$"
+usd_per_mtok_input = 2.50
+usd_per_mtok_cached = 0.25
+usd_per_mtok_output = 15.00
 good_for = ["recipe_tuning", "structured_sweeps", "diagnostic_probes"]
 avoid_for = ["novel_scripts", "repair_prone"]
 notes = "Balanced Terra at low reasoning; suited to routine briefs where Luna needs an escalation."
@@ -244,6 +345,9 @@ model_name = "gpt-5.6-terra-medium"
 tier = "mid"
 status = "trial"
 cost_hint = "$$"
+usd_per_mtok_input = 2.50
+usd_per_mtok_cached = 0.25
+usd_per_mtok_output = 15.00
 good_for = ["novel_scripts", "diagnostic_probes", "repair_prone"]
 avoid_for = ["routine_recipe_tuning"]
 notes = "Balanced Terra at medium reasoning; the general-purpose Codex escalation rung."
@@ -269,9 +373,78 @@ model_name = "gpt-5.6-terra-high"
 tier = "frontier"
 status = "trial"
 cost_hint = "$$$"
+usd_per_mtok_input = 2.50
+usd_per_mtok_cached = 0.25
+usd_per_mtok_output = 15.00
 good_for = ["novel_scripts", "diagnostic_probes", "repair_prone"]
 avoid_for = ["routine_recipe_tuning", "structured_sweeps"]
 notes = "Balanced Terra at high reasoning; reserve the highest requested effort for complex or repair-heavy briefs."
+
+[backends.codex-gpt-5-6-sol-low]
+tool = "codex"
+min_tool_version = "0.144.0-alpha.4"
+command = [
+    "codex", "-a", "never", "exec", "--json", "--sandbox", "workspace-write",
+    "--skip-git-repo-check", "-C", ".", "-m", "gpt-5.6-sol",
+    "-c", 'model_reasoning_effort="low"', "--color", "never", "-",
+]
+prompt_via = "stdin"
+track = "codex"
+model_provider = "openai"
+model_name = "gpt-5.6-sol-low"
+tier = "frontier"
+status = "trial"
+cost_hint = "$$$"
+usd_per_mtok_input = 5.00
+usd_per_mtok_cached = 0.50
+usd_per_mtok_output = 30.00
+good_for = ["novel_scripts", "diagnostic_probes", "repair_prone"]
+avoid_for = ["routine_recipe_tuning", "structured_sweeps"]
+notes = "Frontier Sol at low reasoning; an escalation for hard delegated work."
+
+[backends.codex-gpt-5-6-sol-medium]
+tool = "codex"
+min_tool_version = "0.144.0-alpha.4"
+command = [
+    "codex", "-a", "never", "exec", "--json", "--sandbox", "workspace-write",
+    "--skip-git-repo-check", "-C", ".", "-m", "gpt-5.6-sol",
+    "-c", 'model_reasoning_effort="medium"', "--color", "never", "-",
+]
+prompt_via = "stdin"
+track = "codex"
+model_provider = "openai"
+model_name = "gpt-5.6-sol-medium"
+tier = "frontier"
+status = "trial"
+cost_hint = "$$$"
+usd_per_mtok_input = 5.00
+usd_per_mtok_cached = 0.50
+usd_per_mtok_output = 30.00
+good_for = ["novel_scripts", "diagnostic_probes", "repair_prone"]
+avoid_for = ["routine_recipe_tuning", "structured_sweeps"]
+notes = "Frontier Sol at medium reasoning for complex delegated research."
+
+[backends.codex-gpt-5-6-sol-high]
+tool = "codex"
+min_tool_version = "0.144.0-alpha.4"
+command = [
+    "codex", "-a", "never", "exec", "--json", "--sandbox", "workspace-write",
+    "--skip-git-repo-check", "-C", ".", "-m", "gpt-5.6-sol",
+    "-c", 'model_reasoning_effort="high"', "--color", "never", "-",
+]
+prompt_via = "stdin"
+track = "codex"
+model_provider = "openai"
+model_name = "gpt-5.6-sol-high"
+tier = "frontier"
+status = "trial"
+cost_hint = "$$$$"
+usd_per_mtok_input = 5.00
+usd_per_mtok_cached = 0.50
+usd_per_mtok_output = 30.00
+good_for = ["novel_scripts", "diagnostic_probes", "repair_prone"]
+avoid_for = ["routine_recipe_tuning", "structured_sweeps"]
+notes = "Frontier Sol at high reasoning; reserve for the hardest repair-heavy work."
 
 # ── Test backend ─────────────────────────────────────────────────────────────
 # Drives a scripted delegation through the real CLI with zero LLM calls. This is

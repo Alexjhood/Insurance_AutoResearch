@@ -403,6 +403,26 @@ def test_repo_backend_registry_loads_and_validates():
         assert backend.track in backends_mod.ALLOWED_TRACKS
 
 
+@pytest.mark.parametrize(
+    ("backend_name", "rates"),
+    [
+        ("codex-gpt-5-6-luna-medium", (1.0, 0.1, 6.0)),
+        ("codex-gpt-5-6-terra-medium", (2.5, 0.25, 15.0)),
+        ("codex-gpt-5-6-sol-medium", (5.0, 0.5, 30.0)),
+        ("claude-haiku-low", (1.0, 0.1, 5.0)),
+        ("claude-sonnet-medium", (2.0, 0.2, 10.0)),
+        ("claude-opus-high", (5.0, 0.5, 25.0)),
+    ],
+)
+def test_backend_rate_card_matches_official_standard_pricing(backend_name, rates):
+    backend = load_backends()[backend_name]
+    assert (
+        backend.usd_per_mtok_input,
+        backend.usd_per_mtok_cached,
+        backend.usd_per_mtok_output,
+    ) == rates
+
+
 def test_distinct_backends_render_distinct_commands():
     """Two named backends that produce identical argv are the same backend twice.
 
@@ -1182,6 +1202,27 @@ def test_codex_usage_parser_aggregates_turns_and_tolerates_stderr(tmp_path):
         "output_tokens": 5,
         "details": {"reasoning_tokens": 3},
         "completed_turns": 2,
+    }
+
+
+def test_claude_usage_parser_normalises_cached_input(tmp_path):
+    import json
+
+    log = tmp_path / "claude.jsonl"
+    log.write_text(
+        json.dumps({"type": "assistant", "message": {"usage": {
+            "input_tokens": 100, "cache_creation_input_tokens": 20,
+            "cache_read_input_tokens": 800, "output_tokens": 30,
+        }}}) + "\n" + json.dumps({"type": "result"}) + "\n",
+        encoding="utf-8",
+    )
+    observed = adapters_mod.inspect_backend_exit("claude", log, exit_code=0)
+    assert observed.clean_exit is True
+    assert observed.terminal_event == "result"
+    assert observed.usage == {
+        "input_tokens": 920,
+        "cached_input_tokens": 800,
+        "output_tokens": 30,
     }
 
 

@@ -31,7 +31,55 @@ def inspect_backend_exit(
 
     if tool == "codex":
         return _inspect_codex_jsonl(log_path, exit_code=exit_code)
+    if tool == "claude":
+        return _inspect_claude_jsonl(log_path, exit_code=exit_code)
     return ExitObservation(clean_exit=exit_code == 0, usage={})
+
+
+def _inspect_claude_jsonl(log_path: Path, *, exit_code: int) -> ExitObservation:
+    """Aggregate Claude stream-json message usage into canonical counters."""
+
+    usage: dict[str, Any] = {}
+    malformed_lines = 0
+    terminal_event: str | None = None
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        lines = []
+
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except (TypeError, json.JSONDecodeError):
+            malformed_lines += 1
+            continue
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type") or "")
+        if event_type == "result":
+            terminal_event = event_type
+        if event_type != "assistant":
+            continue
+        message = event.get("message") if isinstance(event.get("message"), dict) else {}
+        raw = message.get("usage") if isinstance(message.get("usage"), dict) else {}
+        uncached = int(raw.get("input_tokens") or 0) + int(
+            raw.get("cache_creation_input_tokens") or 0
+        )
+        cached = int(raw.get("cache_read_input_tokens") or 0)
+        usage["input_tokens"] = int(usage.get("input_tokens") or 0) + uncached + cached
+        usage["cached_input_tokens"] = int(usage.get("cached_input_tokens") or 0) + cached
+        usage["output_tokens"] = int(usage.get("output_tokens") or 0) + int(
+            raw.get("output_tokens") or 0
+        )
+
+    return ExitObservation(
+        clean_exit=exit_code == 0,
+        usage=usage,
+        terminal_event=terminal_event,
+        malformed_lines=malformed_lines,
+    )
 
 
 def _inspect_codex_jsonl(log_path: Path, *, exit_code: int) -> ExitObservation:
