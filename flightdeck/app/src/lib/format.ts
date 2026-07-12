@@ -43,3 +43,27 @@ export function championDescriptor(experiments: { name: string; model_family: st
   if (blend) return `${blend[1].replace(/_/g, ' + ')} · ${blend[2]}/${blend[3]} blend`;
   return raw.replace(/_/g, ' ');
 }
+
+function flattenRecipe(value: unknown, prefix = '', output: Record<string, string> = {}): Record<string, string> {
+  if (value == null) return output;
+  if (Array.isArray(value)) { output[prefix] = value.join(', '); return output; }
+  if (typeof value !== 'object') { output[prefix] = String(value); return output; }
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    flattenRecipe(child, prefix ? `${prefix}.${key}` : key, output);
+  }
+  return output;
+}
+
+/** Scalar recipe changes computed from the normalized config snapshots carried by experiments. */
+export function recipeDiff(experiments: { experiment_id: string; name: string; recipe: unknown | null }[], experiment: { parent_experiment_id: string | null; name: string; recipe: unknown | null }): string[] {
+  const current = flattenRecipe(resolveRecipe(experiments, experiment));
+  if (!Object.keys(current).length) return [];
+  const parent = experiments.find(item => item.experiment_id === experiment.parent_experiment_id);
+  const previous = flattenRecipe(resolveRecipe(experiments, parent));
+  if (!Object.keys(previous).length) return [];
+  const keys = [...new Set([...Object.keys(previous), ...Object.keys(current)])].sort();
+  return keys.filter(key => previous[key] !== current[key]).map(key => {
+    const label = key.replace(/^params\./, '').replace(/^stages\./, '').replaceAll('.', ' · ').replaceAll('_', ' ');
+    return `${label} ${previous[key] ?? '∅'}→${current[key] ?? '∅'}`;
+  });
+}

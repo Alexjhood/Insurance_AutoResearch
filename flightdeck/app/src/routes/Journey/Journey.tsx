@@ -5,18 +5,21 @@ import { MetricNumber } from '../../components/MetricNumber';
 import { PageState } from '../../components/PageState';
 import { MissionTimeline } from '../../exhibits/MissionTimeline';
 import { PlayoffBracket } from '../../exhibits/PlayoffBracket';
-import { decisionKind } from '../../lib/format';
+import { decisionKind, recipeDiff } from '../../lib/format';
 import { useSnapshot } from '../../lib/data/queries';
 import type { Experiment } from '../../lib/types';
 import { useExperimentHover } from '../../lib/experimentHover';
 import './Journey.css';
+import './RecipeDiff.css';
 
-function ExperimentCard({ e, orchId, forfeited }: { e: Experiment; orchId: string; forfeited: boolean }) {
+function ExperimentCard({ e, experiments, orchId, forfeited }: { e: Experiment; experiments: Experiment[]; orchId: string; forfeited: boolean }) {
   const decision = e.comparison?.decision;
+  const diffs = recipeDiff(experiments, e);
   const { showExperiment, moveExperiment, clearExperiment, classNameFor } = useExperimentHover();
   return <article className={`experiment-card panel ${classNameFor(e.experiment_id)}`} id={`${e.delegation_id ?? 'playoff'}-x${e.cycle ?? e.seq}`} onMouseEnter={event => showExperiment(event, e)} onMouseMove={moveExperiment} onMouseLeave={clearExperiment}>
     <header><div><span className="eyebrow">Cycle {e.cycle ?? 'seed'} · {e.model_family}</span><h3>{e.name}</h3></div><Badge kind={forfeited ? 'distress' : decisionKind(decision, e.status)}>{forfeited ? 'forfeited' : decision ?? (e.is_seed ? 'seed' : 'pending')}</Badge></header>
     <p className="hypothesis">{e.proposal.hypothesis ?? 'Seed or framework-generated experiment.'}</p>
+    {diffs.length > 0 && <div className="recipe-diffs" aria-label="Recipe changes">{diffs.slice(0, 4).map(diff => <span key={diff}>{diff}</span>)}{diffs.length > 4 && <span>+{diffs.length - 4} more</span>}</div>}
     {e.proposal.change_summary && <p><b>Changed:</b> {e.proposal.change_summary}</p>}
     <div className="experiment-metrics"><span>Gini <MetricNumber value={e.metrics.gini_weighted} /></span><span>Lift <MetricNumber kind="lift" value={e.lift.vs_then_champion} /></span><span>Win rate <MetricNumber kind="percent" value={e.comparison?.fold_win_rate ?? e.screening?.win_rate ?? null} /></span><span>Calibration <MetricNumber value={e.metrics.calibration_ratio} /></span><span>Pricing loss <MetricNumber value={e.metrics.asym_pricing_loss} /></span></div>
     {e.comparison?.decision_reason_code && <p className="decision-copy"><b>{e.comparison.decision_reason_code}</b> · {e.comparison.decision_rationale}</p>}
@@ -55,7 +58,7 @@ export function Journey() {
         const experiments = s.experiments.filter(e => e.delegation_id === d.delegation_id);
         const notes = s.notes.filter(n => n.delegation_id === d.delegation_id && (n.kind === 'reflection' || n.kind === 'takeover')).sort((a, b) => a.at.localeCompare(b.at));
         const label = (d.brief.name ?? d.backend).replace(new RegExp(`^${d.delegation_id}[_ ·-]*`, 'i'), '');
-        return <div key={d.delegation_id}><section className="chapter" id={`chapter-${d.delegation_id}`}><header className="chapter-header"><span className="chapter-number">0{di + 1}</span><div><span className="eyebrow">Delegation chapter · {d.delegation_id}</span><h2>{label}</h2><p>{d.brief.direction}</p></div><Link to={`/o/${orchId}/delegations/${d.delegation_id}`}>Forensic view →</Link></header><div className="brief-card panel"><b>Mission brief</b><div className="chips">{d.brief.constraints.map(c => <span key={c}>✓ {c}</span>)}</div></div>{experiments.filter(e => !e.is_seed && !e.is_baseline).map(e => <ExperimentCard key={e.experiment_id} e={e} orchId={orchId!} forfeited={!e.comparison?.decision && d.ended_at != null} />)}</section>{notes.map((n, i) => <aside className={n.kind === 'takeover' ? 'takeover-scene panel' : 'interlude panel'} key={`${n.at}-${i}`}><Badge kind={n.kind === 'takeover' ? 'takeover' : 'reflection'}>{n.kind} · {d.delegation_id}</Badge><p>{n.text}</p></aside>)}</div>;
+        return <div key={d.delegation_id}><section className="chapter" id={`chapter-${d.delegation_id}`}><header className="chapter-header"><span className="chapter-number">0{di + 1}</span><div><span className="eyebrow">Delegation chapter · {d.delegation_id}</span><h2>{label}</h2><p>{d.brief.direction}</p></div><Link to={`/o/${orchId}/delegations/${d.delegation_id}`}>Forensic view →</Link></header><div className="brief-card panel"><b>Mission brief</b><div className="chips">{d.brief.constraints.map(c => <span key={c}>✓ {c}</span>)}</div></div>{experiments.filter(e => !e.is_seed && !e.is_baseline).map(e => <ExperimentCard key={e.experiment_id} e={e} experiments={s.experiments} orchId={orchId!} forfeited={!e.comparison?.decision && d.ended_at != null} />)}</section>{notes.map((n, i) => <aside className={n.kind === 'takeover' ? 'takeover-scene panel' : 'interlude panel'} key={`${n.at}-${i}`}><Badge kind={n.kind === 'takeover' ? 'takeover' : 'reflection'}>{n.kind} · {d.delegation_id}</Badge><p>{n.text}</p></aside>)}</div>;
       })}
       <section className="finale" id="finale"><PlayoffBracket playoff={s.playoff} experiments={s.experiments} compact />{s.notes.filter(n => !n.delegation_id && n !== plan).map((n, i) => <blockquote className="finale-note panel" key={`${n.at}-${i}`}><Badge kind="reflection">Orchestrator {n.kind}</Badge><p>{n.text}</p></blockquote>)}<Link to={`/o/${orchId}#playoff`}>Open Overview playoff →</Link></section>
     </div>

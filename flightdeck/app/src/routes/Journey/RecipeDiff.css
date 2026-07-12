@@ -1,0 +1,15 @@
+.recipe-diffs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin: var(--sp-3) 0;
+}
+
+.recipe-diffs span {
+  padding: var(--sp-1) var(--sp-2);
+  color: var(--c-localpromote);
+  background: var(--c-localpromote-dim);
+  border: 1px solid color-mix(in srgb, var(--c-localpromote) 35%, var(--border-subtle));
+  border-radius: var(--radius-sm);
+  font: var(--fs-xs) var(--font-mono);
+}
