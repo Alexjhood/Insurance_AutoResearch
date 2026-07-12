@@ -102,7 +102,11 @@ def collect_finalists(
 ) -> tuple[list[Finalist], list[dict[str, Any]]]:
     """Collect and rank eligible delegation champions from persisted reports."""
 
-    selected = list(include) if include is not None else [d.delegation_id for d in orch.delegations]
+    selected = (
+        list(include)
+        if include is not None
+        else [d.delegation_id for d in orch.delegations]
+    )
     if len(selected) != len(set(selected)):
         raise ValueError("--include contains duplicate delegation ids")
     known = {d.delegation_id: d for d in orch.delegations}
@@ -120,15 +124,21 @@ def collect_finalists(
         path = _delegation_report_file(orch, delegation)
         if not path.exists():
             exclusions.append(
-                {"delegation_id": delegation_id, "reason": "report_missing", "path": str(path)}
+                {
+                    "delegation_id": delegation_id,
+                    "reason": "report_missing",
+                    "path": str(path),
+                }
             )
             continue
         payload = read_json(path)
         champion = payload.get("champion") or {}
         distress = set((payload.get("distress") or {}).get("active") or ())
         family = str(champion.get("model_family") or "")
-        if family == "global_mean" or "champion_is_baseline" in distress or bool(
-            champion.get("champion_is_baseline")
+        if (
+            family == "global_mean"
+            or "champion_is_baseline" in distress
+            or bool(champion.get("champion_is_baseline"))
         ):
             exclusions.append(
                 {"delegation_id": delegation_id, "reason": "champion_is_baseline"}
@@ -156,11 +166,55 @@ def collect_finalists(
                 report_path=str(path),
             )
         )
+    direct_sources = {
+        (
+            item.source.track,
+            item.source.run_id,
+            item.source.experiment_id,
+        ): item.delegation_id
+        for item in finalists
+    }
+    deduped: list[Finalist] = []
+    for finalist in finalists:
+        origin = _seed_origin(finalist.source)
+        duplicate_of = direct_sources.get(origin) if origin is not None else None
+        if duplicate_of and duplicate_of != finalist.delegation_id:
+            exclusions.append(
+                {
+                    "delegation_id": finalist.delegation_id,
+                    "reason": f"duplicate_of {duplicate_of}",
+                }
+            )
+            continue
+        deduped.append(finalist)
+    finalists = deduped
     finalists.sort(key=lambda item: (item.gini_weighted, item.delegation_id))
     return finalists, exclusions
 
 
-def replay_source_for_delegation(orch: Orchestration, delegation_id: str) -> ReplaySource:
+def _seed_origin(source: ReplaySource) -> tuple[str, str, str] | None:
+    """Return the source of a replay-created experiment, when recorded."""
+
+    config = load_config(track_id=source.track, run_id=source.run_id)
+    path = _lineage_path(config)
+    if not path.exists():
+        return None
+    for replay in read_json(path).get("replays") or ():
+        if replay.get("destination_experiment_id") != source.experiment_id:
+            continue
+        origin = replay.get("source") or {}
+        if all(origin.get(key) for key in ("track", "run_id", "experiment_id")):
+            return (
+                str(origin["track"]),
+                str(origin["run_id"]),
+                str(origin["experiment_id"]),
+            )
+    return None
+
+
+def replay_source_for_delegation(
+    orch: Orchestration, delegation_id: str
+) -> ReplaySource:
     """Resolve ``from:dNN`` to that delegation's registry-backed champion."""
 
     delegation = orch.delegation(delegation_id)
@@ -169,7 +223,9 @@ def replay_source_for_delegation(orch: Orchestration, delegation_id: str) -> Rep
     config = load_config(track_id=delegation.track, run_id=delegation.run_id)
     champion = get_official_champion(config.registry_path)
     if champion is None:
-        raise ValueError(f"Delegation {delegation_id} has no official champion to seed from")
+        raise ValueError(
+            f"Delegation {delegation_id} has no official champion to seed from"
+        )
     return ReplaySource(
         track=delegation.track,
         run_id=delegation.run_id,
@@ -196,7 +252,6 @@ def replay_experiment(
         get_experiment,
         get_official_champion,
         list_artifacts,
-        list_proposals,
         record_experiment_artifacts,
     )
     from autoresearch.experiment_runner import run_experiment
@@ -218,10 +273,14 @@ def replay_experiment(
         )
     source_exp = snapshot.get("experiment")
     if not isinstance(source_exp, dict):
-        raise ValueError(f"Invalid source config snapshot at {snapshot_path}: missing experiment")
+        raise ValueError(
+            f"Invalid source config snapshot at {snapshot_path}: missing experiment"
+        )
     source_model = source_exp.get("model")
     if not isinstance(source_model, dict):
-        raise ValueError(f"Invalid source config snapshot at {snapshot_path}: missing model")
+        raise ValueError(
+            f"Invalid source config snapshot at {snapshot_path}: missing model"
+        )
     _validate_fixed_preprocessing(snapshot, source_exp, destination)
 
     replay_dir = destination.artifacts_dir / "orchestration_replay" / _safe_label(label)
@@ -253,81 +312,100 @@ def replay_experiment(
                 )
                 _append_lineage(destination, existing)
                 return existing
-        raise RuntimeError(
-            f"Incomplete replay audit already exists at {existing_audit}; "
-            "inspect the failed import before retrying"
-        )
+        if existing.get("status") != "failed":
+            raise RuntimeError(
+                f"Incomplete replay audit already exists at {existing_audit}; "
+                "inspect the failed import before retrying"
+            )
+        shutil.rmtree(replay_dir)
+    elif replay_dir.exists():
+        # Older failures could leave only the copied snapshot and no audit.
+        shutil.rmtree(replay_dir)
     replay_dir.mkdir(parents=True, exist_ok=False)
     source_snapshot_copy = replay_dir / "source_config_snapshot.json"
     shutil.copy2(snapshot_path, source_snapshot_copy)
-
-    proposals = [
-        proposal
-        for proposal in list_proposals(source_config.registry_path)
-        if proposal.get("experiment_id") == source.experiment_id
-    ]
-    source_proposal_path: Path | None = None
-    copied_proposal: Path | None = None
-    if proposals and proposals[0].get("proposal_path"):
-        source_proposal_path = Path(str(proposals[0]["proposal_path"]))
-        if source_proposal_path.exists():
-            copied_proposal = replay_dir / "source_proposal.json"
-            shutil.copy2(source_proposal_path, copied_proposal)
-
-    model = json.loads(json.dumps(source_model))
-    is_recipe = isinstance(model.get("recipe"), dict)
-    _ensure_foundation_support(model, source, destination)
-    copied_script: Path | None = None
-    if not is_recipe:
-        script_source = _source_script_path(
-            snapshot,
-            list_artifacts(source_config.registry_path, source.experiment_id),
-        )
-        if script_source is None or not script_source.exists():
-            raise FileNotFoundError(
-                f"Script finalist {source.run_ref}/{source.experiment_id} "
-                "has no readable model script"
-            )
-        if copied_proposal is None:
-            raise FileNotFoundError(
-                f"Script finalist {source.run_ref}/{source.experiment_id} "
-                "has no readable source proposal"
-            )
-        copied_script = replay_dir / "model_replay.py"
-        shutil.copy2(script_source, copied_script)
-        model.pop("model_script_path", None)
-        model["script_path"] = copied_script.name
-        model["script_sha256"] = _sha256(copied_script)
-
-    champion = get_official_champion(destination.registry_path)
-    if champion is None:
-        raise ValueError("Destination run has no official champion")
-    replay_config = json.loads(json.dumps(source_exp))
-    replay_config["experiment_name"] = _replay_experiment_name(label, source_exp)
-    replay_config["parent_experiment_id"] = champion["champion_id"]
-    replay_config["model"] = model
-    config_path = replay_dir / "experiment_config.toml"
-    config_path.write_text(_to_toml(replay_config), encoding="utf-8")
-
     audit_path = replay_dir / "replay_manifest.json"
     audit: dict[str, Any] = {
         "source": source.to_dict(),
         "destination": {"track": destination.track_id, "run_id": destination.run_id},
-        "representation": "recipe" if is_recipe else "script",
+        "status": "preparing",
+        "representation": "recipe"
+        if isinstance(source_model.get("recipe"), dict)
+        else "script",
         "source_config_snapshot": str(source_snapshot_copy),
         "source_config_sha256": _sha256(source_snapshot_copy),
-        "source_proposal": str(copied_proposal) if copied_proposal else None,
-        "source_proposal_sha256": _sha256(copied_proposal) if copied_proposal else None,
-        "copied_script": str(copied_script) if copied_script else None,
-        "copied_script_sha256": _sha256(copied_script) if copied_script else None,
+        "source_proposal": None,
+        "source_proposal_sha256": None,
+        "copied_script": None,
+        "copied_script_sha256": None,
         "destination_experiment_id": None,
     }
     write_json(audit_path, audit)
-    outputs = run_experiment(destination, config_path, output_dir=replay_dir / "experiment")
-    destination_snapshot = read_json(outputs["config_snapshot"])
-    destination_experiment_id = str(destination_snapshot["experiment_id"])
-    audit["destination_experiment_id"] = destination_experiment_id
-    write_json(audit_path, audit)
+    try:
+        source_proposal_path = _source_proposal_path(source)
+        copied_proposal: Path | None = None
+        if source_proposal_path is not None and source_proposal_path.exists():
+            copied_proposal = replay_dir / "source_proposal.json"
+            shutil.copy2(source_proposal_path, copied_proposal)
+
+        model = json.loads(json.dumps(source_model))
+        is_recipe = isinstance(model.get("recipe"), dict)
+        _ensure_foundation_support(model, source, destination)
+        copied_script: Path | None = None
+        if not is_recipe:
+            script_source = _source_script_path(
+                snapshot,
+                list_artifacts(source_config.registry_path, source.experiment_id),
+            )
+            if script_source is None or not script_source.exists():
+                raise FileNotFoundError(
+                    f"Script finalist {source.run_ref}/{source.experiment_id} "
+                    "has no readable model script"
+                )
+            if copied_proposal is None:
+                raise FileNotFoundError(
+                    f"Script finalist {source.run_ref}/{source.experiment_id} "
+                    "has no readable source proposal"
+                )
+            copied_script = replay_dir / "model_replay.py"
+            shutil.copy2(script_source, copied_script)
+            model.pop("model_script_path", None)
+            model["script_path"] = copied_script.name
+            model["script_sha256"] = _sha256(copied_script)
+
+        champion = get_official_champion(destination.registry_path)
+        if champion is None:
+            raise ValueError("Destination run has no official champion")
+        replay_config = json.loads(json.dumps(source_exp))
+        replay_config["experiment_name"] = _replay_experiment_name(label, source_exp)
+        replay_config["parent_experiment_id"] = champion["champion_id"]
+        replay_config["model"] = model
+        config_path = replay_dir / "experiment_config.toml"
+        config_path.write_text(_to_toml(replay_config), encoding="utf-8")
+
+        audit.update(
+            {
+                "source_proposal": str(copied_proposal) if copied_proposal else None,
+                "source_proposal_sha256": _sha256(copied_proposal),
+                "copied_script": str(copied_script) if copied_script else None,
+                "copied_script_sha256": _sha256(copied_script),
+            }
+        )
+        write_json(audit_path, audit)
+        outputs = run_experiment(
+            destination, config_path, output_dir=replay_dir / "experiment"
+        )
+        destination_snapshot = read_json(outputs["config_snapshot"])
+        destination_experiment_id = str(destination_snapshot["experiment_id"])
+        audit["destination_experiment_id"] = destination_experiment_id
+        audit["status"] = "completed"
+        audit.pop("failure", None)
+        write_json(audit_path, audit)
+    except Exception as exc:
+        audit["status"] = "failed"
+        audit["failure"] = {"type": type(exc).__name__, "message": str(exc)}
+        write_json(audit_path, audit)
+        raise
 
     replay_artifacts = {"orchestration_replay_manifest": audit_path}
     if copied_proposal is not None:
@@ -337,6 +415,30 @@ def replay_experiment(
     )
     _append_lineage(destination, audit)
     return audit
+
+
+def _source_proposal_path(source: ReplaySource) -> Path | None:
+    """Find a proposal directly or through a replay seed's source lineage."""
+
+    from autoresearch.experiment_registry.registry import list_proposals
+
+    seen: set[tuple[str, str, str]] = set()
+    current = source
+    while (current.track, current.run_id, current.experiment_id) not in seen:
+        seen.add((current.track, current.run_id, current.experiment_id))
+        config = load_config(track_id=current.track, run_id=current.run_id)
+        proposals = [
+            proposal
+            for proposal in list_proposals(config.registry_path)
+            if proposal.get("experiment_id") == current.experiment_id
+        ]
+        if proposals and proposals[0].get("proposal_path"):
+            return Path(str(proposals[0]["proposal_path"]))
+        origin = _seed_origin(current)
+        if origin is None:
+            return None
+        current = ReplaySource(*origin)
+    return None
 
 
 def _recipe_foundation_estimators(model: dict[str, Any]) -> set[str]:
@@ -436,6 +538,8 @@ def run_playoff(
     orchestration_id: str,
     *,
     include: Iterable[str] | None = None,
+    exclude: Iterable[str] | None = None,
+    resume: bool = False,
     auto_decide: bool = False,
 ) -> dict[str, Any]:
     """Create or resume a campaign playoff and return its durable report."""
@@ -443,14 +547,34 @@ def run_playoff(
     orch = load_orchestration(orchestration_id)
     json_path = playoff_dir(orchestration_id) / PLAYOFF_JSON
     requested_include = list(include) if include is not None else None
+    requested_exclude = list(exclude) if exclude is not None else []
+    if len(requested_exclude) != len(set(requested_exclude)):
+        raise ValueError("--exclude contains duplicate delegation ids")
+    known_ids = {delegation.delegation_id for delegation in orch.delegations}
+    unknown_exclusions = sorted(set(requested_exclude) - known_ids)
+    if unknown_exclusions:
+        raise ValueError(
+            f"Unknown delegation(s) in --exclude: {', '.join(unknown_exclusions)}"
+        )
 
     if orch.status == "completed" and json_path.exists():
         return read_json(json_path)
 
     if orch.consolidation.run_id is None:
         finalists, exclusions = collect_finalists(orch, requested_include)
+        if requested_exclude:
+            excluded = set(requested_exclude)
+            finalists = [
+                item for item in finalists if item.delegation_id not in excluded
+            ]
+            exclusions.extend(
+                {"delegation_id": item, "reason": "operator_excluded"}
+                for item in requested_exclude
+            )
         if not finalists:
-            raise ValueError("No eligible finalists: every included delegation was excluded")
+            raise ValueError(
+                "No eligible finalists: every included delegation was excluded"
+            )
         with manifest_lock(orchestration_id):
             orch = load_orchestration(orchestration_id)
             if orch.consolidation.run_id is not None:
@@ -506,7 +630,23 @@ def run_playoff(
         state["decision_mode"] = "auto" if auto_decide else "interactive"
         consolidation = _load_consolidation_config(orch)
 
-    finalists = [Finalist.from_dict(item) for item in state["finalists"]]
+    _apply_recovery_exclusions(
+        state,
+        consolidation,
+        requested_exclude=requested_exclude,
+        resume=resume,
+    )
+
+    excluded_ids = {item["delegation_id"] for item in state.get("exclusions") or ()}
+    finalists = [
+        Finalist.from_dict(item)
+        for item in state["finalists"]
+        if item["delegation_id"] not in excluded_ids
+    ]
+    if not finalists:
+        raise ValueError(
+            "No eligible finalists: every included delegation was excluded"
+        )
     if state.get("seed") is None:
         seed = seed_champion_from_source(
             consolidation,
@@ -534,8 +674,13 @@ def run_playoff(
         _sync_pairing_decisions(consolidation, state)
         _write_playoff_reports(orchestration_id, state)
 
-    while len(state["pairings"]) < len(finalists) - 1:
-        finalist = finalists[len(state["pairings"]) + 1]
+    processed = {state["seed"]["finalist"]["delegation_id"]}
+    processed.update(
+        pairing["finalist"]["delegation_id"] for pairing in state.get("pairings") or ()
+    )
+    remaining = [item for item in finalists if item.delegation_id not in processed]
+    while remaining:
+        finalist = remaining.pop(0)
         replay = replay_experiment(
             consolidation,
             finalist.source,
@@ -566,6 +711,51 @@ def run_playoff(
 
     _complete_playoff(orch, consolidation, state)
     return state
+
+
+def _apply_recovery_exclusions(
+    state: dict[str, Any],
+    consolidation: ProjectConfig,
+    *,
+    requested_exclude: list[str],
+    resume: bool,
+) -> None:
+    """Narrow an in-flight playoff and optionally skip hard-failed replays."""
+
+    exclusions = state.setdefault("exclusions", [])
+    excluded_ids = {item["delegation_id"] for item in exclusions}
+    for delegation_id in requested_exclude:
+        if delegation_id not in excluded_ids:
+            exclusions.append(
+                {"delegation_id": delegation_id, "reason": "operator_excluded"}
+            )
+            excluded_ids.add(delegation_id)
+    if not resume:
+        return
+    paired_ids = {
+        pairing["finalist"]["delegation_id"] for pairing in state.get("pairings") or ()
+    }
+    for index, finalist in enumerate(state.get("finalists") or ()):
+        delegation_id = finalist["delegation_id"]
+        if index == 0 or delegation_id in paired_ids or delegation_id in excluded_ids:
+            continue
+        label = f"challenger_{index:02d}_{delegation_id}"
+        replay_dir = (
+            consolidation.artifacts_dir / "orchestration_replay" / _safe_label(label)
+        )
+        audit_path = replay_dir / "replay_manifest.json"
+        failed = replay_dir.exists() and not audit_path.exists()
+        failure: dict[str, Any] | None = None
+        if audit_path.exists():
+            audit = read_json(audit_path)
+            failed = audit.get("status") == "failed"
+            failure = audit.get("failure")
+        if failed:
+            exclusion = {"delegation_id": delegation_id, "reason": "replay_failed"}
+            if failure:
+                exclusion["failure"] = failure
+            exclusions.append(exclusion)
+            excluded_ids.add(delegation_id)
 
 
 def _any_finalist_needs_foundation(finalists: list[Finalist]) -> bool:
@@ -727,6 +917,14 @@ def _complete_playoff(
     if champion is None:
         raise ValueError("Consolidation completed without an official champion")
     champion_id = str(champion["champion_id"])
+    if not champion.get("comparison_id"):
+        from autoresearch.milestone import evaluate_on_holdout
+
+        evaluate_on_holdout(
+            config,
+            champion_id,
+            f"orchestration_playoff_{orch.orchestration_id}",
+        )
     lineage = read_json(_lineage_path(config))
     source = next(
         (
@@ -753,16 +951,21 @@ def _append_lineage(config: ProjectConfig, replay: dict[str, Any]) -> None:
     payload = read_json(path) if path.exists() else {"replays": []}
     replays = payload.setdefault("replays", [])
     destination_id = replay.get("destination_experiment_id")
-    if not any(item.get("destination_experiment_id") == destination_id for item in replays):
+    if not any(
+        item.get("destination_experiment_id") == destination_id for item in replays
+    ):
         replays.append(replay)
     write_json(path, payload)
 
 
 def _lineage_path(config: ProjectConfig) -> Path:
-    return config.artifacts_dir / "orchestration_replay" / "lineage.json"
+    artifacts_dir = getattr(config, "artifacts_dir", Path(config.registry_path).parent)
+    return artifacts_dir / "orchestration_replay" / "lineage.json"
 
 
-def _validate_replay_compatibility(source: ProjectConfig, destination: ProjectConfig) -> None:
+def _validate_replay_compatibility(
+    source: ProjectConfig, destination: ProjectConfig
+) -> None:
     if source.dataset_name != destination.dataset_name:
         raise ValueError(
             f"Cannot replay across datasets: source={source.dataset_name}, "
@@ -888,13 +1091,17 @@ def _render_markdown(state: dict[str, Any]) -> str:
         for name, passed in (evidence.get("standard_checks") or {}).items():
             lines.append(f"| `{name}` | {'pass' if passed else 'FAIL'} |")
         guardrail = evidence.get("guardrail") or {}
-        lines.append(f"| `hard_guardrails` | {'pass' if guardrail.get('passed') else 'FAIL'} |")
+        lines.append(
+            f"| `hard_guardrails` | {'pass' if guardrail.get('passed') else 'FAIL'} |"
+        )
         lines.append("")
     lines.extend(["## Final champion lineage", ""])
     lineage = state.get("final_champion_lineage")
     if lineage:
         source = lineage.get("source") or {}
-        lines.append(f"Consolidation experiment: `{lineage['consolidation_experiment_id']}`")
+        lines.append(
+            f"Consolidation experiment: `{lineage['consolidation_experiment_id']}`"
+        )
         lines.append(
             f"Origin: delegation `{source.get('delegation_id')}`, "
             f"`{source.get('track')}/{source.get('run_id')}/{source.get('experiment_id')}`"

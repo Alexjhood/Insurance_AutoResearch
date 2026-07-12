@@ -1074,10 +1074,17 @@ def _orchestrate_playoff(args) -> int:
         include = [item.strip() for item in args.include.split(",") if item.strip()]
         if not include:
             parser.error("--include must name at least one delegation")
+    exclude = None
+    if args.exclude:
+        exclude = [item.strip() for item in args.exclude.split(",") if item.strip()]
+        if not exclude:
+            parser.error("--exclude must name at least one delegation")
     try:
         result = run_playoff(
             resolve_orchestration_id(args.orchestration_id),
             include=include,
+            exclude=exclude,
+            resume=args.resume,
             auto_decide=args.auto_decide,
         )
     except (ValueError, KeyError, FileNotFoundError, RuntimeError) as exc:
@@ -1606,6 +1613,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--include",
         default=None,
         help="Comma-separated delegation ids to include (defaults to all).",
+    )
+    orchestrate_playoff.add_argument(
+        "--exclude",
+        default=None,
+        help="Comma-separated delegation ids to exclude; may narrow an active playoff.",
+    )
+    orchestrate_playoff.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume and exclude finalists whose replay previously hard-failed.",
     )
     playoff_mode = orchestrate_playoff.add_mutually_exclusive_group()
     playoff_mode.add_argument(

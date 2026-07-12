@@ -132,7 +132,9 @@ def test_shared_replay_handles_recipe_and_copies_script_plus_proposal(
         encoding="utf-8",
     )
     proposal = source_dir / "script_proposal.json"
-    write_json(proposal, {"experiment_name": "script_finalist", "scientific": "audit me"})
+    write_json(
+        proposal, {"experiment_name": "script_finalist", "scientific": "audit me"}
+    )
     script_snapshot = {
         "target_mode": "burning_cost",
         "model_script_path": str(script),
@@ -177,6 +179,29 @@ def test_shared_replay_handles_recipe_and_copies_script_plus_proposal(
         "script_proposal",
         "completed",
         experiment_id="script_source",
+    )
+    _record_experiment(
+        source_registry,
+        source_dir,
+        "script_seed_replay",
+        family="scripted_challenger",
+        snapshot=script_snapshot,
+        artifacts={"model_script": script},
+    )
+    source_lineage = source_dir / "orchestration_replay" / "lineage.json"
+    source_lineage.parent.mkdir(parents=True)
+    write_json(
+        source_lineage,
+        {
+            "replays": [
+                {
+                    "destination_experiment_id": "script_seed_replay",
+                    "source": ReplaySource(
+                        "claude", "20260710T120001Z", "script_source"
+                    ).to_dict(),
+                }
+            ]
+        },
     )
 
     _record_experiment(
@@ -258,25 +283,141 @@ def test_shared_replay_handles_recipe_and_copies_script_plus_proposal(
         ReplaySource("claude", "20260710T120001Z", "script_source", "d02", "orch"),
         label="script_d02",
     )
+    seed_script_replay = playoff_mod.replay_experiment(
+        destination_config,
+        ReplaySource("claude", "20260710T120001Z", "script_seed_replay", "d03", "orch"),
+        label="script_seed_d03",
+    )
 
     assert recipe_replay["representation"] == "recipe"
-    assert recovered_recipe["destination_experiment_id"] == recipe_replay[
-        "destination_experiment_id"
-    ]
+    assert (
+        recovered_recipe["destination_experiment_id"]
+        == recipe_replay["destination_experiment_id"]
+    )
     assert executed[0]["model"]["recipe"]["estimator"] == "lightgbm"
     assert script_replay["representation"] == "script"
     assert executed[1]["model"]["script_path"] == "model_replay.py"
-    copied_script = destination_dir / "orchestration_replay" / "script_d02" / "model_replay.py"
-    copied_proposal = (
-        destination_dir
-        / "orchestration_replay"
-        / "script_d02"
-        / "source_proposal.json"
+    copied_script = (
+        destination_dir / "orchestration_replay" / "script_d02" / "model_replay.py"
     )
-    assert copied_script.read_text(encoding="utf-8") == script.read_text(encoding="utf-8")
+    copied_proposal = (
+        destination_dir / "orchestration_replay" / "script_d02" / "source_proposal.json"
+    )
+    assert copied_script.read_text(encoding="utf-8") == script.read_text(
+        encoding="utf-8"
+    )
     assert read_json(copied_proposal)["scientific"] == "audit me"
+    assert seed_script_replay["representation"] == "script"
+    assert (
+        read_json(
+            destination_dir
+            / "orchestration_replay"
+            / "script_seed_d03"
+            / "source_proposal.json"
+        )["scientific"]
+        == "audit me"
+    )
     lineage = read_json(destination_dir / "orchestration_replay" / "lineage.json")
-    assert [item["source"]["delegation_id"] for item in lineage["replays"]] == ["d01", "d02"]
+    assert [item["source"]["delegation_id"] for item in lineage["replays"]] == [
+        "d01",
+        "d02",
+        "d03",
+    ]
+
+
+def test_failed_replay_writes_audit_and_snapshot_only_directory_is_retriable(
+    tmp_path, monkeypatch
+):
+    from autoresearch.experiment_registry.schema import init_registry
+    import autoresearch.experiment_runner as runner_mod
+
+    source_dir = tmp_path / "source"
+    destination_dir = tmp_path / "destination"
+    source_dir.mkdir()
+    destination_dir.mkdir()
+    source_registry = source_dir / "registry.sqlite"
+    destination_registry = destination_dir / "registry.sqlite"
+    init_registry(source_registry)
+    init_registry(destination_registry)
+    snapshot = {
+        "target_mode": "burning_cost",
+        "experiment": {
+            "experiment_name": "recipe",
+            "model_family": "recipe",
+            "target_strategy": "direct_pure_premium",
+            "model": {"recipe": {"structure": "direct"}},
+        },
+    }
+    _record_experiment(
+        source_registry, source_dir, "source", family="recipe", snapshot=snapshot
+    )
+    _record_experiment(
+        destination_registry,
+        destination_dir,
+        "baseline",
+        family="global_mean",
+        snapshot=snapshot,
+    )
+    _set_champion(destination_registry, "baseline")
+    source_config = SimpleNamespace(
+        dataset_name="french_motor",
+        target_mode="burning_cost",
+        registry_path=source_registry,
+        artifacts_dir=source_dir,
+        track_id="claude",
+        run_id="source_run",
+    )
+    destination_config = SimpleNamespace(
+        dataset_name="french_motor",
+        target_mode="burning_cost",
+        registry_path=destination_registry,
+        artifacts_dir=destination_dir,
+        track_id="claude",
+        run_id="destination_run",
+    )
+    monkeypatch.setattr(playoff_mod, "load_config", lambda **kwargs: source_config)
+    replay_dir = destination_dir / "orchestration_replay" / "retry"
+    replay_dir.mkdir(parents=True)
+    write_json(replay_dir / "source_config_snapshot.json", snapshot)
+
+    monkeypatch.setattr(
+        runner_mod,
+        "run_experiment",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    with pytest.raises(RuntimeError, match="boom"):
+        playoff_mod.replay_experiment(
+            destination_config,
+            ReplaySource("claude", "source_run", "source"),
+            label="retry",
+        )
+    audit = read_json(replay_dir / "replay_manifest.json")
+    assert audit["status"] == "failed"
+    assert audit["failure"]["message"] == "boom"
+
+    def successful_run(config, config_path, *, output_dir):
+        output_dir.mkdir(parents=True)
+        output = output_dir / "config_snapshot.json"
+        write_json(
+            output, {"experiment_id": "replayed", "experiment": snapshot["experiment"]}
+        )
+        _record_experiment(
+            destination_registry,
+            output_dir,
+            "replayed",
+            family="recipe",
+            snapshot=read_json(output),
+        )
+        return {"config_snapshot": output}
+
+    monkeypatch.setattr(runner_mod, "run_experiment", successful_run)
+    replay = playoff_mod.replay_experiment(
+        destination_config,
+        ReplaySource("claude", "source_run", "source"),
+        label="retry",
+    )
+    assert replay["status"] == "completed"
+    assert replay["destination_experiment_id"] == "replayed"
 
 
 def test_brief_seed_uses_shared_replay_path(tmp_path, monkeypatch):
@@ -306,10 +447,14 @@ def test_brief_seed_uses_shared_replay_path(tmp_path, monkeypatch):
         ),
     )
     orch = SimpleNamespace(
-        dataset="french_motor", target_mode="burning_cost", orchestration_id="20260710T120000Z"
+        dataset="french_motor",
+        target_mode="burning_cost",
+        orchestration_id="20260710T120000Z",
     )
     monkeypatch.setattr(spawner_mod, "load_config", lambda **kwargs: config)
-    monkeypatch.setattr("autoresearch.bootstrap.bootstrap_track", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "autoresearch.bootstrap.bootstrap_track", lambda *args, **kwargs: None
+    )
     calls = []
     monkeypatch.setattr(
         playoff_mod,
@@ -346,7 +491,14 @@ def _playoff_fixture(tmp_path: Path, monkeypatch):
         ("d03", "20260710T140103Z", "recipe", "strong", 0.30, False),
         ("d04", "20260710T140104Z", "global_mean", "baseline", 0.00, True),
     )
-    for delegation_id, run_id, family, experiment_id, gini, is_baseline in finalist_specs:
+    for (
+        delegation_id,
+        run_id,
+        family,
+        experiment_id,
+        gini,
+        is_baseline,
+    ) in finalist_specs:
         report_path = manifest_mod.report_path(orch.orchestration_id, delegation_id)
         write_json(
             report_path,
@@ -357,9 +509,7 @@ def _playoff_fixture(tmp_path: Path, monkeypatch):
                     "model_family": family,
                     "gini_weighted": gini,
                 },
-                "distress": {
-                    "active": ["champion_is_baseline"] if is_baseline else []
-                },
+                "distress": {"active": ["champion_is_baseline"] if is_baseline else []},
             },
         )
         orch = add_delegation(
@@ -406,7 +556,9 @@ def _playoff_fixture(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         playoff_mod, "_create_consolidation_run", lambda *args, **kwargs: consolidation
     )
-    monkeypatch.setattr(playoff_mod, "_load_consolidation_config", lambda orch: consolidation)
+    monkeypatch.setattr(
+        playoff_mod, "_load_consolidation_config", lambda orch: consolidation
+    )
     monkeypatch.setattr(
         comparison_runner, "_refresh_decision_outputs", lambda *args, **kwargs: None
     )
@@ -513,7 +665,9 @@ def _playoff_fixture(tmp_path: Path, monkeypatch):
 def test_interactive_playoff_stops_at_each_pending_decision(
     orchestrations_root, tmp_path, monkeypatch
 ):
-    orch, consolidation, order, milestone_calls = _playoff_fixture(tmp_path, monkeypatch)
+    orch, consolidation, order, milestone_calls = _playoff_fixture(
+        tmp_path, monkeypatch
+    )
 
     first = playoff_mod.run_playoff(orch.orchestration_id)
     assert first["status"] == "consolidating"
@@ -539,12 +693,18 @@ def test_interactive_playoff_stops_at_each_pending_decision(
 def test_auto_playoff_orders_finalists_reports_lineage_and_calls_promotion_hook(
     orchestrations_root, tmp_path, monkeypatch
 ):
-    orch, _consolidation, order, milestone_calls = _playoff_fixture(tmp_path, monkeypatch)
+    orch, _consolidation, order, milestone_calls = _playoff_fixture(
+        tmp_path, monkeypatch
+    )
 
     result = playoff_mod.run_playoff(orch.orchestration_id, auto_decide=True)
 
     assert result["status"] == "completed"
-    assert [item["delegation_id"] for item in result["finalists"]] == ["d01", "d02", "d03"]
+    assert [item["delegation_id"] for item in result["finalists"]] == [
+        "d01",
+        "d02",
+        "d03",
+    ]
     assert result["exclusions"] == [
         {"delegation_id": "d04", "reason": "champion_is_baseline"}
     ]
@@ -571,13 +731,111 @@ def test_auto_playoff_orders_finalists_reports_lineage_and_calls_promotion_hook(
     assert "Final champion lineage" in markdown
 
 
-def test_include_limits_the_ranked_finalist_set(orchestrations_root, tmp_path, monkeypatch):
-    orch, _consolidation, _order, _milestone_calls = _playoff_fixture(tmp_path, monkeypatch)
+def test_include_limits_the_ranked_finalist_set(
+    orchestrations_root, tmp_path, monkeypatch
+):
+    orch, _consolidation, _order, _milestone_calls = _playoff_fixture(
+        tmp_path, monkeypatch
+    )
 
     finalists, exclusions = playoff_mod.collect_finalists(orch, ["d03", "d01"])
 
     assert [item.delegation_id for item in finalists] == ["d01", "d03"]
     assert exclusions == []
+
+
+def test_collect_finalists_excludes_seed_replay_duplicate_and_renders_reason(
+    orchestrations_root, tmp_path, monkeypatch
+):
+    orch, _consolidation, _order, _milestone_calls = _playoff_fixture(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(
+        playoff_mod,
+        "_seed_origin",
+        lambda source: (
+            ("claude", "20260710T140101Z", "weak")
+            if source.delegation_id == "d02"
+            else None
+        ),
+    )
+
+    finalists, exclusions = playoff_mod.collect_finalists(orch)
+
+    assert [item.delegation_id for item in finalists] == ["d01", "d03"]
+    assert {"delegation_id": "d02", "reason": "duplicate_of d01"} in exclusions
+    markdown = playoff_mod._render_markdown(
+        {
+            "orchestration_id": orch.orchestration_id,
+            "status": "consolidating",
+            "decision_mode": "interactive",
+            "finalists": [item.to_dict() for item in finalists],
+            "exclusions": exclusions,
+            "pairings": [],
+            "final_champion_lineage": None,
+        }
+    )
+    assert "`d02`: duplicate_of d01" in markdown
+
+
+def test_exclude_after_start_completes_with_current_promoted_champion(
+    orchestrations_root, tmp_path, monkeypatch
+):
+    orch, consolidation, _order, milestone_calls = _playoff_fixture(
+        tmp_path, monkeypatch
+    )
+    first = playoff_mod.run_playoff(orch.orchestration_id)
+    playoff_mod._record_playoff_decision(
+        consolidation,
+        first["pairings"][0]["comparison_id"],
+        decision="promote",
+        rationale="Fixture promotion.",
+        reason_code="clear_win",
+    )
+
+    result = playoff_mod.run_playoff(orch.orchestration_id, exclude=["d03"])
+
+    assert result["status"] == "completed"
+    assert {"delegation_id": "d03", "reason": "operator_excluded"} in result[
+        "exclusions"
+    ]
+    assert result["final_champion_lineage"]["source"]["delegation_id"] == "d02"
+    assert load_orchestration(orch.orchestration_id).status == "completed"
+    assert milestone_calls == [("replayed_d02", "cmp_replayed_d02")]
+
+
+def test_resume_excludes_a_hard_failed_replay_and_completes(
+    orchestrations_root, tmp_path, monkeypatch
+):
+    orch, consolidation, _order, milestone_calls = _playoff_fixture(
+        tmp_path, monkeypatch
+    )
+    first = playoff_mod.run_playoff(orch.orchestration_id)
+    playoff_mod._record_playoff_decision(
+        consolidation,
+        first["pairings"][0]["comparison_id"],
+        decision="promote",
+        rationale="Fixture promotion.",
+        reason_code="clear_win",
+    )
+    failed_dir = (
+        consolidation.artifacts_dir / "orchestration_replay" / "challenger_02_d03"
+    )
+    failed_dir.mkdir(parents=True)
+    write_json(
+        failed_dir / "replay_manifest.json",
+        {"status": "failed", "failure": {"type": "RuntimeError", "message": "boom"}},
+    )
+
+    result = playoff_mod.run_playoff(orch.orchestration_id, resume=True)
+
+    assert result["status"] == "completed"
+    assert any(
+        item["delegation_id"] == "d03" and item["reason"] == "replay_failed"
+        for item in result["exclusions"]
+    )
+    assert result["final_champion_lineage"]["source"]["delegation_id"] == "d02"
+    assert milestone_calls == [("replayed_d02", "cmp_replayed_d02")]
 
 
 def test_auto_decide_requires_checks_advisory_and_guardrail_all_to_pass():
@@ -598,7 +856,9 @@ def test_auto_decide_requires_checks_advisory_and_guardrail_all_to_pass():
     }
     assert playoff_mod._gate_evidence(failed_check)["all_standard_gates_pass"] is False
     failed_guardrail = {**base, "guardrail_result": {"passed": False}}
-    assert playoff_mod._gate_evidence(failed_guardrail)["all_standard_gates_pass"] is False
+    assert (
+        playoff_mod._gate_evidence(failed_guardrail)["all_standard_gates_pass"] is False
+    )
 
 
 def test_replay_rejects_different_fixed_preprocessing():
@@ -624,23 +884,36 @@ def test_playoff_cli_modes_and_include_are_wired(monkeypatch, capsys):
 
     parser = cli.build_parser()
     assert parser.parse_args(["orchestrate", "playoff"]).auto_decide is False
-    assert parser.parse_args(["orchestrate", "playoff", "--interactive"]).auto_decide is False
-    assert parser.parse_args(["orchestrate", "playoff", "--auto-decide"]).auto_decide is True
+    assert (
+        parser.parse_args(["orchestrate", "playoff", "--interactive"]).auto_decide
+        is False
+    )
+    assert (
+        parser.parse_args(["orchestrate", "playoff", "--auto-decide"]).auto_decide
+        is True
+    )
+    recovery = parser.parse_args(
+        ["orchestrate", "playoff", "--exclude", "d09", "--resume"]
+    )
+    assert recovery.exclude == "d09"
+    assert recovery.resume is True
 
     captured = {}
-    monkeypatch.setattr(manifest_mod, "resolve_orchestration_id", lambda value: "20260710T140000Z")
+    monkeypatch.setattr(
+        manifest_mod, "resolve_orchestration_id", lambda value: "20260710T140000Z"
+    )
     monkeypatch.setattr(
         playoff_mod,
         "run_playoff",
-        lambda orchestration_id, **kwargs: captured.update(
-            {"orchestration_id": orchestration_id, **kwargs}
-        )
-        or {
-            "orchestration_id": orchestration_id,
-            "status": "completed",
-            "consolidation": {"track": "claude", "run_id": "20260710T150000Z"},
-            "pairings": [],
-        },
+        lambda orchestration_id, **kwargs: (
+            captured.update({"orchestration_id": orchestration_id, **kwargs})
+            or {
+                "orchestration_id": orchestration_id,
+                "status": "completed",
+                "consolidation": {"track": "claude", "run_id": "20260710T150000Z"},
+                "pairings": [],
+            }
+        ),
     )
     args = parser.parse_args(
         ["orchestrate", "playoff", "--include", "d03,d01", "--auto-decide"]
@@ -650,6 +923,8 @@ def test_playoff_cli_modes_and_include_are_wired(monkeypatch, capsys):
     assert captured == {
         "orchestration_id": "20260710T140000Z",
         "include": ["d03", "d01"],
+        "exclude": None,
+        "resume": False,
         "auto_decide": True,
     }
     assert '"status": "completed"' in capsys.readouterr().out
