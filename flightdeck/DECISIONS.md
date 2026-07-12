@@ -113,3 +113,24 @@ One line per decision, newest phase last.
   stage groups into cached/uncached/output/reasoning instead, which also carries
   the §6.4 headline fact (>90% cache hits, input ≫ output); per-experiment burn
   lives in delegation mode where `ExperimentUsage` exists.
+
+## Post-build review (2026-07-12)
+
+- **Journey interludes render after their chapter.** Orchestrator
+  reflection/takeover notes describe a delegation's outcome, so they now render
+  as interludes following that delegation's chapter (chronological within the
+  delegation); previously they rendered before it, d01's reflection was dropped
+  by a `di>0` guard, and the campaign-level playoff decision note never
+  rendered (it now appears in the finale).
+- **Forfeited detection is data-driven.** An undecided experiment shows
+  `forfeited` when its delegation has ended (`ended_at` set), `pending`
+  otherwise — replacing a hardcoded `d02` special case.
+- **Champion descriptor.** The Overview hero and playoff finalists derive a
+  recipe one-liner (`estimator · objective · encoding`). Seeds carry no recipe,
+  so it resolves via the longest recipe-bearing experiment whose name suffixes
+  the seed's name (seed/consolidation names embed the source experiment name).
+- **Static export is a single inlined file.** Browsers block external module
+  scripts and dynamic `import()` from `file://`, so the export uses a dedicated
+  single-chunk build (`npm run build:export` → `dist-export/`) and inlines JS +
+  CSS into `index.html`. Payload injection anchors on the LAST `</head>`
+  because the inlined bundle contains that literal string (DOMPurify).

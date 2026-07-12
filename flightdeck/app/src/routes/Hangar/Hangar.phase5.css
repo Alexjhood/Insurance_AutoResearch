@@ -9,3 +9,10 @@
 .league-rank { display: inline-block; min-width: 32px; margin-right: var(--sp-2); color: var(--text-faint); }
 .empty-state { padding: var(--sp-6); color: var(--text-secondary); text-align: center; }
 .empty-state h2,.empty-state h3 { margin-top: 0; color: var(--text-primary); }
+.spark-fill-top { stop-color: var(--accent); stop-opacity: 0.28; }
+.spark-fill-bottom { stop-color: var(--accent); stop-opacity: 0.02; }
+.spark-dot { fill: var(--accent); }
+.scatter-legend { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(--text-secondary); }
+.scatter-legend span { display: inline-flex; align-items: center; gap: var(--sp-1); }
+.scatter-legend i { width: 10px; height: 10px; border-radius: 50%; }
+.scatter text.tick { font-family: var(--font-mono); }

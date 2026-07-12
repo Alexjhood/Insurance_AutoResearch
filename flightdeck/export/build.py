@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import shutil
 import subprocess
 from datetime import UTC, datetime
@@ -33,6 +34,35 @@ def _script(script_id: str, value: object, **attributes: str) -> str:
     return f'<script type="application/json" id="{script_id}"{suffix}>{_json_for_script(value)}</script>'
 
 
+def _inline_bundle(destination: Path, html: str) -> str:
+    """Inline the single-chunk JS/CSS bundle into index.html.
+
+    Browsers block module scripts and dynamic import() from file:// (the page
+    origin is null, so every asset fetch fails CORS). Inlining makes the export
+    a genuinely self-contained page.
+    """
+    pattern = re.compile(
+        r'<script type="module"[^>]*src="\./(assets/[^"]+\.js)"></script>'
+        r'|<link rel="stylesheet"[^>]*href="\./(assets/[^"]+\.css)">'
+    )
+
+    def replace(match: re.Match[str]) -> str:
+        js_rel, css_rel = match.group(1), match.group(2)
+        if js_rel:
+            body = (destination / js_rel).read_text(encoding="utf-8").replace("</script", "<\\/script")
+            return f'<script type="module">{body}</script>'
+        body = (destination / css_rel).read_text(encoding="utf-8").replace("</style", "<\\/style")
+        return f"<style>{body}</style>"
+
+    inlined = pattern.sub(replace, html)
+    assets = destination / "assets"
+    remaining = [p.name for p in assets.rglob("*") if p.is_file() and p.suffix not in {".js", ".css", ".map"}]
+    if remaining:
+        raise ValueError(f"Export bundle references non-inlinable assets: {remaining}")
+    shutil.rmtree(assets)
+    return inlined
+
+
 def build_export(
     orchestration_id: str,
     *,
@@ -53,12 +83,14 @@ def build_export(
         raise FileNotFoundError(f"Snapshot index not found: {index_path}")
 
     app = flightdeck / "app"
-    dist = app / "dist"
+    dist = app / "dist-export"
     if build_app:
-        log("Building Flight Deck application...")
-        subprocess.run(["npm", "run", "build"], cwd=app, check=True)
+        log("Building Flight Deck export bundle...")
+        subprocess.run(["npm", "run", "build:export"], cwd=app, check=True)
     if not (dist / "index.html").is_file():
-        raise FileNotFoundError("flightdeck/app/dist is missing; build the app or omit --skip-app-build")
+        raise FileNotFoundError(
+            "flightdeck/app/dist-export is missing; build the app (npm run build:export) or omit --skip-app-build"
+        )
 
     destination = (out or flightdeck / "export" / "out" / orchestration_id).resolve()
     if destination.exists():
@@ -102,7 +134,12 @@ def build_export(
 
     html_path = destination / "index.html"
     html = html_path.read_text(encoding="utf-8")
-    html = html.replace("</head>", "\n".join(tags) + "\n</head>")
+    html = _inline_bundle(destination, html)
+    # Inject before the LAST </head>: the inlined JS bundle contains the literal
+    # string "</head>" (e.g. in DOMPurify), and the document's real close tag is
+    # the final occurrence.
+    head_close = html.rindex("</head>")
+    html = html[:head_close] + "\n".join(tags) + "\n" + html[head_close:]
     html_path.write_text(html, encoding="utf-8")
 
     archive_base = destination.parent / f"{destination.name}-flightdeck"

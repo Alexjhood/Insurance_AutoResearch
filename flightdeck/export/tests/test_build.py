@@ -9,10 +9,17 @@ from flightdeck.export.build import MAX_INLINE_FILE_BYTES, _json_for_script, bui
 
 
 def _fake_dist(root: Path) -> None:
-    dist = root / "flightdeck" / "app" / "dist"
+    dist = root / "flightdeck" / "app" / "dist-export"
     (dist / "assets").mkdir(parents=True)
-    (dist / "index.html").write_text('<div id="root"></div></head>', encoding="utf-8")
-    (dist / "assets" / "app.js").write_text("export {};", encoding="utf-8")
+    (dist / "index.html").write_text(
+        '<head><script type="module" crossorigin src="./assets/app.js"></script>\n'
+        '<link rel="stylesheet" crossorigin href="./assets/app.css"></head><div id="root"></div>',
+        encoding="utf-8",
+    )
+    # The "</head>" string mimics DOMPurify's bundled markup constants: payload
+    # injection must target the document's real head close, not this one.
+    (dist / "assets" / "app.js").write_text('const closer = "</head>"; export {};', encoding="utf-8")
+    (dist / "assets" / "app.css").write_text("body{}", encoding="utf-8")
 
 
 def test_static_export_embeds_snapshot_telemetry_and_small_files(tmp_path: Path) -> None:
@@ -28,6 +35,13 @@ def test_static_export_embeds_snapshot_telemetry_and_small_files(tmp_path: Path)
     assert f'id="fd-embedded-telemetry-{ORCH_ID}-d01"' in html
     assert f'id="fd-embedded-files-{ORCH_ID}"' in html
     assert archive.is_file()
+    # file:// blocks external module scripts, so the bundle must be inlined.
+    assert '<script type="module">const closer = "</head>"; export {};</script>' in html
+    assert "<style>body{}</style>" in html
+    assert 'src="./assets/' not in html
+    assert not (folder / "assets").exists()
+    # Embedded payloads land in the real head, after the inlined bundle.
+    assert html.index('id="fd-embedded-index"') > html.index("export {};")
 
 
 def test_large_file_is_marked_not_included(tmp_path: Path) -> None:

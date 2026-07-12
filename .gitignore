@@ -35,5 +35,6 @@ data/raw/*
 flightdeck/snapshots/
 flightdeck/app/node_modules/
 flightdeck/app/dist/
+flightdeck/app/dist-export/
 flightdeck/export/out/
 flightdeck/etl/**/__pycache__/

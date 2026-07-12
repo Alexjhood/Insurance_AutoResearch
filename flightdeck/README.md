@@ -71,8 +71,10 @@ This creates both:
 - `flightdeck/export/out/20260711T164959Z/index.html`
 - `flightdeck/export/out/20260711T164959Z-flightdeck.zip`
 
-Open `index.html` directly in a browser. The snapshot and delegation telemetry
-are embedded in the page; no API server or network connection is required.
+Open `index.html` directly in a browser. It is a single self-contained file:
+the app bundle, snapshot, and delegation telemetry are all inlined (browsers
+block external module scripts from `file://`, so nothing loads from disk
+beside the page itself); no API server or network connection is required.
 Evidence files smaller than 512 KB are embedded. Larger files remain listed and
 show a clear not-included message when opened.
 
@@ -82,6 +84,9 @@ Use a custom output directory or reuse an existing frontend build with:
 .venv/bin/python -m flightdeck.export 20260711T164959Z --out /tmp/flightdeck-report
 .venv/bin/python -m flightdeck.export 20260711T164959Z --skip-app-build
 ```
+
+`--skip-app-build` reuses `flightdeck/app/dist-export/` (the single-chunk
+bundle built by `npm run build:export`), not the regular `dist/`.
 
 ## Troubleshooting
 

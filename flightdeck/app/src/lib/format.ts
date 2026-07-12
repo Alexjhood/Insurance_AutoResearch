@@ -3,3 +3,25 @@ export function duration(minutes: number | null) { if (minutes == null) return '
 export function dateTime(value: string | null) { return value ? new Date(value).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '—'; }
 export function totalTokens(tokens: { input: number; output: number; reasoning: number }) { return tokens.input + tokens.output + tokens.reasoning; }
 export function decisionKind(decision: string | null | undefined, status?: string) { if (decision === 'promote' || decision === 'local_promote' || decision === 'reject') return decision; return status === 'completed' ? 'distress' : 'takeover'; }
+
+interface RecipeShape { estimator?: string; objective?: string; encoding?: string }
+/** One-line human descriptor for a recipe, e.g. "hist_gbm · poisson · ordinal". */
+export function recipeSummary(recipe: unknown): string | null {
+  if (!recipe || typeof recipe !== 'object') return null;
+  const r = recipe as RecipeShape;
+  const parts = [r.estimator, r.objective, r.encoding === 'native_categorical' ? 'native cat' : r.encoding?.replace('_', ' ')].filter(Boolean);
+  return parts.length ? parts.join(' · ') : null;
+}
+/** Seed/consolidation experiments carry no recipe; their name embeds the source experiment's
+ *  name as a suffix (e.g. "…_seed_d05_hist_gbm_poisson_ordinal"). Resolve to the longest
+ *  recipe-bearing experiment whose name the target's name ends with. */
+export function resolveRecipe(experiments: { name: string; recipe: unknown | null }[], exp: { name: string; recipe: unknown | null } | undefined): unknown | null {
+  if (!exp) return null;
+  if (exp.recipe) return exp.recipe;
+  let best: { name: string; recipe: unknown | null } | null = null;
+  for (const source of experiments) {
+    if (!source.recipe || !exp.name.endsWith(source.name)) continue;
+    if (!best || source.name.length > best.name.length) best = source;
+  }
+  return best?.recipe ?? null;
+}

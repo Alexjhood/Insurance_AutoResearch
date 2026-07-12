@@ -24,7 +24,7 @@ export function AppShell() {
       while (true) {
         const { done, value } = await reader.read(); if (done) break; pending += decoder.decode(value, { stream: true });
         const events = pending.split('\n\n'); pending = events.pop() ?? '';
-        for (const event of events) { const data = event.split('\n').find(line => line.startsWith('data: ')); if (data) { const parsed = JSON.parse(data.slice(6)) as {message?: string; refresh?: boolean}; setRebuild(parsed.message ?? 'Rebuilding…'); if (parsed.refresh) await queryClient.invalidateQueries({ queryKey: ['index'] }); } }
+        for (const event of events) { const data = event.split('\n').find(line => line.startsWith('data: ')); if (data) { const parsed = JSON.parse(data.slice(6)) as {message?: string; refresh?: boolean}; setRebuild(parsed.message ?? 'Rebuilding…'); if (parsed.refresh) await queryClient.invalidateQueries(); } }
       }
     } catch (error) { setRebuild(error instanceof Error ? error.message : 'Rebuild failed'); return; }
     window.setTimeout(() => setRebuild(null), 2500);
