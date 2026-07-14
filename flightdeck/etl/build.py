@@ -31,6 +31,7 @@ from .schema import (
     Lift,
     Snapshot,
     SnapshotIndex,
+    SubagentSummary,
     TelemetryByDelegation,
     TelemetrySummary,
     TelemetryTotals,
@@ -45,7 +46,9 @@ from .readers import files as files_reader
 from .readers import orchestration as orch_reader
 from .readers import playoff as playoff_reader
 from .readers import registry as registry_reader
+from .readers import solo as solo_reader
 from .readers import telemetry as telemetry_reader
+from .cost import compute_run_cost, load_pricing_index
 from .util import Warnings, load_json, parse_ts, ts_key
 
 
@@ -69,6 +72,14 @@ def snapshots_dir(repo_root: Path) -> Path:
 
 def orchestrations_dir(repo_root: Path) -> Path:
     return repo_root / "artifacts" / "orchestrations"
+
+
+def tracks_dir(repo_root: Path) -> Path:
+    return repo_root / "artifacts" / "tracks"
+
+
+def backends_config_path(repo_root: Path) -> Path:
+    return repo_root / "configs" / "orchestration" / "backends.toml"
 
 
 # --------------------------------------------------------------------------- #
@@ -180,7 +191,10 @@ def _add_tokens(acc: TokenTotals, other: TokenTotals) -> None:
     acc.reasoning += other.reasoning
 
 
-def _build_telemetry_summary(delegations, per_deleg_cost, campaign_report) -> TelemetrySummary:
+def _build_telemetry_summary(
+    delegations, per_deleg_cost, campaign_report,
+    subagents: Optional[SubagentSummary] = None,
+) -> TelemetrySummary:
     totals = TelemetryTotals()
     by_delegation: list[TelemetryByDelegation] = []
     tool_mix: list[ToolMixEntry] = []
@@ -247,6 +261,7 @@ def _build_telemetry_summary(delegations, per_deleg_cost, campaign_report) -> Te
         usage_by_model=usage_by_model,
         cost_usd=cost_doc.get("cost_usd"),
         cost_estimated=bool(cost_doc.get("cost_estimated")),
+        subagents=subagents or SubagentSummary(),
     )
 
 
@@ -297,6 +312,7 @@ def _build_index_entry(
     return IndexEntry(
         orch_id=orch_id,
         alias=alias,
+        kind=campaign.kind,
         dataset=campaign.dataset,
         target_mode=campaign.target_mode,
         status=campaign.status,
@@ -519,6 +535,263 @@ def _do_build(
     return index_entry
 
 
+# --------------------------------------------------------------------------- #
+# Solo-run build (spec §7.1–7.2)
+# --------------------------------------------------------------------------- #
+_SOLO_COPY_FILES = ("RESEARCH_LOG.md", "LLM_USAGE.md", "run_manifest.json")
+
+
+def discover_solo_runs(repo_root: Path) -> list[tuple[str, str, Path]]:
+    """Return ``(track, run_id, run_dir)`` for every solo track run.
+
+    A solo run is a ``artifacts/tracks/<track>/runs/<id>/`` whose
+    ``run_manifest.json`` has no ``orchestration_id`` (orchestration children and
+    playoff-consolidation runs carry one and belong to a campaign).
+    """
+    root = tracks_dir(repo_root)
+    if not root.is_dir():
+        return []
+    out: list[tuple[str, str, Path]] = []
+    for track_dir in sorted(root.iterdir()):
+        runs = track_dir / "runs"
+        if not track_dir.is_dir() or not runs.is_dir():
+            continue
+        for run_dir in sorted(runs.iterdir()):
+            # Skip old→new rename aliases and delegation compatibility links;
+            # a symlinked run belongs to whatever it points at, not here.
+            if run_dir.is_symlink():
+                continue
+            manifest_path = run_dir / "run_manifest.json"
+            if not run_dir.is_dir() or not manifest_path.exists():
+                continue
+            manifest = load_json(manifest_path, Warnings()) or {}
+            if not isinstance(manifest, dict):
+                continue
+            # Orchestration children and playoff-consolidation runs belong to a
+            # campaign — they carry an ``orchestration_id`` or a ``delegation_id``
+            # (a delegation manifest may omit the id but never the delegation),
+            # or are flagged ``consolidation``.
+            if (
+                manifest.get("orchestration_id")
+                or manifest.get("delegation_id")
+                or manifest.get("consolidation")
+            ):
+                continue
+            out.append((track_dir.name, run_dir.name, run_dir))
+    return out
+
+
+def _copy_solo_files(run_dir: Path, out_files_dir: Path, repo_root: Path,
+                     warnings: Warnings) -> list:
+    from .schema import FileEntry
+    manifest: list = []
+    for name in _SOLO_COPY_FILES:
+        src = run_dir / name
+        if not src.is_file():
+            continue
+        dst = out_files_dir / name
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(src.read_bytes())
+            try:
+                source_rel = src.relative_to(repo_root).as_posix()
+            except ValueError:
+                source_rel = str(src)
+            kind = "markdown" if name.endswith(".md") else "json"
+            manifest.append(FileEntry(path=name, kind=kind, bytes=dst.stat().st_size,
+                                      truncated=False, source=source_rel))
+        except OSError as exc:
+            warnings.add(f"failed to copy {name}: {exc}")
+    manifest.sort(key=lambda e: e.path)
+    return manifest
+
+
+def build_solo_run(
+    track: str,
+    run_id: str,
+    repo_root: Path,
+    *,
+    force: bool = False,
+    existing_index_entry: Optional[dict] = None,
+    aliases: Optional[dict] = None,
+    pricing_index: Optional[dict] = None,
+    log=print,
+) -> tuple[Optional[IndexEntry], bool]:
+    """Build one solo run's snapshot. Returns (index_entry, skipped)."""
+    run_dir = tracks_dir(repo_root) / track / "runs" / run_id
+    if not run_dir.is_dir():
+        raise FileNotFoundError(f"solo run not found: {run_dir}")
+
+    out_dir = snapshots_dir(repo_root) / run_id
+    source_mtime = _max_source_mtime(run_dir, None)
+    snapshot_json = out_dir / "snapshot.json"
+    if not force and snapshot_json.exists() and existing_index_entry is not None:
+        existing = load_json(snapshot_json, Warnings())
+        if isinstance(existing, dict):
+            prior = parse_ts(existing.get("build", {}).get("source_mtime"))
+            if prior is not None and source_mtime <= prior.timestamp() + 1e-6:
+                log(f"  skip {run_id} (unchanged, solo)")
+                return _index_entry_from_dict(existing_index_entry), True
+
+    warnings = Warnings()
+    tmp_dir = snapshots_dir(repo_root) / f"{run_id}.tmp"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        index_entry = _do_build_solo(
+            track, run_id, run_dir, tmp_dir, repo_root, source_mtime,
+            aliases or {}, pricing_index, warnings, log,
+        )
+        if out_dir.exists():
+            shutil.rmtree(out_dir)
+        tmp_dir.replace(out_dir)
+    except Exception:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+    return index_entry, False
+
+
+def _do_build_solo(
+    track, run_id, run_dir, out_dir, repo_root, source_mtime,
+    aliases, pricing_index, warnings, log,
+) -> IndexEntry:
+    manifest = solo_reader.load_manifest(run_dir, warnings)
+
+    files_dir = out_dir / "files"
+    files_dir.mkdir(parents=True, exist_ok=True)
+    files_manifest = _copy_solo_files(run_dir, files_dir, repo_root, warnings)
+
+    registry_path = run_dir / "registry.sqlite"
+    telemetry_path = run_dir / "telemetry.sqlite"
+
+    experiments = registry_reader.read_registry_experiments(
+        registry_path, run_dir, None, warnings
+    )
+    _assign_seq(experiments)
+    baseline_gini = _baseline_gini(experiments)
+    _fill_lift(experiments, baseline_gini)
+
+    gini_lookup = {e.experiment_id: e.metrics.gini_weighted for e in experiments}
+    seed_ids = {e.experiment_id for e in experiments if e.is_seed}
+    champion_timeline = _build_champion_timeline(
+        [(None, "principal", registry_path)], gini_lookup, seed_ids, warnings
+    )
+    champion_new_id = champion_timeline[-1].new_champion_id if champion_timeline else None
+    champion = solo_reader.solo_champion(experiments, champion_new_id)
+
+    if pricing_index is None:
+        pricing_index = load_pricing_index(backends_config_path(repo_root))
+    run_cost = compute_run_cost(telemetry_path, pricing_index=pricing_index)
+    telemetry_cost = telemetry_reader.read_telemetry_cost(telemetry_path, warnings)
+    telemetry_summary = solo_reader.build_solo_telemetry_summary(run_cost, telemetry_cost)
+
+    # Per-experiment usage checkpoints (same source as delegations).
+    usage_map = telemetry_reader.read_experiment_usage(
+        telemetry_path, run_dir / "LLM_USAGE.md", warnings
+    )
+    for exp in experiments:
+        exp.usage = usage_map.get(exp.name)
+
+    dt = telemetry_reader.read_delegation_telemetry(telemetry_path, "principal", warnings)
+    if dt is not None:
+        (out_dir / "telemetry_principal.json").write_text(
+            json.dumps(to_jsonable(dt), indent=1), encoding="utf-8"
+        )
+
+    ended_at = max((e.created_at for e in experiments if e.created_at), default=None,
+                   key=lambda a: ts_key(a) if a else "")
+    campaign = solo_reader.build_solo_campaign(run_id, manifest, ended_at, warnings)
+
+    try:
+        run_path = run_dir.relative_to(repo_root).as_posix()
+    except ValueError:
+        run_path = str(run_dir)
+    principal_run = solo_reader.build_principal_run(
+        run_id, track, run_path, manifest, run_cost, champion
+    )
+
+    snapshot = Snapshot(
+        snapshot_schema_version=SNAPSHOT_SCHEMA_VERSION,
+        build=BuildInfo(
+            built_at=_now_iso(),
+            source_mtime=_iso(source_mtime),
+            warnings=warnings.items,
+        ),
+        campaign=campaign,
+        delegations=[],
+        experiments=experiments,
+        champion_timeline=champion_timeline,
+        notes=[],
+        playoff=None,
+        telemetry_summary=telemetry_summary,
+        files=files_manifest,
+        principal_run=principal_run,
+    )
+    (out_dir / "snapshot.json").write_text(
+        json.dumps(to_jsonable(snapshot), indent=1), encoding="utf-8"
+    )
+
+    alias = (aliases or {}).get(run_id)
+    index_entry = _build_solo_index_entry(
+        run_id, campaign, experiments, champion, champion_timeline,
+        telemetry_summary, baseline_gini, alias,
+    )
+    log(f"  built {run_id} (solo): {len(experiments)} experiments, "
+        f"{len(warnings.items)} warnings")
+    return index_entry
+
+
+def _build_solo_index_entry(
+    run_id, campaign, experiments, champion, champion_timeline,
+    telemetry_summary, baseline_gini, alias,
+) -> IndexEntry:
+    tt = telemetry_summary.totals
+    total_tokens = TokenTotals(
+        input=tt.input, cached_input=tt.cached_input,
+        output=tt.output, reasoning=tt.reasoning,
+    )
+    cache_rate = total_tokens.cached_input / total_tokens.input if total_tokens.input else None
+
+    non_baseline = [e for e in experiments if not e.is_baseline and not e.is_seed]
+    decided = [e for e in non_baseline
+               if e.comparison is not None and e.comparison.decision is not None]
+    spark = [e.new_champion_gini for e in champion_timeline
+             if e.new_champion_gini is not None]
+
+    return IndexEntry(
+        orch_id=run_id,
+        alias=alias,
+        kind="solo",
+        dataset=campaign.dataset,
+        target_mode=campaign.target_mode,
+        status=campaign.status,
+        created_at=campaign.created_at,
+        ended_at=campaign.ended_at,
+        orchestrator_model=campaign.orchestrator_model,
+        orchestrator=campaign.orchestrator,
+        stale=False,
+        backends=[],
+        n_delegations=0,
+        cycles_committed=campaign.cycles_committed,
+        cycles_used=len(decided),
+        cycles_attempted=len(non_baseline),
+        seed_evals=sum(1 for e in champion_timeline if e.is_seed_transfer),
+        cycles_forfeited=0,
+        final_gini=champion.gini_weighted if champion is not None else None,
+        baseline_gini=baseline_gini,
+        total_tokens=total_tokens,
+        cache_hit_rate=cache_rate,
+        wall_clock_minutes=_wall_clock_minutes(campaign.created_at, campaign.ended_at),
+        distress_count=0,
+        takeover_count=0,
+        champion_spark=spark,
+        cost_usd=telemetry_summary.cost_usd,
+        cost_estimated=telemetry_summary.cost_estimated,
+    )
+
+
 def _max_ended_at(delegations) -> Optional[str]:
     candidates = [d.ended_at for d in delegations if d.ended_at]
     if not candidates:
@@ -560,6 +833,7 @@ def _index_entry_from_dict(d: dict) -> IndexEntry:
     return IndexEntry(
         orch_id=d.get("orch_id", ""),
         alias=d.get("alias"),
+        kind=d.get("kind") or "orchestrated",
         dataset=d.get("dataset", ""),
         target_mode=d.get("target_mode", ""),
         status=d.get("status", ""),
@@ -570,6 +844,9 @@ def _index_entry_from_dict(d: dict) -> IndexEntry:
             provider=orch.get("provider") or (legacy_model.split("/", 1)[0] if "/" in legacy_model else ""),
             model=orch.get("model") or (legacy_model.split("/", 1)[-1]),
             effort=orch.get("effort"),
+            source=orch.get("source"),
+            recorded_at=orch.get("recorded_at"),
+            revision=orch.get("revision", 0),
         ),
         stale=bool(d.get("stale")),
         backends=list(d.get("backends") or []),
@@ -613,6 +890,7 @@ def build(
     repo_root: Path,
     orch_ids: list[str],
     *,
+    solo_runs: Optional[list[tuple[str, str]]] = None,
     force: bool = False,
     log=print,
 ) -> SnapshotIndex:
@@ -633,6 +911,21 @@ def build(
         )
         if entry is not None:
             entries[orch_id] = entry
+
+    # Solo (non-orchestration) track runs share the unified league (spec §7).
+    pricing_index = None
+    for track, run_id in solo_runs or []:
+        log(f"building {run_id} (solo) …")
+        if pricing_index is None:
+            pricing_index = load_pricing_index(backends_config_path(repo_root))
+        entry, _skipped = build_solo_run(
+            track, run_id, repo_root, force=force,
+            existing_index_entry=existing_entries.get(run_id),
+            aliases=aliases, pricing_index=pricing_index, log=log,
+        )
+        if entry is not None:
+            entries[run_id] = entry
+
     _write_index(repo_root, entries)
     return SnapshotIndex(orchestrations=list(entries.values()), built_at=_now_iso())
 
@@ -643,7 +936,9 @@ def discover_orchestrations(repo_root: Path) -> list[str]:
         return []
     return sorted(
         p.name for p in root.iterdir()
-        if p.is_dir() and (p / "orchestration.json").exists()
+        # Skip old→new rename aliases (symlinks) so a migrated campaign is not
+        # ingested twice under both its old and new id.
+        if p.is_dir() and not p.is_symlink() and (p / "orchestration.json").exists()
     )
 
 
@@ -656,26 +951,38 @@ def main(argv: Optional[list[str]] = None) -> int:
         description="Build Flight Deck snapshots from artifacts/orchestrations/.",
     )
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--all", action="store_true", help="build every orchestration present")
+    group.add_argument("--all", action="store_true",
+                       help="build every orchestration and solo run present")
     group.add_argument("--orchestration", metavar="ID", help="build a single orchestration id")
+    group.add_argument("--solo", metavar="TRACK/ID",
+                       help="build a single solo run, e.g. codex/20260713T073805Z")
     parser.add_argument("--force", action="store_true", help="rebuild even if unchanged")
     parser.add_argument("--repo-root", type=Path, default=None, help="override repo root")
     args = parser.parse_args(argv)
 
     repo_root = args.repo_root.resolve() if args.repo_root else find_repo_root()
 
+    orch_ids: list[str] = []
+    solo_runs: list[tuple[str, str]] = []
     if args.all:
         orch_ids = discover_orchestrations(repo_root)
-        if not orch_ids:
-            print("no orchestrations found", file=sys.stderr)
+        solo_runs = [(track, run_id) for track, run_id, _ in discover_solo_runs(repo_root)]
+        if not orch_ids and not solo_runs:
+            print("no orchestrations or solo runs found", file=sys.stderr)
             return 0
     elif args.orchestration:
         orch_ids = [args.orchestration]
+    elif args.solo:
+        if "/" not in args.solo:
+            parser.error("--solo expects TRACK/ID, e.g. codex/20260713T073805Z")
+            return 2
+        track, run_id = args.solo.split("/", 1)
+        solo_runs = [(track, run_id)]
     else:
-        parser.error("specify --all or --orchestration <id>")
+        parser.error("specify --all, --orchestration <id>, or --solo <track/id>")
         return 2
 
-    build(repo_root, orch_ids, force=args.force)
+    build(repo_root, orch_ids, solo_runs=solo_runs, force=args.force)
     print(f"done — snapshots at {snapshots_dir(repo_root)}")
     return 0
 

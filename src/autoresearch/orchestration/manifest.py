@@ -21,13 +21,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from autoresearch.config import PROJECT_ROOT
+from autoresearch.config import PROJECT_ROOT, build_descriptor, parse_run_timestamp, run_slug
 from autoresearch.utils.io import read_json, write_json
 
 
 ORCHESTRATIONS_DIR = PROJECT_ROOT / "artifacts" / "orchestrations"
 
-ORCHESTRATION_ID_RE = re.compile(r"^\d{8}T\d{6}Z$")
+# Same shape as a run id: a sortable ``YYYYMMDDTHHMMSSZ`` prefix optionally
+# followed by ``__``-delimited lowercase-alnum descriptor segments.
+ORCHESTRATION_ID_RE = re.compile(r"^(?P<ts>\d{8}T\d{6}Z)(?:__[a-z0-9]+)*$")
 DELEGATION_ID_RE = re.compile(r"^d\d{2,}$")
 
 ORCHESTRATION_STATUSES = frozenset(
@@ -52,10 +54,21 @@ def utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def new_orchestration_id() -> str:
-    """Return a fresh ``YYYYMMDDTHHMMSSZ`` orchestration id (run-id convention)."""
+def new_orchestration_id(dataset: str | None = None, target: str | None = None) -> str:
+    """Return a fresh orchestration id (run-id convention).
 
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    When *dataset* and *target* are supplied, append the descriptive
+    ``__<datasetAbbr>__<targetAbbr>`` suffix (a creation-time known). The
+    timestamp prefix stays the sortable key.
+    """
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if dataset and target:
+        try:
+            return f"{stamp}__{run_slug(dataset, target)}"
+        except (FileNotFoundError, ValueError, KeyError):
+            return stamp
+    return stamp
 
 
 # ── records ──────────────────────────────────────────────────────────────────
@@ -71,6 +84,8 @@ class Delegation:
     track: str
     run_id: str
     cycle_budget: int
+    model_provider: str | None = None
+    model_name: str | None = None
     run_path: str | None = None
     status: str = "spawned"
     pid: int | None = None
@@ -139,6 +154,15 @@ class Delegation:
             "track": self.track,
             "run_id": self.run_id,
             "cycle_budget": self.cycle_budget,
+            "agent": (
+                {
+                    "provider": self.model_provider,
+                    "model": self.model_name,
+                    "source": "backend_registry_snapshot",
+                }
+                if self.model_provider or self.model_name
+                else None
+            ),
             "run_path": self.run_path,
             "status": self.status,
             "pid": self.pid,
@@ -173,6 +197,8 @@ class Delegation:
             track=str(raw["track"]),
             run_id=str(raw["run_id"]),
             cycle_budget=int(raw["cycle_budget"]),
+            model_provider=(raw.get("agent") or {}).get("provider") or raw.get("model_provider"),
+            model_name=(raw.get("agent") or {}).get("model") or raw.get("model_name"),
             run_path=raw.get("run_path"),
             status=str(raw.get("status", "spawned")),
             pid=(int(raw["pid"]) if raw.get("pid") is not None else None),
@@ -242,9 +268,17 @@ class Orchestration:
     model_provider: str | None = None
     model_name: str | None = None
     model_effort: str | None = None
+    orchestrator_identity_source: str | None = None
+    orchestrator_identity_recorded_at: str | None = None
+    orchestrator_identity_verified: bool = False
+    orchestrator_identity_history: tuple[dict[str, Any], ...] = ()
+    #: Orchestrator session(s) that own this campaign, memoized once resolved
+    #: from the run-scope files (``{"session_id", "surface"}`` entries).
+    orchestrator_sessions: tuple[dict[str, Any], ...] = ()
     delegations: tuple[Delegation, ...] = ()
     consolidation: Consolidation = Consolidation()
     campaign_report: str | None = None
+    descriptor: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not ORCHESTRATION_ID_RE.fullmatch(self.orchestration_id):
@@ -320,12 +354,23 @@ class Orchestration:
             "model_provider": self.model_provider,
             "model_name": self.model_name,
             "model_effort": self.model_effort,
-            "orchestrator": {"provider": self.model_provider, "model": self.model_name, "effort": self.model_effort},
+            "orchestrator": {
+                "provider": self.model_provider,
+                "model": self.model_name,
+                "effort": self.model_effort,
+                "source": self.orchestrator_identity_source,
+                "recorded_at": self.orchestrator_identity_recorded_at,
+                "identity_verified": self.orchestrator_identity_verified,
+                "revision": len(self.orchestrator_identity_history),
+            },
+            "orchestrator_identity_history": list(self.orchestrator_identity_history),
+            "orchestrator_sessions": [dict(s) for s in self.orchestrator_sessions],
             "total_cycle_budget": self.total_cycle_budget,
             "cycles_committed": self.cycles_committed,
             "delegations": [d.to_dict() for d in self.delegations],
             "consolidation": self.consolidation.to_dict(),
             "campaign_report": self.campaign_report,
+            "descriptor": dict(self.descriptor),
         }
 
     @classmethod
@@ -340,9 +385,19 @@ class Orchestration:
             model_provider=(raw.get("orchestrator") or {}).get("provider") or raw.get("model_provider"),
             model_name=(raw.get("orchestrator") or {}).get("model") or raw.get("model_name"),
             model_effort=(raw.get("orchestrator") or {}).get("effort") or raw.get("model_effort"),
+            orchestrator_identity_source=(raw.get("orchestrator") or {}).get("source"),
+            orchestrator_identity_recorded_at=(raw.get("orchestrator") or {}).get("recorded_at"),
+            orchestrator_identity_verified=bool(
+                (raw.get("orchestrator") or {}).get("identity_verified", False)
+            ),
+            orchestrator_identity_history=tuple(raw.get("orchestrator_identity_history") or ()),
+            orchestrator_sessions=tuple(
+                dict(s) for s in raw.get("orchestrator_sessions") or () if isinstance(s, dict)
+            ),
             delegations=tuple(Delegation.from_dict(d) for d in raw.get("delegations") or ()),
             consolidation=Consolidation.from_dict(raw.get("consolidation")),
             campaign_report=raw.get("campaign_report"),
+            descriptor=dict(raw.get("descriptor") or {}),
         )
 
 
@@ -393,6 +448,22 @@ def playoff_dir(orchestration_id: str) -> Path:
     return orchestration_dir(orchestration_id) / "playoff"
 
 
+def orchestrator_telemetry_dir(orchestration_id: str) -> Path:
+    """Directory holding the orchestrator session(s) imported telemetry.
+
+    ``sync_session`` writes a ``telemetry.sqlite`` under the run dir it is given,
+    so the orchestrator's imported usage lands at
+    ``<oid>/orchestrator_telemetry/telemetry.sqlite`` — a dedicated sibling DB
+    that never pollutes a child run's telemetry.
+    """
+
+    return orchestration_dir(orchestration_id) / "orchestrator_telemetry"
+
+
+def orchestrator_telemetry_path(orchestration_id: str) -> Path:
+    return orchestrator_telemetry_dir(orchestration_id) / "telemetry.sqlite"
+
+
 def log_markdown_path(orchestration_id: str) -> Path:
     return orchestration_dir(orchestration_id) / "ORCHESTRATION_LOG.md"
 
@@ -441,7 +512,7 @@ def create_orchestration(
 ) -> Orchestration:
     """Create the campaign folder skeleton and write the initial manifest."""
 
-    oid = orchestration_id or new_orchestration_id()
+    oid = orchestration_id or new_orchestration_id(dataset, target_mode)
     if manifest_path(oid).exists():
         raise FileExistsError(
             f"Orchestration {oid} already exists at {orchestration_dir(oid)}"
@@ -453,15 +524,42 @@ def create_orchestration(
     provider = str(model_provider).strip().lower() if model_provider else None
     model = str(model_name).strip().lower() if model_name else None
     effort = str(model_effort).strip().lower() if model_effort else None
+    created_at = utc_stamp()
+    identity = {"provider": provider, "model": model, "effort": effort}
+    history = (
+        ({
+            "action": "declared",
+            "at": created_at,
+            "source": "orchestrate_new_cli",
+            "identity": identity,
+        },)
+        if provider or model or effort
+        else ()
+    )
+    # Seed the descriptor from the declared identity hint (unverified until
+    # transcript resolution overwrites the principal model post-hoc, §5).
+    descriptor = build_descriptor(
+        run_id=oid,
+        dataset=dataset,
+        target=target_mode,
+        kind="orchestrated",
+        principal_model=model,
+        principal_effort=effort,
+        identity_verified=False,
+    )
     orch = Orchestration(
         orchestration_id=oid,
         dataset=dataset,
         target_mode=target_mode,
-        created_at=utc_stamp(),
+        created_at=created_at,
         total_cycle_budget=int(total_cycle_budget),
         model_provider=provider,
         model_name=model,
         model_effort=effort,
+        orchestrator_identity_source=("orchestrate_new_cli" if history else None),
+        orchestrator_identity_recorded_at=(created_at if history else None),
+        orchestrator_identity_history=history,
+        descriptor=descriptor,
     )
     save_orchestration(orch)
     return orch
@@ -489,11 +587,23 @@ def list_orchestration_ids() -> list[str]:
 
     if not ORCHESTRATIONS_DIR.exists():
         return []
-    return sorted(
+    names = [
         p.name
         for p in ORCHESTRATIONS_DIR.iterdir()
-        if p.is_dir() and (p / "orchestration.json").exists()
-    )
+        # A migrated campaign leaves an old→new symlink alias beside the real
+        # directory (spec §8); it is not a distinct orchestration.
+        if p.is_dir() and not p.is_symlink() and (p / "orchestration.json").exists()
+    ]
+
+    def _key(name: str) -> tuple[str, str]:
+        # Sort by the timestamp instant first so descriptive suffixes never
+        # reorder campaigns; fall back to the raw name for non-timestamp dirs.
+        try:
+            return (parse_run_timestamp(name), name)
+        except ValueError:
+            return (name, name)
+
+    return sorted(names, key=_key)
 
 
 def resolve_orchestration_id(orchestration_id: str | None) -> str:
@@ -526,6 +636,120 @@ def update_delegation(orch: Orchestration, updated: Delegation) -> Orchestration
             for d in orch.delegations
         ),
     )
+
+
+def correct_orchestrator_identity(
+    orch: Orchestration,
+    *,
+    model_provider: str,
+    model_name: str,
+    model_effort: str | None,
+    reason: str,
+    corrected_at: str | None = None,
+) -> Orchestration:
+    """Return *orch* with a corrected controller identity and audit event."""
+
+    provider = model_provider.strip().lower()
+    model = model_name.strip().lower()
+    effort = model_effort.strip().lower() if model_effort else None
+    rationale = reason.strip()
+    if not provider or not model:
+        raise ValueError("orchestrator provider and model must be non-empty")
+    if not rationale:
+        raise ValueError("an orchestrator identity correction requires a reason")
+    at = corrected_at or utc_stamp()
+    previous = {
+        "provider": orch.model_provider,
+        "model": orch.model_name,
+        "effort": orch.model_effort,
+    }
+    current = {"provider": provider, "model": model, "effort": effort}
+    event = {
+        "action": "corrected",
+        "at": at,
+        "source": "operator_correction",
+        "reason": rationale,
+        "previous_identity": previous,
+        "identity": current,
+    }
+    return replace(
+        orch,
+        model_provider=provider,
+        model_name=model,
+        model_effort=effort,
+        orchestrator_identity_source="operator_correction",
+        orchestrator_identity_recorded_at=at,
+        orchestrator_identity_verified=True,
+        orchestrator_identity_history=(*orch.orchestrator_identity_history, event),
+    )
+
+
+def resolve_orchestrator_identity_from_telemetry(
+    orch: Orchestration,
+    *,
+    model_provider: str,
+    model_name: str,
+    model_effort: str | None,
+    breakdown: list[dict[str, Any]] | None = None,
+    resolved_at: str | None = None,
+) -> Orchestration:
+    """Return *orch* with its controller identity resolved from the transcript.
+
+    This is the day-one source of truth (spec §5.1, D1): the headline model is
+    the highest-token model+effort observed in the campaign-window telemetry.
+    The declared hint is preserved in the audit trail; the descriptor is
+    refreshed and flagged verified.
+    """
+
+    provider = model_provider.strip().lower()
+    model = model_name.strip().lower()
+    effort = model_effort.strip().lower() if model_effort else None
+    if not provider or not model:
+        raise ValueError("resolved orchestrator provider and model must be non-empty")
+    at = resolved_at or utc_stamp()
+    previous = {
+        "provider": orch.model_provider,
+        "model": orch.model_name,
+        "effort": orch.model_effort,
+    }
+    current = {"provider": provider, "model": model, "effort": effort}
+    event: dict[str, Any] = {
+        "action": "resolved_from_transcript",
+        "at": at,
+        "source": "telemetry",
+        "previous_identity": previous,
+        "identity": current,
+    }
+    if breakdown:
+        event["breakdown"] = list(breakdown)
+    descriptor = build_descriptor(
+        run_id=orch.orchestration_id,
+        dataset=orch.dataset,
+        target=orch.target_mode,
+        kind="orchestrated",
+        principal_model=model,
+        principal_effort=effort,
+        identity_verified=True,
+    )
+    return replace(
+        orch,
+        model_provider=provider,
+        model_name=model,
+        model_effort=effort,
+        orchestrator_identity_source="telemetry",
+        orchestrator_identity_recorded_at=at,
+        orchestrator_identity_verified=True,
+        orchestrator_identity_history=(*orch.orchestrator_identity_history, event),
+        descriptor=descriptor,
+    )
+
+
+def set_orchestrator_sessions(
+    orch: Orchestration, sessions: list[dict[str, Any]]
+) -> Orchestration:
+    """Return *orch* with its memoized orchestrator session linkage replaced."""
+
+    return replace(orch, orchestrator_sessions=tuple(dict(s) for s in sessions))
 
 
 # ── locking ──────────────────────────────────────────────────────────────────
