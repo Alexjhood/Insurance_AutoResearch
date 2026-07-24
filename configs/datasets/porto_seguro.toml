@@ -2,6 +2,7 @@
 [dataset]
 name = "porto_seguro"
 display_name = "Porto Seguro Safe Driver"
+abbr = "porto"
 default_target_mode = "claim_incidence"
 
 [source]

@@ -4,6 +4,7 @@
 [dataset]
 name = "french_motor"
 display_name = "French Motor TPL (freMTPL2)"
+abbr = "fremtpl"
 default_target_mode = "burning_cost"
 
 [source]

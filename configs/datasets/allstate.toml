@@ -4,6 +4,7 @@
 [dataset]
 name = "allstate"
 display_name = "AllState Claim Prediction (2M household sample)"
+abbr = "allst"
 default_target_mode = "pure_premium"
 
 [source]

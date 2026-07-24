@@ -4,6 +4,7 @@
 [dataset]
 name = "allstate_full"
 display_name = "AllState Claim Prediction (full 13.2M rows)"
+abbr = "allstf"
 default_target_mode = "pure_premium"
 
 [source]
